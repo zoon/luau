@@ -19,7 +19,7 @@ struct CompileOptions
     // 0 - no optimization
     // 1 - baseline optimization level that doesn't prevent debuggability
     // 2 - includes optimizations that harm debuggability such as inlining
-    int optimizationLevel = 1;
+    int optimizationLevel = 2;
 
     // 0 - no debugging support
     // 1 - line info & function names only; sufficient for backtraces
@@ -32,8 +32,8 @@ struct CompileOptions
     int coverageLevel = 0;
 
     // global builtin to construct vectors; disabled by default
-    const char* vectorLib = nullptr;
-    const char* vectorCtor = nullptr;
+    const char* vectorLib = "Vector3";
+    const char* vectorCtor = "new";
 
     // null-terminated array of globals that are mutable; disables the import optimization for fields accessed through these
     const char** mutableGlobals = nullptr;
