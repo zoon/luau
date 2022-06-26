@@ -8,3 +8,5 @@
 /default.prof*
 /fuzz-*
 /luau
+/cmake
+
