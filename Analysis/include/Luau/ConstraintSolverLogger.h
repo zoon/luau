@@ -1,6 +1,8 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 
-#include "Luau/ConstraintGraphBuilder.h"
+#include "Luau/Constraint.h"
+#include "Luau/NotNull.h"
+#include "Luau/Scope.h"
 #include "Luau/ToString.h"
 
 #include <optional>
@@ -13,8 +15,8 @@ namespace Luau
 struct ConstraintSolverLogger
 {
     std::string compileOutput();
-    void captureBoundarySnapshot(const Scope2* rootScope, std::vector<NotNull<const Constraint>>& unsolvedConstraints);
-    void prepareStepSnapshot(const Scope2* rootScope, NotNull<const Constraint> current, std::vector<NotNull<const Constraint>>& unsolvedConstraints);
+    void captureBoundarySnapshot(const Scope* rootScope, std::vector<NotNull<const Constraint>>& unsolvedConstraints);
+    void prepareStepSnapshot(const Scope* rootScope, NotNull<const Constraint> current, std::vector<NotNull<const Constraint>>& unsolvedConstraints);
     void commitPreparedStepSnapshot();
 
 private:

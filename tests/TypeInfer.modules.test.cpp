@@ -12,7 +12,7 @@
 
 using namespace Luau;
 
-LUAU_FASTFLAG(LuauTableSubtypingVariance2)
+LUAU_FASTFLAG(LuauSpecialTypesAsterisked)
 
 TEST_SUITE_BEGIN("TypeInferModules");
 
@@ -145,7 +145,10 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "require_module_that_does_not_export")
 
     auto hootyType = requireType(bModule, "Hooty");
 
-    CHECK_EQ("*unknown*", toString(hootyType));
+    if (FFlag::LuauSpecialTypesAsterisked)
+        CHECK_EQ("*error-type*", toString(hootyType));
+    else
+        CHECK_EQ("<error-type>", toString(hootyType));
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "warn_if_you_try_to_require_a_non_modulescript")
@@ -246,7 +249,11 @@ local ModuleA = require(game.A)
     LUAU_REQUIRE_NO_ERRORS(result);
 
     std::optional<TypeId> oty = requireType("ModuleA");
-    CHECK_EQ("*unknown*", toString(*oty));
+
+    if (FFlag::LuauSpecialTypesAsterisked)
+        CHECK_EQ("*error-type*", toString(*oty));
+    else
+        CHECK_EQ("<error-type>", toString(*oty));
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "do_not_modify_imported_types")
@@ -304,6 +311,30 @@ type Rename = typeof(x.x)
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
+TEST_CASE_FIXTURE(BuiltinsFixture, "do_not_modify_imported_types_4")
+{
+    fileResolver.source["game/A"] = R"(
+export type Array<T> = {T}
+local arrayops = {}
+function arrayops.foo(x: Array<any>) end
+return arrayops
+    )";
+
+    CheckResult result = check(R"(
+local arrayops = require(game.A)
+
+local tbl = {}
+tbl.a = 2
+function tbl:foo(b: number, c: number)
+    -- introduce BoundTypeVar to imported type
+    arrayops.foo(self._regions)
+end
+type Table = typeof(tbl)
+)");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
 TEST_CASE_FIXTURE(BuiltinsFixture, "module_type_conflict")
 {
     fileResolver.source["game/A"] = R"(
@@ -326,16 +357,9 @@ local b: B.T = a
     CheckResult result = frontend.check("game/C");
     LUAU_REQUIRE_ERROR_COUNT(1, result);
 
-    if (FFlag::LuauTableSubtypingVariance2)
-    {
-        CHECK_EQ(toString(result.errors[0]), R"(Type 'T' from 'game/A' could not be converted into 'T' from 'game/B'
+    CHECK_EQ(toString(result.errors[0]), R"(Type 'T' from 'game/A' could not be converted into 'T' from 'game/B'
 caused by:
   Property 'x' is not compatible. Type 'number' could not be converted into 'string')");
-    }
-    else
-    {
-        CHECK_EQ(toString(result.errors[0]), "Type 'T' from 'game/A' could not be converted into 'T' from 'game/B'");
-    }
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "module_type_conflict_instantiated")
@@ -367,16 +391,26 @@ local b: B.T = a
     CheckResult result = frontend.check("game/D");
     LUAU_REQUIRE_ERROR_COUNT(1, result);
 
-    if (FFlag::LuauTableSubtypingVariance2)
-    {
-        CHECK_EQ(toString(result.errors[0]), R"(Type 'T' from 'game/B' could not be converted into 'T' from 'game/C'
+    CHECK_EQ(toString(result.errors[0]), R"(Type 'T' from 'game/B' could not be converted into 'T' from 'game/C'
 caused by:
   Property 'x' is not compatible. Type 'number' could not be converted into 'string')");
-    }
-    else
-    {
-        CHECK_EQ(toString(result.errors[0]), "Type 'T' from 'game/B' could not be converted into 'T' from 'game/C'");
-    }
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "constrained_anyification_clone_immutable_types")
+{
+    ScopedFastFlag luauAnyificationMustClone{"LuauAnyificationMustClone", true};
+
+    fileResolver.source["game/A"] = R"(
+return function(...) end
+    )";
+
+    fileResolver.source["game/B"] = R"(
+local l0 = require(game.A)
+return l0
+    )";
+
+    CheckResult result = frontend.check("game/B");
+    LUAU_REQUIRE_NO_ERRORS(result);
 }
 
 TEST_SUITE_END();

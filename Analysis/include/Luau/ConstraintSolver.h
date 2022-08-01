@@ -25,7 +25,7 @@ struct ConstraintSolver
     // is important to not add elements to this vector, lest the underlying
     // storage that we retain pointers to be mutated underneath us.
     const std::vector<NotNull<Constraint>> constraints;
-    Scope2* rootScope;
+    NotNull<Scope> rootScope;
 
     // This includes every constraint that has not been fully solved.
     // A constraint can be both blocked and unsolved, for instance.
@@ -40,7 +40,7 @@ struct ConstraintSolver
 
     ConstraintSolverLogger logger;
 
-    explicit ConstraintSolver(TypeArena* arena, Scope2* rootScope);
+    explicit ConstraintSolver(TypeArena* arena, NotNull<Scope> rootScope);
 
     /**
      * Attempts to dispatch all pending constraints and reach a type solution
@@ -50,11 +50,18 @@ struct ConstraintSolver
 
     bool done();
 
+    /** Attempt to dispatch a constraint.  Returns true if it was successful.
+     * If tryDispatch() returns false, the constraint remains in the unsolved set and will be retried later.
+     */
     bool tryDispatch(NotNull<const Constraint> c, bool force);
+
     bool tryDispatch(const SubtypeConstraint& c, NotNull<const Constraint> constraint, bool force);
     bool tryDispatch(const PackSubtypeConstraint& c, NotNull<const Constraint> constraint, bool force);
     bool tryDispatch(const GeneralizationConstraint& c, NotNull<const Constraint> constraint, bool force);
     bool tryDispatch(const InstantiationConstraint& c, NotNull<const Constraint> constraint, bool force);
+    bool tryDispatch(const UnaryConstraint& c, NotNull<const Constraint> constraint, bool force);
+    bool tryDispatch(const BinaryConstraint& c, NotNull<const Constraint> constraint, bool force);
+    bool tryDispatch(const NameConstraint& c, NotNull<const Constraint> constraint);
 
     void block(NotNull<const Constraint> target, NotNull<const Constraint> constraint);
     /**
@@ -85,7 +92,7 @@ struct ConstraintSolver
      * @param subType the sub-type to unify.
      * @param superType the super-type to unify.
      */
-    void unify(TypeId subType, TypeId superType, Location location);
+    void unify(TypeId subType, TypeId superType);
 
     /**
      * Creates a new Unifier and performs a single unification operation. Commits
@@ -93,7 +100,7 @@ struct ConstraintSolver
      * @param subPack the sub-type pack to unify.
      * @param superPack the super-type pack to unify.
      */
-    void unify(TypePackId subPack, TypePackId superPack, Location location);
+    void unify(TypePackId subPack, TypePackId superPack);
 
 private:
     /**
@@ -114,6 +121,6 @@ private:
     void unblock_(BlockedConstraintId progressed);
 };
 
-void dump(Scope2* rootScope, struct ToStringOptions& opts);
+void dump(NotNull<Scope> rootScope, struct ToStringOptions& opts);
 
 } // namespace Luau

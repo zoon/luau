@@ -9,6 +9,9 @@
 namespace Luau
 {
 
+static_assert(LBC_VERSION_TARGET >= LBC_VERSION_MIN && LBC_VERSION_TARGET <= LBC_VERSION_MAX, "Invalid bytecode version setup");
+static_assert(LBC_VERSION_MAX <= 127, "Bytecode version should be 7-bit so that we can extend the serialization to use varint transparently");
+
 static const uint32_t kMaxConstantCount = 1 << 23;
 static const uint32_t kMaxClosureCount = 1 << 15;
 
@@ -117,6 +120,17 @@ inline bool isSkipC(LuauOpcode op)
     switch (op)
     {
     case LOP_LOADB:
+        return true;
+
+    default:
+        return false;
+    }
+}
+
+inline bool isFastCall(LuauOpcode op)
+{
+    switch (op)
+    {
     case LOP_FASTCALL:
     case LOP_FASTCALL1:
     case LOP_FASTCALL2:
@@ -134,6 +148,8 @@ static int getJumpTarget(uint32_t insn, uint32_t pc)
 
     if (isJumpD(op))
         return int(pc + LUAU_INSN_D(insn) + 1);
+    else if (isFastCall(op))
+        return int(pc + LUAU_INSN_C(insn) + 2);
     else if (isSkipC(op) && LUAU_INSN_C(insn))
         return int(pc + LUAU_INSN_C(insn) + 1);
     else if (op == LOP_JUMPX)
@@ -476,7 +492,7 @@ bool BytecodeBuilder::patchSkipC(size_t jumpLabel, size_t targetLabel)
     unsigned int jumpInsn = insns[jumpLabel];
     (void)jumpInsn;
 
-    LUAU_ASSERT(isSkipC(LuauOpcode(LUAU_INSN_OP(jumpInsn))));
+    LUAU_ASSERT(isSkipC(LuauOpcode(LUAU_INSN_OP(jumpInsn))) || isFastCall(LuauOpcode(LUAU_INSN_OP(jumpInsn))));
     LUAU_ASSERT(LUAU_INSN_C(jumpInsn) == 0);
 
     int offset = int(targetLabel) - int(jumpLabel) - 1;
@@ -572,7 +588,10 @@ void BytecodeBuilder::finalize()
     bytecode.reserve(capacity);
 
     // assemble final bytecode blob
-    bytecode = char(LBC_VERSION);
+    uint8_t version = getVersion();
+    LUAU_ASSERT(version >= LBC_VERSION_MIN && version <= LBC_VERSION_MAX);
+
+    bytecode = char(version);
 
     writeStringTable(bytecode);
 
@@ -1040,12 +1059,18 @@ void BytecodeBuilder::expandJumps()
 
 std::string BytecodeBuilder::getError(const std::string& message)
 {
-    // 0 acts as a special marker for error bytecode (it's equal to LBC_VERSION for valid bytecode blobs)
+    // 0 acts as a special marker for error bytecode (it's equal to LBC_VERSION_TARGET for valid bytecode blobs)
     std::string result;
     result += char(0);
     result += message;
 
     return result;
+}
+
+uint8_t BytecodeBuilder::getVersion()
+{
+    // This function usually returns LBC_VERSION_TARGET but may sometimes return a higher number (within LBC_VERSION_MIN/MAX) under fast flags
+    return LBC_VERSION_TARGET;
 }
 
 #ifdef LUAU_ASSERTENABLED
@@ -1290,20 +1315,22 @@ void BytecodeBuilder::validate() const
 
         case LOP_FORNPREP:
         case LOP_FORNLOOP:
-            VREG(LUAU_INSN_A(insn) + 2); // for loop protocol: A, A+1, A+2 are used for iteration
+            // for loop protocol: A, A+1, A+2 are used for iteration
+            VREG(LUAU_INSN_A(insn) + 2);
             VJUMP(LUAU_INSN_D(insn));
             break;
 
         case LOP_FORGPREP:
-            VREG(LUAU_INSN_A(insn) + 2 + 1); // forg loop protocol: A, A+1, A+2 are used for iteration protocol; A+3, ... are loop variables
+            // forg loop protocol: A, A+1, A+2 are used for iteration protocol; A+3, ... are loop variables
+            VREG(LUAU_INSN_A(insn) + 2 + 1);
             VJUMP(LUAU_INSN_D(insn));
             break;
 
         case LOP_FORGLOOP:
-            VREG(
-                LUAU_INSN_A(insn) + 2 + insns[i + 1]); // forg loop protocol: A, A+1, A+2 are used for iteration protocol; A+3, ... are loop variables
+            // forg loop protocol: A, A+1, A+2 are used for iteration protocol; A+3, ... are loop variables
+            VREG(LUAU_INSN_A(insn) + 2 + uint8_t(insns[i + 1]));
             VJUMP(LUAU_INSN_D(insn));
-            LUAU_ASSERT(insns[i + 1] >= 1);
+            LUAU_ASSERT(uint8_t(insns[i + 1]) >= 1);
             break;
 
         case LOP_FORGPREP_INEXT:
@@ -1667,7 +1694,8 @@ void BytecodeBuilder::dumpInstruction(const uint32_t* code, std::string& result,
         break;
 
     case LOP_FORGLOOP:
-        formatAppend(result, "FORGLOOP R%d L%d %d\n", LUAU_INSN_A(insn), targetLabel, *code++);
+        formatAppend(result, "FORGLOOP R%d L%d %d%s\n", LUAU_INSN_A(insn), targetLabel, uint8_t(*code), int(*code) < 0 ? " [inext]" : "");
+        code++;
         break;
 
     case LOP_FORGPREP_INEXT:

@@ -44,9 +44,6 @@ static_assert(TKey{{NULL}, {0}, LUA_TDEADKEY, 0}.tt == LUA_TDEADKEY, "not enough
 static_assert(TKey{{NULL}, {0}, LUA_TNIL, MAXSIZE - 1}.next == MAXSIZE - 1, "not enough bits for next");
 static_assert(TKey{{NULL}, {0}, LUA_TNIL, -(MAXSIZE - 1)}.next == -(MAXSIZE - 1), "not enough bits for next");
 
-// reset cache of absent metamethods, cache is updated in luaT_gettm
-#define invalidateTMcache(t) t->tmcache = 0
-
 // empty hash data points to dummynode so that we can always dereference it
 const LuaNode luaH_dummynode = {
     {{NULL}, {0}, LUA_TNIL},   /* value */
@@ -108,9 +105,9 @@ static LuaNode* hashvec(const Table* t, const float* v)
     memcpy(i, v, sizeof(i));
 
     // convert -0 to 0 to make sure they hash to the same value
-    i[0] = (i[0] == 0x8000000) ? 0 : i[0];
-    i[1] = (i[1] == 0x8000000) ? 0 : i[1];
-    i[2] = (i[2] == 0x8000000) ? 0 : i[2];
+    i[0] = (i[0] == 0x80000000) ? 0 : i[0];
+    i[1] = (i[1] == 0x80000000) ? 0 : i[1];
+    i[2] = (i[2] == 0x80000000) ? 0 : i[2];
 
     // scramble bits to make sure that integer coordinates have entropy in lower bits
     i[0] ^= i[0] >> 17;
@@ -121,7 +118,7 @@ static LuaNode* hashvec(const Table* t, const float* v)
     unsigned int h = (i[0] * 73856093) ^ (i[1] * 19349663) ^ (i[2] * 83492791);
 
 #if LUA_VECTOR_SIZE == 4
-    i[3] = (i[3] == 0x8000000) ? 0 : i[3];
+    i[3] = (i[3] == 0x80000000) ? 0 : i[3];
     i[3] ^= i[3] >> 17;
     h ^= i[3] * 39916801;
 #endif
@@ -667,15 +664,18 @@ TValue* luaH_set(lua_State* L, Table* t, const TValue* key)
     if (p != luaO_nilobject)
         return cast_to(TValue*, p);
     else
-    {
-        if (ttisnil(key))
-            luaG_runerror(L, "table index is nil");
-        else if (ttisnumber(key) && luai_numisnan(nvalue(key)))
-            luaG_runerror(L, "table index is NaN");
-        else if (ttisvector(key) && luai_vecisnan(vvalue(key)))
-            luaG_runerror(L, "table index contains NaN");
-        return newkey(L, t, key);
-    }
+        return luaH_newkey(L, t, key);
+}
+
+TValue* luaH_newkey(lua_State* L, Table* t, const TValue* key)
+{
+    if (ttisnil(key))
+        luaG_runerror(L, "table index is nil");
+    else if (ttisnumber(key) && luai_numisnan(nvalue(key)))
+        luaG_runerror(L, "table index is NaN");
+    else if (ttisvector(key) && luai_vecisnan(vvalue(key)))
+        luaG_runerror(L, "table index contains NaN");
+    return newkey(L, t, key);
 }
 
 TValue* luaH_setnum(lua_State* L, Table* t, int key)

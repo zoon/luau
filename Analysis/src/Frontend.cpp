@@ -496,6 +496,8 @@ CheckResult Frontend::check(const ModuleName& name, std::optional<FrontendOption
             module->astTypes.clear();
             module->astExpectedTypes.clear();
             module->astOriginalCallTypes.clear();
+            module->astResolvedTypes.clear();
+            module->astResolvedTypePacks.clear();
             module->scopes.resize(1);
         }
 
@@ -660,29 +662,6 @@ LintResult Frontend::lint(const ModuleName& name, std::optional<Luau::LintOption
     return lint(*sourceModule, enabledLintWarnings);
 }
 
-std::pair<SourceModule, LintResult> Frontend::lintFragment(std::string_view source, std::optional<Luau::LintOptions> enabledLintWarnings)
-{
-    LUAU_TIMETRACE_SCOPE("Frontend::lintFragment", "Frontend");
-
-    const Config& config = configResolver->getConfig("");
-
-    SourceModule sourceModule = parse(ModuleName{}, source, config.parseOptions);
-
-    uint64_t ignoreLints = LintWarning::parseMask(sourceModule.hotcomments);
-
-    Luau::LintOptions lintOptions = enabledLintWarnings.value_or(config.enabledLint);
-    lintOptions.warningMask &= ~ignoreLints;
-
-    double timestamp = getTimestamp();
-
-    std::vector<LintWarning> warnings = Luau::lint(sourceModule.root, *sourceModule.names.get(), typeChecker.globalScope, nullptr,
-        sourceModule.hotcomments, enabledLintWarnings.value_or(config.enabledLint));
-
-    stats.timeLint += getTimestamp() - timestamp;
-
-    return {std::move(sourceModule), classifyLints(warnings, config)};
-}
-
 LintResult Frontend::lint(const SourceModule& module, std::optional<Luau::LintOptions> enabledLintWarnings)
 {
     LUAU_TIMETRACE_SCOPE("Frontend::lint", "Frontend");
@@ -787,20 +766,40 @@ const SourceModule* Frontend::getSourceModule(const ModuleName& moduleName) cons
     return const_cast<Frontend*>(this)->getSourceModule(moduleName);
 }
 
+NotNull<Scope> Frontend::getGlobalScope()
+{
+    if (!globalScope)
+    {
+        const SingletonTypes& singletonTypes = getSingletonTypes();
+
+        globalScope = std::make_unique<Scope>(singletonTypes.anyTypePack);
+        globalScope->typeBindings["nil"] = singletonTypes.nilType;
+        globalScope->typeBindings["number"] = singletonTypes.numberType;
+        globalScope->typeBindings["string"] = singletonTypes.stringType;
+        globalScope->typeBindings["boolean"] = singletonTypes.booleanType;
+        globalScope->typeBindings["thread"] = singletonTypes.threadType;
+    }
+
+    return NotNull(globalScope.get());
+}
+
 ModulePtr Frontend::check(const SourceModule& sourceModule, Mode mode, const ScopePtr& environmentScope)
 {
     ModulePtr result = std::make_shared<Module>();
 
-    ConstraintGraphBuilder cgb{&result->internalTypes};
+    ConstraintGraphBuilder cgb{sourceModule.name, &result->internalTypes, NotNull(&iceHandler), getGlobalScope()};
     cgb.visit(sourceModule.root);
+    result->errors = std::move(cgb.errors);
 
-    ConstraintSolver cs{&result->internalTypes, cgb.rootScope};
+    ConstraintSolver cs{&result->internalTypes, NotNull(cgb.rootScope)};
     cs.run();
 
-    result->scope2s = std::move(cgb.scopes);
+    result->scopes = std::move(cgb.scopes);
     result->astTypes = std::move(cgb.astTypes);
     result->astTypePacks = std::move(cgb.astTypePacks);
     result->astOriginalCallTypes = std::move(cgb.astOriginalCallTypes);
+    result->astResolvedTypes = std::move(cgb.astResolvedTypes);
+    result->astResolvedTypePacks = std::move(cgb.astResolvedTypePacks);
 
     result->clonePublicInterface(iceHandler);
 
@@ -936,7 +935,7 @@ std::optional<ModuleInfo> FrontendModuleResolver::resolveModuleInfo(const Module
     {
         // CLI-43699
         // If we can't find the current module name, that's because we bypassed the frontend's initializer
-        // and called typeChecker.check directly. (This is done by autocompleteSource, for example).
+        // and called typeChecker.check directly.
         // In that case, requires will always fail.
         return std::nullopt;
     }

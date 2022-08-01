@@ -118,9 +118,11 @@ assert((function() return #_G end)() == 0)
 assert((function() return #{1,2} end)() == 2)
 assert((function() return #'g' end)() == 1)
 
-assert((function() local ud = newproxy(true) getmetatable(ud).__len = function() return 42 end return #ud end)() == 42)
-
 assert((function() local a = 1 a = -a return a end)() == -1)
+
+-- __len metamethod
+assert((function() local ud = newproxy(true) getmetatable(ud).__len = function() return 42 end return #ud end)() == 42)
+assert((function() local t = {} setmetatable(t, { __len = function() return 42 end }) return #t end)() == 42)
 
 -- while/repeat
 assert((function() local a = 10 local b = 1 while a > 1 do b = b * 2 a = a - 1 end return b end)() == 512)
@@ -725,16 +727,20 @@ assert((function() local abs = math.abs function foo(...) return abs(...) end re
 -- NOTE: getfenv breaks fastcalls for the remainder of the source! hence why this is delayed until the end
 function testgetfenv()
     getfenv()
+
+    -- declare constant so that at O2 this test doesn't interfere with constant folding which we can't deoptimize
+    local negfive negfive = -5
+
     -- getfenv breaks fastcalls (we assume we can't rely on knowing the semantics), but behavior shouldn't change
-    assert((function() return math.abs(-5) end)() == 5)
-    assert((function() local abs = math.abs return abs(-5) end)() == 5)
-    assert((function() local abs = math.abs function foo() return abs(-5) end return foo() end)() == 5)
+    assert((function() return math.abs(negfive) end)() == 5)
+    assert((function() local abs = math.abs return abs(negfive) end)() == 5)
+    assert((function() local abs = math.abs function foo() return abs(negfive) end return foo() end)() == 5)
 
     -- ... unless you actually reassign the function :D
     getfenv().math = { abs = function(n) return n*n end }
-    assert((function() return math.abs(-5) end)() == 25)
-    assert((function() local abs = math.abs return abs(-5) end)() == 25)
-    assert((function() local abs = math.abs function foo() return abs(-5) end return foo() end)() == 25)
+    assert((function() return math.abs(negfive) end)() == 25)
+    assert((function() local abs = math.abs return abs(negfive) end)() == 25)
+    assert((function() local abs = math.abs function foo() return abs(negfive) end return foo() end)() == 25)
 end
 
 -- you need to have enough arguments and arguments of the right type; if you don't, we'll fallback to the regular code. This checks coercions
@@ -888,6 +894,10 @@ assert((function()
 
     return table.concat(res, ',')
 end)() == "6,8,10")
+
+-- typeof and type require an argument
+assert(pcall(typeof) == false)
+assert(pcall(type) == false)
 
 -- typeof == type in absence of custom userdata
 assert(concat(typeof(5), typeof(nil), typeof({}), typeof(newproxy())) == "number,nil,table,userdata")

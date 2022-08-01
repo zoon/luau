@@ -11,6 +11,8 @@
 #include <stdexcept>
 
 LUAU_FASTFLAG(LuauLowerBoundsCalculation)
+LUAU_FASTFLAG(LuauUnknownAndNeverType)
+LUAU_FASTFLAGVARIABLE(LuauSpecialTypesAsterisked, false)
 
 /*
  * Prefix generic typenames with gen-
@@ -18,7 +20,6 @@ LUAU_FASTFLAG(LuauLowerBoundsCalculation)
  * Fair warning: Setting this will break a lot of Luau unit tests.
  */
 LUAU_FASTFLAGVARIABLE(DebugLuauVerboseTypeNames, false)
-LUAU_FASTFLAGVARIABLE(LuauToStringTableBracesNewlines, false)
 
 namespace Luau
 {
@@ -277,7 +278,10 @@ struct TypeVarStringifier
         if (tv->ty.valueless_by_exception())
         {
             state.result.error = true;
-            state.emit("< VALUELESS BY EXCEPTION >");
+            if (FFlag::LuauSpecialTypesAsterisked)
+                state.emit("* VALUELESS BY EXCEPTION *");
+            else
+                state.emit("< VALUELESS BY EXCEPTION >");
             return;
         }
 
@@ -453,7 +457,10 @@ struct TypeVarStringifier
         if (state.hasSeen(&ftv))
         {
             state.result.cycle = true;
-            state.emit("<CYCLE>");
+            if (FFlag::LuauSpecialTypesAsterisked)
+                state.emit("*CYCLE*");
+            else
+                state.emit("<CYCLE>");
             return;
         }
 
@@ -561,7 +568,10 @@ struct TypeVarStringifier
         if (state.hasSeen(&ttv))
         {
             state.result.cycle = true;
-            state.emit("<CYCLE>");
+            if (FFlag::LuauSpecialTypesAsterisked)
+                state.emit("*CYCLE*");
+            else
+                state.emit("<CYCLE>");
             return;
         }
 
@@ -571,54 +581,22 @@ struct TypeVarStringifier
         {
         case TableState::Sealed:
             state.result.invalid = true;
-            if (FFlag::LuauToStringTableBracesNewlines)
-            {
-                openbrace = "{|";
-                closedbrace = "|}";
-            }
-            else
-            {
-                openbrace = "{| ";
-                closedbrace = " |}";
-            }
+            openbrace = "{|";
+            closedbrace = "|}";
             break;
         case TableState::Unsealed:
-            if (FFlag::LuauToStringTableBracesNewlines)
-            {
-                openbrace = "{";
-                closedbrace = "}";
-            }
-            else
-            {
-                openbrace = "{ ";
-                closedbrace = " }";
-            }
+            openbrace = "{";
+            closedbrace = "}";
             break;
         case TableState::Free:
             state.result.invalid = true;
-            if (FFlag::LuauToStringTableBracesNewlines)
-            {
-                openbrace = "{-";
-                closedbrace = "-}";
-            }
-            else
-            {
-                openbrace = "{- ";
-                closedbrace = " -}";
-            }
+            openbrace = "{-";
+            closedbrace = "-}";
             break;
         case TableState::Generic:
             state.result.invalid = true;
-            if (FFlag::LuauToStringTableBracesNewlines)
-            {
-                openbrace = "{+";
-                closedbrace = "+}";
-            }
-            else
-            {
-                openbrace = "{+ ";
-                closedbrace = " +}";
-            }
+            openbrace = "{+";
+            closedbrace = "+}";
             break;
         }
 
@@ -637,8 +615,7 @@ struct TypeVarStringifier
         bool comma = false;
         if (ttv.indexer)
         {
-            if (FFlag::LuauToStringTableBracesNewlines)
-                state.newline();
+            state.newline();
             state.emit("[");
             stringify(ttv.indexer->indexType);
             state.emit("]: ");
@@ -655,10 +632,8 @@ struct TypeVarStringifier
                 state.emit(",");
                 state.newline();
             }
-            else if (FFlag::LuauToStringTableBracesNewlines)
-            {
+            else
                 state.newline();
-            }
 
             size_t length = state.result.name.length() - oldLength;
 
@@ -685,13 +660,10 @@ struct TypeVarStringifier
         }
 
         state.dedent();
-        if (FFlag::LuauToStringTableBracesNewlines)
-        {
-            if (comma)
-                state.newline();
-            else
-                state.emit("  ");
-        }
+        if (comma)
+            state.newline();
+        else
+            state.emit("  ");
         state.emit(closedbrace);
 
         state.unsee(&ttv);
@@ -700,6 +672,12 @@ struct TypeVarStringifier
     void operator()(TypeId, const MetatableTypeVar& mtv)
     {
         state.result.invalid = true;
+        if (!state.exhaustive && mtv.syntheticName)
+        {
+            state.emit(*mtv.syntheticName);
+            return;
+        }
+
         state.emit("{ @metatable ");
         stringify(mtv.metatable);
         state.emit(",");
@@ -723,7 +701,10 @@ struct TypeVarStringifier
         if (state.hasSeen(&uv))
         {
             state.result.cycle = true;
-            state.emit("<CYCLE>");
+            if (FFlag::LuauSpecialTypesAsterisked)
+                state.emit("*CYCLE*");
+            else
+                state.emit("<CYCLE>");
             return;
         }
 
@@ -790,7 +771,10 @@ struct TypeVarStringifier
         if (state.hasSeen(&uv))
         {
             state.result.cycle = true;
-            state.emit("<CYCLE>");
+            if (FFlag::LuauSpecialTypesAsterisked)
+                state.emit("*CYCLE*");
+            else
+                state.emit("<CYCLE>");
             return;
         }
 
@@ -835,7 +819,10 @@ struct TypeVarStringifier
     void operator()(TypeId, const ErrorTypeVar& tv)
     {
         state.result.error = true;
-        state.emit("*unknown*");
+        if (FFlag::LuauSpecialTypesAsterisked)
+            state.emit(FFlag::LuauUnknownAndNeverType ? "*error-type*" : "*unknown*");
+        else
+            state.emit(FFlag::LuauUnknownAndNeverType ? "<error-type>" : "*unknown*");
     }
 
     void operator()(TypeId, const LazyTypeVar& ltv)
@@ -844,7 +831,16 @@ struct TypeVarStringifier
         state.emit("lazy?");
     }
 
-}; // namespace
+    void operator()(TypeId, const UnknownTypeVar& ttv)
+    {
+        state.emit("unknown");
+    }
+
+    void operator()(TypeId, const NeverTypeVar& ttv)
+    {
+        state.emit("never");
+    }
+};
 
 struct TypePackStringifier
 {
@@ -880,7 +876,10 @@ struct TypePackStringifier
         if (tp->ty.valueless_by_exception())
         {
             state.result.error = true;
-            state.emit("< VALUELESS TP BY EXCEPTION >");
+            if (FFlag::LuauSpecialTypesAsterisked)
+                state.emit("* VALUELESS TP BY EXCEPTION *");
+            else
+                state.emit("< VALUELESS TP BY EXCEPTION >");
             return;
         }
 
@@ -904,7 +903,10 @@ struct TypePackStringifier
         if (state.hasSeen(&tp))
         {
             state.result.cycle = true;
-            state.emit("<CYCLETP>");
+            if (FFlag::LuauSpecialTypesAsterisked)
+                state.emit("*CYCLETP*");
+            else
+                state.emit("<CYCLETP>");
             return;
         }
 
@@ -949,14 +951,22 @@ struct TypePackStringifier
     void operator()(TypePackId, const Unifiable::Error& error)
     {
         state.result.error = true;
-        state.emit("*unknown*");
+        if (FFlag::LuauSpecialTypesAsterisked)
+            state.emit(FFlag::LuauUnknownAndNeverType ? "*error-type*" : "*unknown*");
+        else
+            state.emit(FFlag::LuauUnknownAndNeverType ? "<error-type>" : "*unknown*");
     }
 
     void operator()(TypePackId, const VariadicTypePack& pack)
     {
         state.emit("...");
         if (FFlag::DebugLuauVerboseTypeNames && pack.hidden)
-            state.emit("<hidden>");
+        {
+            if (FFlag::LuauSpecialTypesAsterisked)
+                state.emit("*hidden*");
+            else
+                state.emit("<hidden>");
+        }
         stringify(pack.ty);
     }
 
@@ -1151,7 +1161,11 @@ ToStringResult toStringDetailed(TypeId ty, const ToStringOptions& opts)
     if (opts.maxTypeLength > 0 && result.name.length() > opts.maxTypeLength)
     {
         result.truncated = true;
-        result.name += "... <TRUNCATED>";
+
+        if (FFlag::LuauSpecialTypesAsterisked)
+            result.name += "... *TRUNCATED*";
+        else
+            result.name += "... <TRUNCATED>";
     }
 
     return result;
@@ -1222,7 +1236,12 @@ ToStringResult toStringDetailed(TypePackId tp, const ToStringOptions& opts)
     }
 
     if (opts.maxTypeLength > 0 && result.name.length() > opts.maxTypeLength)
-        result.name += "... <TRUNCATED>";
+    {
+        if (FFlag::LuauSpecialTypesAsterisked)
+            result.name += "... *TRUNCATED*";
+        else
+            result.name += "... <TRUNCATED>";
+    }
 
     return result;
 }
@@ -1377,45 +1396,74 @@ std::string generateName(size_t i)
     return n;
 }
 
-std::string toString(const Constraint& c, ToStringOptions& opts)
+std::string toString(const Constraint& constraint, ToStringOptions& opts)
 {
-    if (const SubtypeConstraint* sc = Luau::get_if<SubtypeConstraint>(&c.c))
-    {
-        ToStringResult subStr = toStringDetailed(sc->subType, opts);
-        opts.nameMap = std::move(subStr.nameMap);
-        ToStringResult superStr = toStringDetailed(sc->superType, opts);
-        opts.nameMap = std::move(superStr.nameMap);
-        return subStr.name + " <: " + superStr.name;
-    }
-    else if (const PackSubtypeConstraint* psc = Luau::get_if<PackSubtypeConstraint>(&c.c))
-    {
-        ToStringResult subStr = toStringDetailed(psc->subPack, opts);
-        opts.nameMap = std::move(subStr.nameMap);
-        ToStringResult superStr = toStringDetailed(psc->superPack, opts);
-        opts.nameMap = std::move(superStr.nameMap);
-        return subStr.name + " <: " + superStr.name;
-    }
-    else if (const GeneralizationConstraint* gc = Luau::get_if<GeneralizationConstraint>(&c.c))
-    {
-        ToStringResult subStr = toStringDetailed(gc->generalizedType, opts);
-        opts.nameMap = std::move(subStr.nameMap);
-        ToStringResult superStr = toStringDetailed(gc->sourceType, opts);
-        opts.nameMap = std::move(superStr.nameMap);
-        return subStr.name + " ~ gen " + superStr.name;
-    }
-    else if (const InstantiationConstraint* ic = Luau::get_if<InstantiationConstraint>(&c.c))
-    {
-        ToStringResult subStr = toStringDetailed(ic->subType, opts);
-        opts.nameMap = std::move(subStr.nameMap);
-        ToStringResult superStr = toStringDetailed(ic->superType, opts);
-        opts.nameMap = std::move(superStr.nameMap);
-        return subStr.name + " ~ inst " + superStr.name;
-    }
-    else
-    {
-        LUAU_ASSERT(false);
-        return "";
-    }
+    auto go = [&opts](auto&& c) {
+        using T = std::decay_t<decltype(c)>;
+
+        if constexpr (std::is_same_v<T, SubtypeConstraint>)
+        {
+            ToStringResult subStr = toStringDetailed(c.subType, opts);
+            opts.nameMap = std::move(subStr.nameMap);
+            ToStringResult superStr = toStringDetailed(c.superType, opts);
+            opts.nameMap = std::move(superStr.nameMap);
+            return subStr.name + " <: " + superStr.name;
+        }
+        else if constexpr (std::is_same_v<T, PackSubtypeConstraint>)
+        {
+            ToStringResult subStr = toStringDetailed(c.subPack, opts);
+            opts.nameMap = std::move(subStr.nameMap);
+            ToStringResult superStr = toStringDetailed(c.superPack, opts);
+            opts.nameMap = std::move(superStr.nameMap);
+            return subStr.name + " <: " + superStr.name;
+        }
+        else if constexpr (std::is_same_v<T, GeneralizationConstraint>)
+        {
+            ToStringResult subStr = toStringDetailed(c.generalizedType, opts);
+            opts.nameMap = std::move(subStr.nameMap);
+            ToStringResult superStr = toStringDetailed(c.sourceType, opts);
+            opts.nameMap = std::move(superStr.nameMap);
+            return subStr.name + " ~ gen " + superStr.name;
+        }
+        else if constexpr (std::is_same_v<T, InstantiationConstraint>)
+        {
+            ToStringResult subStr = toStringDetailed(c.subType, opts);
+            opts.nameMap = std::move(subStr.nameMap);
+            ToStringResult superStr = toStringDetailed(c.superType, opts);
+            opts.nameMap = std::move(superStr.nameMap);
+            return subStr.name + " ~ inst " + superStr.name;
+        }
+        else if constexpr (std::is_same_v<T, UnaryConstraint>)
+        {
+            ToStringResult resultStr = toStringDetailed(c.resultType, opts);
+            opts.nameMap = std::move(resultStr.nameMap);
+            ToStringResult operandStr = toStringDetailed(c.operandType, opts);
+            opts.nameMap = std::move(operandStr.nameMap);
+
+            return resultStr.name + " ~ Unary<" + toString(c.op) + ", " + operandStr.name + ">";
+        }
+        else if constexpr (std::is_same_v<T, BinaryConstraint>)
+        {
+            ToStringResult resultStr = toStringDetailed(c.resultType);
+            opts.nameMap = std::move(resultStr.nameMap);
+            ToStringResult leftStr = toStringDetailed(c.leftType);
+            opts.nameMap = std::move(leftStr.nameMap);
+            ToStringResult rightStr = toStringDetailed(c.rightType);
+            opts.nameMap = std::move(rightStr.nameMap);
+
+            return resultStr.name + " ~ Binary<" + toString(c.op) + ", " + leftStr.name + ", " + rightStr.name + ">";
+        }
+        else if constexpr (std::is_same_v<T, NameConstraint>)
+        {
+            ToStringResult namedStr = toStringDetailed(c.namedType, opts);
+            opts.nameMap = std::move(namedStr.nameMap);
+            return "@name(" + namedStr.name + ") = " + c.name;
+        }
+        else
+            static_assert(always_false_v<T>, "Non-exhaustive constraint switch");
+    };
+
+    return visit(go, constraint.c);
 }
 
 std::string dump(const Constraint& c)

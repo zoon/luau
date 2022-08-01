@@ -1,7 +1,9 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
+#include "Luau/Constraint.h"
 #include "Luau/Location.h"
+#include "Luau/NotNull.h"
 #include "Luau/TypeVar.h"
 
 #include <unordered_map>
@@ -30,10 +32,16 @@ struct Scope
     explicit Scope(const ScopePtr& parent, int subLevel = 0); // child scope.  Parent must not be nullptr.
 
     const ScopePtr parent; // null for the root
+
+    // All the children of this scope.
+    std::vector<NotNull<Scope>> children;
     std::unordered_map<Symbol, Binding> bindings;
+    std::unordered_map<Name, TypeId> typeBindings;
+    std::unordered_map<Name, TypePackId> typePackBindings;
     TypePackId returnType;
-    bool breakOk = false;
     std::optional<TypePackId> varargPack;
+    // All constraints belonging to this scope.
+    std::vector<ConstraintPtr> constraints;
 
     TypeLevel level;
 
@@ -43,7 +51,9 @@ struct Scope
 
     std::unordered_map<Name, std::unordered_map<Name, TypeFun>> importedTypeBindings;
 
-    std::optional<TypeId> lookup(const Symbol& name);
+    std::optional<TypeId> lookup(Symbol sym);
+    std::optional<TypeId> lookupTypeBinding(const Name& name);
+    std::optional<TypePackId> lookupTypePackBinding(const Name& name);
 
     std::optional<TypeFun> lookupType(const Name& name);
     std::optional<TypeFun> lookupImportedType(const Name& moduleAlias, const Name& name);

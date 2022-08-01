@@ -21,22 +21,6 @@ Scope::Scope(const ScopePtr& parent, int subLevel)
     level.subLevel = subLevel;
 }
 
-std::optional<TypeId> Scope::lookup(const Symbol& name)
-{
-    Scope* scope = this;
-
-    while (scope)
-    {
-        auto it = scope->bindings.find(name);
-        if (it != scope->bindings.end())
-            return it->second.typeId;
-
-        scope = scope->parent.get();
-    }
-
-    return std::nullopt;
-}
-
 std::optional<TypeFun> Scope::lookupType(const Name& name)
 {
     const Scope* scope = this;
@@ -116,6 +100,53 @@ std::optional<Binding> Scope::linearSearchForBinding(const std::string& name, bo
 
         if (!traverseScopeChain)
             break;
+    }
+
+    return std::nullopt;
+}
+
+std::optional<TypeId> Scope::lookup(Symbol sym)
+{
+    Scope* s = this;
+
+    while (true)
+    {
+        auto it = s->bindings.find(sym);
+        if (it != s->bindings.end())
+            return it->second.typeId;
+
+        if (s->parent)
+            s = s->parent.get();
+        else
+            return std::nullopt;
+    }
+}
+
+std::optional<TypeId> Scope::lookupTypeBinding(const Name& name)
+{
+    Scope* s = this;
+    while (s)
+    {
+        auto it = s->typeBindings.find(name);
+        if (it != s->typeBindings.end())
+            return it->second;
+
+        s = s->parent.get();
+    }
+
+    return std::nullopt;
+}
+
+std::optional<TypePackId> Scope::lookupTypePackBinding(const Name& name)
+{
+    Scope* s = this;
+    while (s)
+    {
+        auto it = s->typePackBindings.find(name);
+        if (it != s->typePackBindings.end())
+            return it->second;
+
+        s = s->parent.get();
     }
 
     return std::nullopt;

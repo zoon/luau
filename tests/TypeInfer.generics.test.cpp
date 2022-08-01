@@ -9,6 +9,9 @@
 
 #include "doctest.h"
 
+LUAU_FASTFLAG(LuauCheckGenericHOFTypes)
+LUAU_FASTFLAG(LuauSpecialTypesAsterisked)
+
 using namespace Luau;
 
 TEST_SUITE_BEGIN("GenericsTests");
@@ -271,13 +274,16 @@ TEST_CASE_FIXTURE(Fixture, "infer_nested_generic_function")
 
 TEST_CASE_FIXTURE(Fixture, "infer_generic_methods")
 {
+    ScopedFastFlag sff{"DebugLuauSharedSelf", true};
+
     CheckResult result = check(R"(
         local x = {}
         function x:id(x) return x end
         function x:f(): string return self:id("hello") end
         function x:g(): number return self:id(37) end
     )");
-    LUAU_REQUIRE_NO_ERRORS(result);
+    // TODO: Quantification should be doing the conversion, not normalization.
+    LUAU_REQUIRE_ERRORS(result);
 }
 
 TEST_CASE_FIXTURE(Fixture, "calling_self_generic_methods")
@@ -700,11 +706,6 @@ end
 
 TEST_CASE_FIXTURE(Fixture, "generic_functions_should_be_memory_safe")
 {
-    ScopedFastFlag sffs[] = {
-        {"LuauTableSubtypingVariance2", true},
-        {"LuauUnsealedTableLiteral", true},
-    };
-
     CheckResult result = check(R"(
 --!strict
 -- At one point this produced a UAF
@@ -979,8 +980,6 @@ TEST_CASE_FIXTURE(Fixture, "instantiate_generic_function_in_assignments2")
 
 TEST_CASE_FIXTURE(Fixture, "self_recursive_instantiated_param")
 {
-    ScopedFastFlag sff{"LuauOnlyMutateInstantiatedTables", true};
-
     // Mutability in type function application right now can create strange recursive types
     CheckResult result = check(R"(
 type Table = { a: number }
@@ -1005,7 +1004,10 @@ TEST_CASE_FIXTURE(Fixture, "no_stack_overflow_from_quantifying")
 
     std::optional<TypeFun> t0 = getMainModule()->getModuleScope()->lookupType("t0");
     REQUIRE(t0);
-    CHECK_EQ("*unknown*", toString(t0->type));
+    if (FFlag::LuauSpecialTypesAsterisked)
+        CHECK_EQ("*error-type*", toString(t0->type));
+    else
+        CHECK_EQ("<error-type>", toString(t0->type));
 
     auto it = std::find_if(result.errors.begin(), result.errors.end(), [](TypeError& err) {
         return get<OccursCheckFailed>(err);
@@ -1015,8 +1017,6 @@ TEST_CASE_FIXTURE(Fixture, "no_stack_overflow_from_quantifying")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "infer_generic_function_function_argument")
 {
-    ScopedFastFlag sff{"LuauUnsealedTableLiteral", true};
-
     CheckResult result = check(R"(
         local function sum<a>(x: a, y: a, f: (a, a) -> a)
             return f(x, y)
@@ -1101,10 +1101,18 @@ local b = sumrec(sum) -- ok
 local c = sumrec(function(x, y, f) return f(x, y) end) -- type binders are not inferred
     )");
 
-    LUAU_REQUIRE_ERRORS(result);
-    CHECK_EQ("Type '(a, b, (a, b) -> (c...)) -> (c...)' could not be converted into '<a>(a, a, (a, a) -> a) -> a'; different number of generic type "
-             "parameters",
-        toString(result.errors[0]));
+    if (FFlag::LuauCheckGenericHOFTypes)
+    {
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
+    else
+    {
+        LUAU_REQUIRE_ERRORS(result);
+        CHECK_EQ(
+            "Type '(a, b, (a, b) -> (c...)) -> (c...)' could not be converted into '<a>(a, a, (a, a) -> a) -> a'; different number of generic type "
+            "parameters",
+            toString(result.errors[0]));
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "substitution_with_bound_table")
@@ -1123,8 +1131,6 @@ TEST_CASE_FIXTURE(Fixture, "substitution_with_bound_table")
 
 TEST_CASE_FIXTURE(Fixture, "apply_type_function_nested_generics1")
 {
-    ScopedFastFlag sff{"LuauApplyTypeFunctionFix", true};
-
     // https://github.com/Roblox/luau/issues/484
     CheckResult result = check(R"(
 --!strict
@@ -1153,8 +1159,6 @@ local complex: ComplexObject<string> = {
 
 TEST_CASE_FIXTURE(Fixture, "apply_type_function_nested_generics2")
 {
-    ScopedFastFlag sff{"LuauApplyTypeFunctionFix", true};
-
     // https://github.com/Roblox/luau/issues/484
     CheckResult result = check(R"(
 --!strict
@@ -1193,6 +1197,25 @@ TEST_CASE_FIXTURE(Fixture, "quantify_functions_even_if_they_have_an_explicit_gen
     )");
 
     CHECK("<X, a...>((X) -> (a...), X) -> (a...)" == toString(requireType("foo")));
+}
+
+TEST_CASE_FIXTURE(Fixture, "do_not_always_instantiate_generic_intersection_types")
+{
+    ScopedFastFlag sff[] = {
+        {"LuauMaybeGenericIntersectionTypes", true},
+    };
+
+    CheckResult result = check(R"(
+        --!strict
+        type Array<T> = { [number]: T }
+
+        type Array_Statics = {
+            new: <T>() -> Array<T>,
+        }
+
+        local _Arr : Array<any> & Array_Statics = {} :: Array_Statics
+    )");
+    LUAU_REQUIRE_NO_ERRORS(result);
 }
 
 TEST_SUITE_END();

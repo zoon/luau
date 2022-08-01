@@ -1,6 +1,8 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/BuiltinDefinitions.h"
 
+LUAU_FASTFLAG(LuauUnknownAndNeverType)
+
 namespace Luau
 {
 
@@ -114,14 +116,13 @@ declare function typeof<T>(value: T): string
 -- `assert` has a magic function attached that will give more detailed type information
 declare function assert<T>(value: T, errorMessage: string?): T
 
-declare function error<T>(message: T, level: number?)
-
 declare function tostring<T>(value: T): string
 declare function tonumber<T>(value: T, radix: number?): number?
 
 declare function rawequal<T1, T2>(a: T1, b: T2): boolean
 declare function rawget<K, V>(tab: {[K]: V}, k: K): V
 declare function rawset<K, V>(tab: {[K]: V}, k: K, v: V): {[K]: V}
+declare function rawlen<K, V>(obj: {[K]: V} | string): number
 
 declare function setfenv<T..., R...>(target: number | (T...) -> R..., env: {[string]: any}): ((T...) -> R...)?
 
@@ -202,7 +203,15 @@ declare function unpack<V>(tab: {V}, i: number?, j: number?): ...V
 
 std::string getBuiltinDefinitionSource()
 {
-    return kBuiltinDefinitionLuaSrc;
+
+    std::string result = kBuiltinDefinitionLuaSrc;
+
+    if (FFlag::LuauUnknownAndNeverType)
+        result += "declare function error<T>(message: T, level: number?): never\n";
+    else
+        result += "declare function error<T>(message: T, level: number?)\n";
+
+    return result;
 }
 
 } // namespace Luau

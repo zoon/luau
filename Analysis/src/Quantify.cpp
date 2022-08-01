@@ -2,13 +2,13 @@
 
 #include "Luau/Quantify.h"
 
-#include "Luau/ConstraintGraphBuilder.h" // TODO for Scope2; move to separate header
-#include "Luau/TxnLog.h"
+#include "Luau/Scope.h"
 #include "Luau/Substitution.h"
+#include "Luau/TxnLog.h"
 #include "Luau/VisitTypeVar.h"
-#include "Luau/ConstraintGraphBuilder.h" // TODO for Scope2; move to separate header
 
 LUAU_FASTFLAG(LuauAlwaysQuantify);
+LUAU_FASTFLAG(DebugLuauSharedSelf)
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
 LUAU_FASTFLAGVARIABLE(LuauQuantifyConstrained, false)
 
@@ -16,13 +16,13 @@ namespace Luau
 {
 
 /// @return true if outer encloses inner
-static bool subsumes(Scope2* outer, Scope2* inner)
+static bool subsumes(Scope* outer, Scope* inner)
 {
     while (inner)
     {
         if (inner == outer)
             return true;
-        inner = inner->parent;
+        inner = inner->parent.get();
     }
 
     return false;
@@ -33,7 +33,7 @@ struct Quantifier final : TypeVarOnceVisitor
     TypeLevel level;
     std::vector<TypeId> generics;
     std::vector<TypePackId> genericPacks;
-    Scope2* scope = nullptr;
+    Scope* scope = nullptr;
     bool seenGenericType = false;
     bool seenMutableType = false;
 
@@ -43,20 +43,20 @@ struct Quantifier final : TypeVarOnceVisitor
         LUAU_ASSERT(!FFlag::DebugLuauDeferredConstraintResolution);
     }
 
-    explicit Quantifier(Scope2* scope)
+    explicit Quantifier(Scope* scope)
         : scope(scope)
     {
         LUAU_ASSERT(FFlag::DebugLuauDeferredConstraintResolution);
     }
 
     /// @return true if outer encloses inner
-    bool subsumes(Scope2* outer, Scope2* inner)
+    bool subsumes(Scope* outer, Scope* inner)
     {
         while (inner)
         {
             if (inner == outer)
                 return true;
-            inner = inner->parent;
+            inner = inner->parent.get();
         }
 
         return false;
@@ -159,29 +159,64 @@ struct Quantifier final : TypeVarOnceVisitor
 
 void quantify(TypeId ty, TypeLevel level)
 {
-    Quantifier q{level};
-    q.traverse(ty);
-
-    FunctionTypeVar* ftv = getMutable<FunctionTypeVar>(ty);
-    LUAU_ASSERT(ftv);
-    if (FFlag::LuauAlwaysQuantify)
+    if (FFlag::DebugLuauSharedSelf)
     {
-        ftv->generics.insert(ftv->generics.end(), q.generics.begin(), q.generics.end());
-        ftv->genericPacks.insert(ftv->genericPacks.end(), q.genericPacks.begin(), q.genericPacks.end());
+        ty = follow(ty);
+
+        if (auto ttv = getTableType(ty); ttv && ttv->selfTy)
+        {
+            Quantifier selfQ{level};
+            selfQ.traverse(*ttv->selfTy);
+
+            Quantifier q{level};
+            q.traverse(ty);
+
+            for (const auto& [_, prop] : ttv->props)
+            {
+                auto ftv = getMutable<FunctionTypeVar>(follow(prop.type));
+                if (!ftv || !ftv->hasSelf)
+                    continue;
+
+                if (Luau::first(ftv->argTypes) == ttv->selfTy)
+                {
+                    ftv->generics.insert(ftv->generics.end(), selfQ.generics.begin(), selfQ.generics.end());
+                    ftv->genericPacks.insert(ftv->genericPacks.end(), selfQ.genericPacks.begin(), selfQ.genericPacks.end());
+                }
+            }
+        }
+        else if (auto ftv = getMutable<FunctionTypeVar>(ty))
+        {
+            Quantifier q{level};
+            q.traverse(ty);
+
+            ftv->generics.insert(ftv->generics.end(), q.generics.begin(), q.generics.end());
+            ftv->genericPacks.insert(ftv->genericPacks.end(), q.genericPacks.begin(), q.genericPacks.end());
+
+            if (ftv->generics.empty() && ftv->genericPacks.empty() && !q.seenMutableType && !q.seenGenericType)
+                ftv->hasNoGenerics = true;
+        }
     }
     else
     {
-        ftv->generics = q.generics;
-        ftv->genericPacks = q.genericPacks;
+        Quantifier q{level};
+        q.traverse(ty);
+
+        FunctionTypeVar* ftv = getMutable<FunctionTypeVar>(ty);
+        LUAU_ASSERT(ftv);
+        if (FFlag::LuauAlwaysQuantify)
+        {
+            ftv->generics.insert(ftv->generics.end(), q.generics.begin(), q.generics.end());
+            ftv->genericPacks.insert(ftv->genericPacks.end(), q.genericPacks.begin(), q.genericPacks.end());
+        }
+        else
+        {
+            ftv->generics = q.generics;
+            ftv->genericPacks = q.genericPacks;
+        }
     }
-
-    if (ftv->generics.empty() && ftv->genericPacks.empty() && !q.seenMutableType && !q.seenGenericType)
-        ftv->hasNoGenerics = true;
-
-    ftv->generalized = true;
 }
 
-void quantify(TypeId ty, Scope2* scope)
+void quantify(TypeId ty, Scope* scope)
 {
     Quantifier q{scope};
     q.traverse(ty);
@@ -201,18 +236,16 @@ void quantify(TypeId ty, Scope2* scope)
 
     if (ftv->generics.empty() && ftv->genericPacks.empty() && !q.seenMutableType && !q.seenGenericType)
         ftv->hasNoGenerics = true;
-
-    ftv->generalized = true;
 }
 
 struct PureQuantifier : Substitution
 {
-    Scope2* scope;
+    Scope* scope;
     std::vector<TypeId> insertedGenerics;
     std::vector<TypePackId> insertedGenericPacks;
 
-    PureQuantifier(const TxnLog* log, TypeArena* arena, Scope2* scope)
-        : Substitution(log, arena)
+    PureQuantifier(TypeArena* arena, Scope* scope)
+        : Substitution(TxnLog::empty(), arena)
         , scope(scope)
     {
     }
@@ -289,9 +322,9 @@ struct PureQuantifier : Substitution
     }
 };
 
-TypeId quantify(TypeArena* arena, TypeId ty, Scope2* scope)
+TypeId quantify(TypeArena* arena, TypeId ty, Scope* scope)
 {
-    PureQuantifier quantifier{TxnLog::empty(), arena, scope};
+    PureQuantifier quantifier{arena, scope};
     std::optional<TypeId> result = quantifier.substitute(ty);
     LUAU_ASSERT(result);
 
@@ -299,8 +332,7 @@ TypeId quantify(TypeArena* arena, TypeId ty, Scope2* scope)
     LUAU_ASSERT(ftv);
     ftv->generics.insert(ftv->generics.end(), quantifier.insertedGenerics.begin(), quantifier.insertedGenerics.end());
     ftv->genericPacks.insert(ftv->genericPacks.end(), quantifier.insertedGenericPacks.begin(), quantifier.insertedGenericPacks.end());
-
-    // TODO: Set hasNoGenerics.
+    ftv->hasNoGenerics = ftv->generics.empty() && ftv->genericPacks.empty();
 
     return *result;
 }

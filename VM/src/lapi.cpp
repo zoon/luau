@@ -51,6 +51,12 @@ const char* luau_ident = "$Luau: Copyright (C) 2019-2022 Roblox Corporation $\n"
         L->top++; \
     }
 
+#define updateatom(L, ts) \
+    { \
+        if (ts->atom == ATOM_UNDEF) \
+            ts->atom = L->global->cb.useratom ? L->global->cb.useratom(ts->data, ts->len) : -1; \
+    }
+
 static Table* getcurrenv(lua_State* L)
 {
     if (L->ci == L->base_ci) /* no enclosing function? */
@@ -441,19 +447,25 @@ const char* lua_tostringatom(lua_State* L, int idx, int* atom)
     StkId o = index2addr(L, idx);
     if (!ttisstring(o))
         return NULL;
-    const TString* s = tsvalue(o);
+    TString* s = tsvalue(o);
     if (atom)
+    {
+        updateatom(L, s);
         *atom = s->atom;
+    }
     return getstr(s);
 }
 
 const char* lua_namecallatom(lua_State* L, int* atom)
 {
-    const TString* s = L->namecall;
+    TString* s = L->namecall;
     if (!s)
         return NULL;
     if (atom)
+    {
+        updateatom(L, s);
         *atom = s->atom;
+    }
     return getstr(s);
 }
 
@@ -839,7 +851,7 @@ void lua_rawset(lua_State* L, int idx)
     StkId t = index2addr(L, idx);
     api_check(L, ttistable(t));
     if (hvalue(t)->readonly)
-        luaG_runerror(L, "Attempt to modify a readonly table");
+        luaG_readonlyerror(L);
     setobj2t(L, luaH_set(L, hvalue(t), L->top - 2), L->top - 1);
     luaC_barriert(L, hvalue(t), L->top - 1);
     L->top -= 2;
@@ -852,7 +864,7 @@ void lua_rawseti(lua_State* L, int idx, int n)
     StkId o = index2addr(L, idx);
     api_check(L, ttistable(o));
     if (hvalue(o)->readonly)
-        luaG_runerror(L, "Attempt to modify a readonly table");
+        luaG_readonlyerror(L);
     setobj2t(L, luaH_setnum(L, hvalue(o), n), L->top - 1);
     luaC_barriert(L, hvalue(o), L->top - 1);
     L->top--;
@@ -875,7 +887,7 @@ int lua_setmetatable(lua_State* L, int objindex)
     case LUA_TTABLE:
     {
         if (hvalue(obj)->readonly)
-            luaG_runerror(L, "Attempt to modify a readonly table");
+            luaG_readonlyerror(L);
         hvalue(obj)->metatable = mt;
         if (mt)
             luaC_objbarrier(L, hvalue(obj), mt);
@@ -1303,6 +1315,14 @@ void lua_unref(lua_State* L, int ref)
     setnvalue(slot, g->registryfree); /* NB: no barrier needed because value isn't collectable */
     g->registryfree = ref;
     return;
+}
+
+void lua_setuserdatatag(lua_State* L, int idx, int tag)
+{
+    api_check(L, unsigned(tag) < LUA_UTAG_LIMIT);
+    StkId o = index2addr(L, idx);
+    api_check(L, ttisuserdata(o));
+    uvalue(o)->tag = uint8_t(tag);
 }
 
 void lua_setuserdatadtor(lua_State* L, int tag, void (*dtor)(lua_State*, void*))

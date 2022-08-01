@@ -17,72 +17,76 @@
 namespace Luau
 {
 
-struct Scope2
-{
-    // The parent scope of this scope. Null if there is no parent (i.e. this
-    // is the module-level scope).
-    Scope2* parent = nullptr;
-    // All the children of this scope.
-    std::vector<Scope2*> children;
-    std::unordered_map<Symbol, TypeId> bindings; // TODO: I think this can be a DenseHashMap
-    TypePackId returnType;
-    // All constraints belonging to this scope.
-    std::vector<ConstraintPtr> constraints;
-
-    std::optional<TypeId> lookup(Symbol sym);
-};
+struct Scope;
+using ScopePtr = std::shared_ptr<Scope>;
 
 struct ConstraintGraphBuilder
 {
     // A list of all the scopes in the module. This vector holds ownership of the
     // scope pointers; the scopes themselves borrow pointers to other scopes to
     // define the scope hierarchy.
-    std::vector<std::pair<Location, std::unique_ptr<Scope2>>> scopes;
+    std::vector<std::pair<Location, ScopePtr>> scopes;
+
+    ModuleName moduleName;
     SingletonTypes& singletonTypes;
-    TypeArena* const arena;
+    const NotNull<TypeArena> arena;
     // The root scope of the module we're generating constraints for.
-    Scope2* rootScope;
+    // This is null when the CGB is initially constructed.
+    Scope* rootScope;
     // A mapping of AST node to TypeId.
     DenseHashMap<const AstExpr*, TypeId> astTypes{nullptr};
     // A mapping of AST node to TypePackId.
     DenseHashMap<const AstExpr*, TypePackId> astTypePacks{nullptr};
     DenseHashMap<const AstExpr*, TypeId> astOriginalCallTypes{nullptr};
+    // Types resolved from type annotations. Analogous to astTypes.
+    DenseHashMap<const AstType*, TypeId> astResolvedTypes{nullptr};
+    // Type packs resolved from type annotations. Analogous to astTypePacks.
+    DenseHashMap<const AstTypePack*, TypePackId> astResolvedTypePacks{nullptr};
 
-    explicit ConstraintGraphBuilder(TypeArena* arena);
+    int recursionCount = 0;
+
+    // It is pretty uncommon for constraint generation to itself produce errors, but it can happen.
+    std::vector<TypeError> errors;
+
+    // Occasionally constraint generation needs to produce an ICE.
+    const NotNull<InternalErrorReporter> ice;
+
+    NotNull<Scope> globalScope;
+
+    ConstraintGraphBuilder(const ModuleName& moduleName, TypeArena* arena, NotNull<InternalErrorReporter> ice, NotNull<Scope> globalScope);
 
     /**
      * Fabricates a new free type belonging to a given scope.
-     * @param scope the scope the free type belongs to. Must not be null.
+     * @param scope the scope the free type belongs to.
      */
-    TypeId freshType(Scope2* scope);
+    TypeId freshType(const ScopePtr& scope);
 
     /**
      * Fabricates a new free type pack belonging to a given scope.
-     * @param scope the scope the free type pack belongs to. Must not be null.
+     * @param scope the scope the free type pack belongs to.
      */
-    TypePackId freshTypePack(Scope2* scope);
+    TypePackId freshTypePack(const ScopePtr& scope);
 
     /**
      * Fabricates a scope that is a child of another scope.
      * @param location the lexical extent of the scope in the source code.
      * @param parent the parent scope of the new scope. Must not be null.
      */
-    Scope2* childScope(Location location, Scope2* parent);
+    ScopePtr childScope(Location location, const ScopePtr& parent);
 
     /**
      * Adds a new constraint with no dependencies to a given scope.
-     * @param scope the scope to add the constraint to. Must not be null.
+     * @param scope the scope to add the constraint to.
      * @param cv the constraint variant to add.
-     * @param location the location to attribute to the constraint.
      */
-    void addConstraint(Scope2* scope, ConstraintV cv, Location location);
+    void addConstraint(const ScopePtr& scope, ConstraintV cv);
 
     /**
      * Adds a constraint to a given scope.
      * @param scope the scope to add the constraint to. Must not be null.
      * @param c the constraint to add.
      */
-    void addConstraint(Scope2* scope, std::unique_ptr<Constraint> c);
+    void addConstraint(const ScopePtr& scope, std::unique_ptr<Constraint> c);
 
     /**
      * The entry point to the ConstraintGraphBuilder. This will construct a set
@@ -91,19 +95,23 @@ struct ConstraintGraphBuilder
      */
     void visit(AstStatBlock* block);
 
-    void visit(Scope2* scope, AstStat* stat);
-    void visit(Scope2* scope, AstStatBlock* block);
-    void visit(Scope2* scope, AstStatLocal* local);
-    void visit(Scope2* scope, AstStatLocalFunction* function);
-    void visit(Scope2* scope, AstStatFunction* function);
-    void visit(Scope2* scope, AstStatReturn* ret);
-    void visit(Scope2* scope, AstStatAssign* assign);
-    void visit(Scope2* scope, AstStatIf* ifStatement);
+    void visitBlockWithoutChildScope(const ScopePtr& scope, AstStatBlock* block);
 
-    TypePackId checkExprList(Scope2* scope, const AstArray<AstExpr*>& exprs);
+    void visit(const ScopePtr& scope, AstStat* stat);
+    void visit(const ScopePtr& scope, AstStatBlock* block);
+    void visit(const ScopePtr& scope, AstStatLocal* local);
+    void visit(const ScopePtr& scope, AstStatFor* for_);
+    void visit(const ScopePtr& scope, AstStatLocalFunction* function);
+    void visit(const ScopePtr& scope, AstStatFunction* function);
+    void visit(const ScopePtr& scope, AstStatReturn* ret);
+    void visit(const ScopePtr& scope, AstStatAssign* assign);
+    void visit(const ScopePtr& scope, AstStatIf* ifStatement);
+    void visit(const ScopePtr& scope, AstStatTypeAlias* alias);
 
-    TypePackId checkPack(Scope2* scope, AstArray<AstExpr*> exprs);
-    TypePackId checkPack(Scope2* scope, AstExpr* expr);
+    TypePackId checkExprList(const ScopePtr& scope, const AstArray<AstExpr*>& exprs);
+
+    TypePackId checkPack(const ScopePtr& scope, AstArray<AstExpr*> exprs);
+    TypePackId checkPack(const ScopePtr& scope, AstExpr* expr);
 
     /**
      * Checks an expression that is expected to evaluate to one type.
@@ -111,19 +119,69 @@ struct ConstraintGraphBuilder
      * @param expr the expression to check.
      * @return the type of the expression.
      */
-    TypeId check(Scope2* scope, AstExpr* expr);
+    TypeId check(const ScopePtr& scope, AstExpr* expr);
 
-    TypeId checkExprTable(Scope2* scope, AstExprTable* expr);
-    TypeId check(Scope2* scope, AstExprIndexName* indexName);
+    TypeId checkExprTable(const ScopePtr& scope, AstExprTable* expr);
+    TypeId check(const ScopePtr& scope, AstExprIndexName* indexName);
+    TypeId check(const ScopePtr& scope, AstExprIndexExpr* indexExpr);
+    TypeId check(const ScopePtr& scope, AstExprUnary* unary);
+    TypeId check(const ScopePtr& scope, AstExprBinary* binary);
 
-    std::pair<TypeId, Scope2*> checkFunctionSignature(Scope2* parent, AstExprFunction* fn);
+    struct FunctionSignature
+    {
+        // The type of the function.
+        TypeId signature;
+        // The scope that encompasses the function's signature. May be nullptr
+        // if there was no need for a signature scope (the function has no
+        // generics).
+        ScopePtr signatureScope;
+        // The scope that encompasses the function's body. Is a child scope of
+        // signatureScope, if present.
+        ScopePtr bodyScope;
+    };
+
+    FunctionSignature checkFunctionSignature(const ScopePtr& parent, AstExprFunction* fn);
 
     /**
      * Checks the body of a function expression.
      * @param scope the interior scope of the body of the function.
      * @param fn the function expression to check.
      */
-    void checkFunctionBody(Scope2* scope, AstExprFunction* fn);
+    void checkFunctionBody(const ScopePtr& scope, AstExprFunction* fn);
+
+    /**
+     * Resolves a type from its AST annotation.
+     * @param scope the scope that the type annotation appears within.
+     * @param ty the AST annotation to resolve.
+     * @return the type of the AST annotation.
+     **/
+    TypeId resolveType(const ScopePtr& scope, AstType* ty);
+
+    /**
+     * Resolves a type pack from its AST annotation.
+     * @param scope the scope that the type annotation appears within.
+     * @param tp the AST annotation to resolve.
+     * @return the type pack of the AST annotation.
+     **/
+    TypePackId resolveTypePack(const ScopePtr& scope, AstTypePack* tp);
+
+    TypePackId resolveTypePack(const ScopePtr& scope, const AstTypeList& list);
+
+    std::vector<std::pair<Name, GenericTypeDefinition>> createGenerics(const ScopePtr& scope, AstArray<AstGenericType> generics);
+    std::vector<std::pair<Name, GenericTypePackDefinition>> createGenericPacks(const ScopePtr& scope, AstArray<AstGenericTypePack> packs);
+
+    TypeId flattenPack(const ScopePtr& scope, Location location, TypePackId tp);
+
+    void reportError(Location location, TypeErrorData err);
+    void reportCodeTooComplex(Location location);
+
+    /** Scan the program for global definitions.
+     *
+     * ConstraintGraphBuilder needs to differentiate between globals and accesses to undefined symbols. Doing this "for
+     * real" in a general way is going to be pretty hard, so we are choosing not to tackle that yet. For now, we do an
+     * initial scan of the AST and note what globals are defined.
+     */
+    void prepopulateGlobalScope(const ScopePtr& globalScope, AstStatBlock* program);
 };
 
 /**
@@ -136,6 +194,6 @@ struct ConstraintGraphBuilder
  * @return a list of pointers to constraints contained within the scope graph.
  * None of these pointers should be null.
  */
-std::vector<NotNull<Constraint>> collectConstraints(Scope2* rootScope);
+std::vector<NotNull<Constraint>> collectConstraints(NotNull<Scope> rootScope);
 
 } // namespace Luau

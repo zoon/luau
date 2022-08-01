@@ -6,6 +6,8 @@
 
 #include "doctest.h"
 
+#include <limits.h>
+
 using namespace Luau;
 
 namespace
@@ -91,138 +93,6 @@ TEST_CASE("initial_double_is_aligned")
 
     double* one = alloc.alloc<double>();
     CHECK_EQ(0, reinterpret_cast<intptr_t>(one) & (alignof(double) - 1));
-}
-
-TEST_SUITE_END();
-
-TEST_SUITE_BEGIN("LexerTests");
-
-TEST_CASE("broken_string_works")
-{
-    const std::string testInput = "[[";
-    Luau::Allocator alloc;
-    AstNameTable table(alloc);
-    Lexer lexer(testInput.c_str(), testInput.size(), table);
-    Lexeme lexeme = lexer.next();
-    CHECK_EQ(lexeme.type, Lexeme::Type::BrokenString);
-    CHECK_EQ(lexeme.location, Luau::Location(Luau::Position(0, 0), Luau::Position(0, 2)));
-}
-
-TEST_CASE("broken_comment")
-{
-    const std::string testInput = "--[[  ";
-    Luau::Allocator alloc;
-    AstNameTable table(alloc);
-    Lexer lexer(testInput.c_str(), testInput.size(), table);
-    Lexeme lexeme = lexer.next();
-    CHECK_EQ(lexeme.type, Lexeme::Type::BrokenComment);
-    CHECK_EQ(lexeme.location, Luau::Location(Luau::Position(0, 0), Luau::Position(0, 6)));
-}
-
-TEST_CASE("broken_comment_kept")
-{
-    const std::string testInput = "--[[  ";
-    Luau::Allocator alloc;
-    AstNameTable table(alloc);
-    Lexer lexer(testInput.c_str(), testInput.size(), table);
-    lexer.setSkipComments(true);
-    CHECK_EQ(lexer.next().type, Lexeme::Type::BrokenComment);
-}
-
-TEST_CASE("comment_skipped")
-{
-    const std::string testInput = "--  ";
-    Luau::Allocator alloc;
-    AstNameTable table(alloc);
-    Lexer lexer(testInput.c_str(), testInput.size(), table);
-    lexer.setSkipComments(true);
-    CHECK_EQ(lexer.next().type, Lexeme::Type::Eof);
-}
-
-TEST_CASE("multilineCommentWithLexemeInAndAfter")
-{
-    const std::string testInput = "--[[ function \n"
-                                  "]] end";
-    Luau::Allocator alloc;
-    AstNameTable table(alloc);
-    Lexer lexer(testInput.c_str(), testInput.size(), table);
-    Lexeme comment = lexer.next();
-    Lexeme end = lexer.next();
-
-    CHECK_EQ(comment.type, Lexeme::Type::BlockComment);
-    CHECK_EQ(comment.location, Luau::Location(Luau::Position(0, 0), Luau::Position(1, 2)));
-    CHECK_EQ(end.type, Lexeme::Type::ReservedEnd);
-    CHECK_EQ(end.location, Luau::Location(Luau::Position(1, 3), Luau::Position(1, 6)));
-}
-
-TEST_CASE("testBrokenEscapeTolerant")
-{
-    const std::string testInput = "'\\3729472897292378'";
-    Luau::Allocator alloc;
-    AstNameTable table(alloc);
-    Lexer lexer(testInput.c_str(), testInput.size(), table);
-    Lexeme item = lexer.next();
-
-    CHECK_EQ(item.type, Lexeme::QuotedString);
-    CHECK_EQ(item.location, Luau::Location(Luau::Position(0, 0), Luau::Position(0, int(testInput.size()))));
-}
-
-TEST_CASE("testBigDelimiters")
-{
-    const std::string testInput = "--[===[\n"
-                                  "\n"
-                                  "\n"
-                                  "\n"
-                                  "]===]";
-    Luau::Allocator alloc;
-    AstNameTable table(alloc);
-    Lexer lexer(testInput.c_str(), testInput.size(), table);
-    Lexeme item = lexer.next();
-
-    CHECK_EQ(item.type, Lexeme::Type::BlockComment);
-    CHECK_EQ(item.location, Luau::Location(Luau::Position(0, 0), Luau::Position(4, 5)));
-}
-
-TEST_CASE("lookahead")
-{
-    const std::string testInput = "foo --[[ comment ]] bar : nil end";
-
-    Luau::Allocator alloc;
-    AstNameTable table(alloc);
-    Lexer lexer(testInput.c_str(), testInput.size(), table);
-    lexer.setSkipComments(true);
-    lexer.next(); // must call next() before reading data from lexer at least once
-
-    CHECK_EQ(lexer.current().type, Lexeme::Name);
-    CHECK_EQ(lexer.current().name, std::string("foo"));
-    CHECK_EQ(lexer.lookahead().type, Lexeme::Name);
-    CHECK_EQ(lexer.lookahead().name, std::string("bar"));
-
-    lexer.next();
-
-    CHECK_EQ(lexer.current().type, Lexeme::Name);
-    CHECK_EQ(lexer.current().name, std::string("bar"));
-    CHECK_EQ(lexer.lookahead().type, ':');
-
-    lexer.next();
-
-    CHECK_EQ(lexer.current().type, ':');
-    CHECK_EQ(lexer.lookahead().type, Lexeme::ReservedNil);
-
-    lexer.next();
-
-    CHECK_EQ(lexer.current().type, Lexeme::ReservedNil);
-    CHECK_EQ(lexer.lookahead().type, Lexeme::ReservedEnd);
-
-    lexer.next();
-
-    CHECK_EQ(lexer.current().type, Lexeme::ReservedEnd);
-    CHECK_EQ(lexer.lookahead().type, Lexeme::Eof);
-
-    lexer.next();
-
-    CHECK_EQ(lexer.current().type, Lexeme::Eof);
-    CHECK_EQ(lexer.lookahead().type, Lexeme::Eof);
 }
 
 TEST_SUITE_END();
@@ -786,33 +656,46 @@ TEST_CASE_FIXTURE(Fixture, "parse_numbers_decimal")
 
 TEST_CASE_FIXTURE(Fixture, "parse_numbers_hexadecimal")
 {
-    AstStat* stat = parse("return 0xab, 0XAB05, 0xff_ff");
+    AstStat* stat = parse("return 0xab, 0XAB05, 0xff_ff, 0xffffffffffffffff");
     REQUIRE(stat != nullptr);
 
     AstStatReturn* str = stat->as<AstStatBlock>()->body.data[0]->as<AstStatReturn>();
-    CHECK(str->list.size == 3);
+    CHECK(str->list.size == 4);
     CHECK_EQ(str->list.data[0]->as<AstExprConstantNumber>()->value, 0xab);
     CHECK_EQ(str->list.data[1]->as<AstExprConstantNumber>()->value, 0xAB05);
     CHECK_EQ(str->list.data[2]->as<AstExprConstantNumber>()->value, 0xFFFF);
+    CHECK_EQ(str->list.data[3]->as<AstExprConstantNumber>()->value, double(ULLONG_MAX));
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_numbers_binary")
 {
-    AstStat* stat = parse("return 0b1, 0b0, 0b101010");
+    AstStat* stat = parse("return 0b1, 0b0, 0b101010, 0b1111111111111111111111111111111111111111111111111111111111111111");
     REQUIRE(stat != nullptr);
 
     AstStatReturn* str = stat->as<AstStatBlock>()->body.data[0]->as<AstStatReturn>();
-    CHECK(str->list.size == 3);
+    CHECK(str->list.size == 4);
     CHECK_EQ(str->list.data[0]->as<AstExprConstantNumber>()->value, 1);
     CHECK_EQ(str->list.data[1]->as<AstExprConstantNumber>()->value, 0);
     CHECK_EQ(str->list.data[2]->as<AstExprConstantNumber>()->value, 42);
+    CHECK_EQ(str->list.data[3]->as<AstExprConstantNumber>()->value, double(ULLONG_MAX));
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_numbers_error")
 {
+    ScopedFastFlag luauErrorParseIntegerIssues{"LuauErrorParseIntegerIssues", true};
+
     CHECK_EQ(getParseError("return 0b123"), "Malformed number");
     CHECK_EQ(getParseError("return 123x"), "Malformed number");
     CHECK_EQ(getParseError("return 0xg"), "Malformed number");
+    CHECK_EQ(getParseError("return 0x0x123"), "Malformed number");
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_numbers_range_error")
+{
+    ScopedFastFlag luauErrorParseIntegerIssues{"LuauErrorParseIntegerIssues", true};
+
+    CHECK_EQ(getParseError("return 0x10000000000000000"), "Integer number value is out of range");
+    CHECK_EQ(getParseError("return 0b10000000000000000000000000000000000000000000000000000000000000000"), "Integer number value is out of range");
 }
 
 TEST_CASE_FIXTURE(Fixture, "break_return_not_last_error")
@@ -2111,6 +1994,15 @@ type C<X...> = Packed<(number, X...)>
     REQUIRE(stat != nullptr);
 }
 
+TEST_CASE_FIXTURE(Fixture, "invalid_type_forms")
+{
+    ScopedFastFlag luauFixNamedFunctionParse{"LuauFixNamedFunctionParse", true};
+
+    matchParseError("type A = (b: number)", "Expected '->' when parsing function type, got <eof>");
+    matchParseError("type P<T...> = () -> T... type B = P<(x: number, y: string)>", "Expected '->' when parsing function type, got '>'");
+    matchParseError("type F<T... = (a: string)> = (T...) -> ()", "Expected '->' when parsing function type, got '>'");
+}
+
 TEST_SUITE_END();
 
 TEST_SUITE_BEGIN("ParseErrorRecovery");
@@ -2624,7 +2516,6 @@ type Z<T> = { a: string | T..., b: number }
 
 TEST_CASE_FIXTURE(Fixture, "recover_function_return_type_annotations")
 {
-    ScopedFastFlag sff{"LuauReturnTypeTokenConfusion", true};
     ParseResult result = tryParse(R"(
 type Custom<A, B, C> = { x: A, y: B, z: C }
 type Packed<A...> = { x: (A...) -> () }

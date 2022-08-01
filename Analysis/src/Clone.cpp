@@ -59,6 +59,8 @@ struct TypeCloner
     void operator()(const UnionTypeVar& t);
     void operator()(const IntersectionTypeVar& t);
     void operator()(const LazyTypeVar& t);
+    void operator()(const UnknownTypeVar& t);
+    void operator()(const NeverTypeVar& t);
 };
 
 struct TypePackCloner
@@ -310,6 +312,16 @@ void TypeCloner::operator()(const LazyTypeVar& t)
     defaultClone(t);
 }
 
+void TypeCloner::operator()(const UnknownTypeVar& t)
+{
+    defaultClone(t);
+}
+
+void TypeCloner::operator()(const NeverTypeVar& t)
+{
+    defaultClone(t);
+}
+
 } // anonymous namespace
 
 TypePackId clone(TypePackId tp, TypeArena& dest, CloneState& cloneState)
@@ -317,7 +329,7 @@ TypePackId clone(TypePackId tp, TypeArena& dest, CloneState& cloneState)
     if (tp->persistent)
         return tp;
 
-    RecursionLimiter _ra(&cloneState.recursionCount, FInt::LuauTypeCloneRecursionLimit, "cloning TypePackId");
+    RecursionLimiter _ra(&cloneState.recursionCount, FInt::LuauTypeCloneRecursionLimit);
 
     TypePackId& res = cloneState.seenTypePacks[tp];
 
@@ -335,7 +347,7 @@ TypeId clone(TypeId typeId, TypeArena& dest, CloneState& cloneState)
     if (typeId->persistent)
         return typeId;
 
-    RecursionLimiter _ra(&cloneState.recursionCount, FInt::LuauTypeCloneRecursionLimit, "cloning TypeId");
+    RecursionLimiter _ra(&cloneState.recursionCount, FInt::LuauTypeCloneRecursionLimit);
 
     TypeId& res = cloneState.seenTypes[typeId];
 

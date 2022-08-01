@@ -1,17 +1,19 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
-#include "Luau/Location.h"
+#include "Luau/Ast.h" // Used for some of the enumerations
 #include "Luau/NotNull.h"
 #include "Luau/Variant.h"
 
+#include <string>
 #include <memory>
 #include <vector>
 
 namespace Luau
 {
 
-struct Scope2;
+struct Scope;
+
 struct TypeVar;
 using TypeId = const TypeVar*;
 
@@ -37,7 +39,7 @@ struct GeneralizationConstraint
 {
     TypeId generalizedType;
     TypeId sourceType;
-    Scope2* scope;
+    Scope* scope;
 };
 
 // subType ~ inst superType
@@ -47,18 +49,40 @@ struct InstantiationConstraint
     TypeId superType;
 };
 
-using ConstraintV = Variant<SubtypeConstraint, PackSubtypeConstraint, GeneralizationConstraint, InstantiationConstraint>;
+struct UnaryConstraint
+{
+    AstExprUnary::Op op;
+    TypeId operandType;
+    TypeId resultType;
+};
+
+struct BinaryConstraint
+{
+    AstExprBinary::Op op;
+    TypeId leftType;
+    TypeId rightType;
+    TypeId resultType;
+};
+
+// name(namedType) = name
+struct NameConstraint
+{
+    TypeId namedType;
+    std::string name;
+};
+
+using ConstraintV = Variant<SubtypeConstraint, PackSubtypeConstraint, GeneralizationConstraint, InstantiationConstraint, UnaryConstraint,
+    BinaryConstraint, NameConstraint>;
 using ConstraintPtr = std::unique_ptr<struct Constraint>;
 
 struct Constraint
 {
-    Constraint(ConstraintV&& c, Location location);
+    explicit Constraint(ConstraintV&& c);
 
     Constraint(const Constraint&) = delete;
     Constraint& operator=(const Constraint&) = delete;
 
     ConstraintV c;
-    Location location;
     std::vector<NotNull<Constraint>> dependencies;
 };
 

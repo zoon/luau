@@ -461,6 +461,59 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "typecheck_unary_minus")
     REQUIRE_EQ(gen->message, "Unary operator '-' not supported by type 'bar'");
 }
 
+TEST_CASE_FIXTURE(BuiltinsFixture, "typecheck_unary_minus_error")
+{
+    CheckResult result = check(R"(
+        --!strict
+        local foo = {
+            value = 10
+        }
+
+        local mt = {}
+        setmetatable(foo, mt)
+
+        mt.__unm = function(val: boolean): string
+            return "test"
+        end
+
+        local a = -foo
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+
+    CHECK_EQ("string", toString(requireType("a")));
+
+    TypeMismatch* tm = get<TypeMismatch>(result.errors[0]);
+    REQUIRE_EQ(*tm->wantedType, *typeChecker.booleanType);
+    // given type is the typeof(foo) which is complex to compare against
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "typecheck_unary_len_error")
+{
+    CheckResult result = check(R"(
+        --!strict
+        local foo = {
+            value = 10
+        }
+        local mt = {}
+        setmetatable(foo, mt)
+
+        mt.__len = function(val: any): string
+            return "test"
+        end
+
+        local a = #foo
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+
+    CHECK_EQ("number", toString(requireType("a")));
+
+    TypeMismatch* tm = get<TypeMismatch>(result.errors[0]);
+    REQUIRE_EQ(*tm->wantedType, *typeChecker.numberType);
+    REQUIRE_EQ(*tm->givenType, *typeChecker.stringType);
+}
+
 TEST_CASE_FIXTURE(BuiltinsFixture, "unary_not_is_boolean")
 {
     CheckResult result = check(R"(
@@ -814,6 +867,28 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "equality_operations_succeed_if_any_union_bra
 
     LUAU_REQUIRE_ERROR_COUNT(1, result2);
     CHECK(toString(result2.errors[0]) == "Types Foo and Bar cannot be compared with == because they do not have the same metatable");
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "expected_types_through_binary_and")
+{
+    ScopedFastFlag sff{"LuauBinaryNeedsExpectedTypesToo", true};
+
+    CheckResult result = check(R"(
+        local x: "a" | "b" | boolean = math.random() > 0.5 and "a"
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "expected_types_through_binary_or")
+{
+    ScopedFastFlag sff{"LuauBinaryNeedsExpectedTypesToo", true};
+
+    CheckResult result = check(R"(
+        local x: "a" | "b" | boolean = math.random() > 0.5 or "b"
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
 }
 
 TEST_SUITE_END();
