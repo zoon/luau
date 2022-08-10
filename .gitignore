@@ -10,4 +10,5 @@
 /luau
 /cmake
 
-__pycache__
+/luau-tests
+/luau-analyze
