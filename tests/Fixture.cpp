@@ -372,17 +372,25 @@ void Fixture::registerTestTypes()
 
 void Fixture::dumpErrors(const CheckResult& cr)
 {
-    dumpErrors(std::cout, cr.errors);
+    std::string error = getErrors(cr);
+    if (!error.empty())
+        MESSAGE(error);
 }
 
 void Fixture::dumpErrors(const ModulePtr& module)
 {
-    dumpErrors(std::cout, module->errors);
+    std::stringstream ss;
+    dumpErrors(ss, module->errors);
+    if (!ss.str().empty())
+        MESSAGE(ss.str());
 }
 
 void Fixture::dumpErrors(const Module& module)
 {
-    dumpErrors(std::cout, module.errors);
+    std::stringstream ss;
+    dumpErrors(ss, module.errors);
+    if (!ss.str().empty())
+        MESSAGE(ss.str());
 }
 
 std::string Fixture::getErrors(const CheckResult& cr)
@@ -413,6 +421,7 @@ LoadDefinitionFileResult Fixture::loadDefinition(const std::string& source)
     LoadDefinitionFileResult result = frontend.loadDefinitionFile(source, "@test");
     freeze(typeChecker.globalTypes);
 
+    dumpErrors(result.module);
     REQUIRE_MESSAGE(result.success, "loadDefinition: unable to load definition file");
     return result;
 }
@@ -434,7 +443,8 @@ BuiltinsFixture::BuiltinsFixture(bool freeze, bool prepareAutocomplete)
 
 ConstraintGraphBuilderFixture::ConstraintGraphBuilderFixture()
     : Fixture()
-    , cgb(mainModuleName, &arena, NotNull(&ice), frontend.getGlobalScope())
+    , mainModule(new Module)
+    , cgb(mainModuleName, mainModule, &arena, NotNull(&ice), frontend.getGlobalScope())
     , forceTheFlag{"DebugLuauDeferredConstraintResolution", true}
 {
     BlockedTypeVar::nextIndex = 0;
@@ -500,6 +510,43 @@ void dump(const std::vector<Constraint>& constraints)
     ToStringOptions opts;
     for (const auto& c : constraints)
         printf("%s\n", toString(c, opts).c_str());
+}
+
+FindNthOccurenceOf::FindNthOccurenceOf(Nth nth)
+    : requestedNth(nth)
+{
+}
+
+bool FindNthOccurenceOf::checkIt(AstNode* n)
+{
+    if (theNode)
+        return false;
+
+    if (n->classIndex == requestedNth.classIndex)
+    {
+        // Human factor: the requestedNth starts from 1 because of the term `nth`.
+        if (currentOccurrence + 1 != requestedNth.nth)
+            ++currentOccurrence;
+        else
+            theNode = n;
+    }
+
+    return !theNode; // once found, returns false and stops traversal
+}
+
+bool FindNthOccurenceOf::visit(AstNode* n)
+{
+    return checkIt(n);
+}
+
+bool FindNthOccurenceOf::visit(AstType* t)
+{
+    return checkIt(t);
+}
+
+bool FindNthOccurenceOf::visit(AstTypePack* t)
+{
+    return checkIt(t);
 }
 
 } // namespace Luau

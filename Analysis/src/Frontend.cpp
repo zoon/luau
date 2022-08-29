@@ -455,7 +455,7 @@ CheckResult Frontend::check(const ModuleName& name, std::optional<FrontendOption
 
         Mode mode = sourceModule.mode.value_or(config.mode);
 
-        ScopePtr environmentScope = getModuleEnvironment(sourceModule, config);
+        ScopePtr environmentScope = getModuleEnvironment(sourceModule, config, frontendOptions.forAutocomplete);
 
         double timestamp = getTimestamp();
 
@@ -500,7 +500,7 @@ CheckResult Frontend::check(const ModuleName& name, std::optional<FrontendOption
                     typeCheckerForAutocomplete.unifierIterationLimit = std::nullopt;
             }
 
-            ModulePtr moduleForAutocomplete = typeCheckerForAutocomplete.check(sourceModule, Mode::Strict);
+            ModulePtr moduleForAutocomplete = typeCheckerForAutocomplete.check(sourceModule, Mode::Strict, environmentScope);
             moduleResolverForAutocomplete.modules[moduleName] = moduleForAutocomplete;
 
             double duration = getTimestamp() - timestamp;
@@ -677,9 +677,13 @@ bool Frontend::parseGraph(std::vector<ModuleName>& buildQueue, CheckResult& chec
     return cyclic;
 }
 
-ScopePtr Frontend::getModuleEnvironment(const SourceModule& module, const Config& config)
+ScopePtr Frontend::getModuleEnvironment(const SourceModule& module, const Config& config, bool forAutocomplete)
 {
-    ScopePtr result = typeChecker.globalScope;
+    ScopePtr result;
+    if (forAutocomplete)
+        result = typeCheckerForAutocomplete.globalScope;
+    else
+        result = typeChecker.globalScope;
 
     if (module.environmentName)
         result = getEnvironmentScope(*module.environmentName);
@@ -818,26 +822,29 @@ const SourceModule* Frontend::getSourceModule(const ModuleName& moduleName) cons
     return const_cast<Frontend*>(this)->getSourceModule(moduleName);
 }
 
-NotNull<Scope> Frontend::getGlobalScope()
+ScopePtr Frontend::getGlobalScope()
 {
     if (!globalScope)
     {
         globalScope = typeChecker.globalScope;
     }
 
-    return NotNull(globalScope.get());
+    return globalScope;
 }
 
 ModulePtr Frontend::check(const SourceModule& sourceModule, Mode mode, const ScopePtr& environmentScope)
 {
     ModulePtr result = std::make_shared<Module>();
 
-    ConstraintGraphBuilder cgb{sourceModule.name, &result->internalTypes, NotNull(&iceHandler), getGlobalScope()};
+    ConstraintGraphBuilder cgb{sourceModule.name, result, &result->internalTypes, NotNull(&iceHandler), getGlobalScope()};
     cgb.visit(sourceModule.root);
     result->errors = std::move(cgb.errors);
 
     ConstraintSolver cs{&result->internalTypes, NotNull(cgb.rootScope)};
     cs.run();
+
+    for (TypeError& e : cs.errors)
+        result->errors.emplace_back(std::move(e));
 
     result->scopes = std::move(cgb.scopes);
     result->astTypes = std::move(cgb.astTypes);

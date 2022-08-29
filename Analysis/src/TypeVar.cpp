@@ -27,6 +27,7 @@ LUAU_FASTFLAG(LuauUnknownAndNeverType)
 LUAU_FASTFLAGVARIABLE(LuauDeduceGmatchReturnTypes, false)
 LUAU_FASTFLAGVARIABLE(LuauMaybeGenericIntersectionTypes, false)
 LUAU_FASTFLAGVARIABLE(LuauDeduceFindMatchReturnTypes, false)
+LUAU_FASTFLAGVARIABLE(LuauStringFormatArgumentErrorFix, false)
 
 namespace Luau
 {
@@ -1135,15 +1136,25 @@ std::optional<WithPredicate<TypePackId>> magicFunctionFormat(
     {
         Location location = expr.args.data[std::min(i + dataOffset, expr.args.size - 1)]->location;
 
-        typechecker.unify(params[i + paramOffset], expected[i], location);
+        typechecker.unify(params[i + paramOffset], expected[i], scope, location);
     }
 
     // if we know the argument count or if we have too many arguments for sure, we can issue an error
-    size_t actualParamSize = params.size() - paramOffset;
+    if (FFlag::LuauStringFormatArgumentErrorFix)
+    {
+        size_t numActualParams = params.size();
+        size_t numExpectedParams = expected.size() + 1; // + 1 for the format string
 
-    if (expected.size() != actualParamSize && (!tail || expected.size() < actualParamSize))
-        typechecker.reportError(TypeError{expr.location, CountMismatch{expected.size(), actualParamSize}});
+        if (numExpectedParams != numActualParams && (!tail || numExpectedParams < numActualParams))
+            typechecker.reportError(TypeError{expr.location, CountMismatch{numExpectedParams, numActualParams}});
+    }
+    else
+    {
+        size_t actualParamSize = params.size() - paramOffset;
 
+        if (expected.size() != actualParamSize && (!tail || expected.size() < actualParamSize))
+            typechecker.reportError(TypeError{expr.location, CountMismatch{expected.size(), actualParamSize}});
+    }
     return WithPredicate<TypePackId>{arena.addTypePack({typechecker.stringType})};
 }
 
@@ -1234,7 +1245,7 @@ static std::optional<WithPredicate<TypePackId>> magicFunctionGmatch(
     if (returnTypes.empty())
         return std::nullopt;
 
-    typechecker.unify(params[0], typechecker.stringType, expr.args.data[0]->location);
+    typechecker.unify(params[0], typechecker.stringType, scope, expr.args.data[0]->location);
 
     const TypePackId emptyPack = arena.addTypePack({});
     const TypePackId returnList = arena.addTypePack(returnTypes);
@@ -1269,13 +1280,13 @@ static std::optional<WithPredicate<TypePackId>> magicFunctionMatch(
     if (returnTypes.empty())
         return std::nullopt;
 
-    typechecker.unify(params[0], typechecker.stringType, expr.args.data[0]->location);
+    typechecker.unify(params[0], typechecker.stringType, scope, expr.args.data[0]->location);
 
     const TypeId optionalNumber = arena.addType(UnionTypeVar{{typechecker.nilType, typechecker.numberType}});
 
     size_t initIndex = expr.self ? 1 : 2;
     if (params.size() == 3 && expr.args.size > initIndex)
-        typechecker.unify(params[2], optionalNumber, expr.args.data[initIndex]->location);
+        typechecker.unify(params[2], optionalNumber, scope, expr.args.data[initIndex]->location);
 
     const TypePackId returnList = arena.addTypePack(returnTypes);
     return WithPredicate<TypePackId>{returnList};
@@ -1320,17 +1331,17 @@ static std::optional<WithPredicate<TypePackId>> magicFunctionFind(
             return std::nullopt;
     }
 
-    typechecker.unify(params[0], typechecker.stringType, expr.args.data[0]->location);
+    typechecker.unify(params[0], typechecker.stringType, scope, expr.args.data[0]->location);
 
     const TypeId optionalNumber = arena.addType(UnionTypeVar{{typechecker.nilType, typechecker.numberType}});
     const TypeId optionalBoolean = arena.addType(UnionTypeVar{{typechecker.nilType, typechecker.booleanType}});
 
     size_t initIndex = expr.self ? 1 : 2;
     if (params.size() >= 3 && expr.args.size > initIndex)
-        typechecker.unify(params[2], optionalNumber, expr.args.data[initIndex]->location);
+        typechecker.unify(params[2], optionalNumber, scope, expr.args.data[initIndex]->location);
 
     if (params.size() == 4 && expr.args.size > plainIndex)
-        typechecker.unify(params[3], optionalBoolean, expr.args.data[plainIndex]->location);
+        typechecker.unify(params[3], optionalBoolean, scope, expr.args.data[plainIndex]->location);
 
     returnTypes.insert(returnTypes.begin(), {optionalNumber, optionalNumber});
 

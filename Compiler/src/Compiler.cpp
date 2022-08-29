@@ -14,6 +14,8 @@
 
 #include <algorithm>
 #include <bitset>
+#include <memory>
+
 #include <math.h>
 
 LUAU_FASTINTVARIABLE(LuauCompileLoopUnrollThreshold, 25)
@@ -23,10 +25,13 @@ LUAU_FASTINTVARIABLE(LuauCompileInlineThreshold, 25)
 LUAU_FASTINTVARIABLE(LuauCompileInlineThresholdMaxBoost, 300)
 LUAU_FASTINTVARIABLE(LuauCompileInlineDepth, 5)
 
-LUAU_FASTFLAGVARIABLE(LuauCompileNoIpairs, false)
-
-LUAU_FASTFLAGVARIABLE(LuauCompileFreeReassign, false)
 LUAU_FASTFLAGVARIABLE(LuauCompileXEQ, false)
+
+LUAU_FASTFLAG(LuauInterpolatedStringBaseSupport)
+
+LUAU_FASTFLAGVARIABLE(LuauCompileOptimalAssignment, false)
+
+LUAU_FASTFLAGVARIABLE(LuauCompileExtractK, false)
 
 namespace Luau
 {
@@ -36,6 +41,8 @@ using namespace Luau::Compile;
 static const uint32_t kMaxRegisterCount = 255;
 static const uint32_t kMaxUpvalueCount = 200;
 static const uint32_t kMaxLocalCount = 200;
+
+static const uint8_t kInvalidReg = 255;
 
 CompileError::CompileError(const Location& location, const std::string& message)
     : location(location)
@@ -399,18 +406,37 @@ struct Compiler
         }
     }
 
-    void compileExprFastcallN(AstExprCall* expr, uint8_t target, uint8_t targetCount, bool targetTop, bool multRet, uint8_t regs, int bfid)
+    void compileExprFastcallN(AstExprCall* expr, uint8_t target, uint8_t targetCount, bool targetTop, bool multRet, uint8_t regs, int bfid, int bfK = -1)
     {
         LUAU_ASSERT(!expr->self);
-        LUAU_ASSERT(expr->args.size <= 2);
+        LUAU_ASSERT(expr->args.size >= 1);
+        LUAU_ASSERT(expr->args.size <= 2 || (bfid == LBF_BIT32_EXTRACTK && expr->args.size == 3));
+        LUAU_ASSERT(bfid == LBF_BIT32_EXTRACTK ? bfK >= 0 : bfK < 0);
 
         LuauOpcode opc = expr->args.size == 1 ? LOP_FASTCALL1 : LOP_FASTCALL2;
 
-        uint32_t args[2] = {};
+        if (FFlag::LuauCompileExtractK)
+        {
+            opc = expr->args.size == 1 ? LOP_FASTCALL1 : (bfK >= 0 || isConstant(expr->args.data[1])) ? LOP_FASTCALL2K : LOP_FASTCALL2;
+        }
+
+        uint32_t args[3] = {};
 
         for (size_t i = 0; i < expr->args.size; ++i)
         {
-            if (i > 0)
+            if (FFlag::LuauCompileExtractK)
+            {
+                if (i > 0 && opc == LOP_FASTCALL2K)
+                {
+                    int32_t cid = getConstantIndex(expr->args.data[i]);
+                    if (cid < 0)
+                        CompileError::raise(expr->location, "Exceeded constant limit; simplify the code to compile");
+
+                    args[i] = cid;
+                    continue; // TODO: remove this and change if below to else if
+                }
+            }
+            else if (i > 0)
             {
                 if (int32_t cid = getConstantIndex(expr->args.data[i]); cid >= 0)
                 {
@@ -421,7 +447,9 @@ struct Compiler
             }
 
             if (int reg = getExprLocalReg(expr->args.data[i]); reg >= 0)
+            {
                 args[i] = uint8_t(reg);
+            }
             else
             {
                 args[i] = uint8_t(regs + 1 + i);
@@ -433,21 +461,31 @@ struct Compiler
 
         bytecode.emitABC(opc, uint8_t(bfid), uint8_t(args[0]), 0);
         if (opc != LOP_FASTCALL1)
-            bytecode.emitAux(args[1]);
+            bytecode.emitAux(bfK >= 0 ? bfK : args[1]);
 
         // Set up a traditional Lua stack for the subsequent LOP_CALL.
         // Note, as with other instructions that immediately follow FASTCALL, these are normally not executed and are used as a fallback for
         // these FASTCALL variants.
         for (size_t i = 0; i < expr->args.size; ++i)
         {
-            if (i > 0 && opc == LOP_FASTCALL2K)
+            if (FFlag::LuauCompileExtractK)
             {
-                emitLoadK(uint8_t(regs + 1 + i), args[i]);
-                break;
+                if (i > 0 && opc == LOP_FASTCALL2K)
+                    emitLoadK(uint8_t(regs + 1 + i), args[i]);
+                else if (args[i] != regs + 1 + i)
+                    bytecode.emitABC(LOP_MOVE, uint8_t(regs + 1 + i), uint8_t(args[i]), 0);
             }
+            else
+            {
+                if (i > 0 && opc == LOP_FASTCALL2K)
+                {
+                    emitLoadK(uint8_t(regs + 1 + i), args[i]);
+                    break;
+                }
 
-            if (args[i] != regs + 1 + i)
-                bytecode.emitABC(LOP_MOVE, uint8_t(regs + 1 + i), uint8_t(args[i]), 0);
+                if (args[i] != regs + 1 + i)
+                    bytecode.emitABC(LOP_MOVE, uint8_t(regs + 1 + i), uint8_t(args[i]), 0);
+            }
         }
 
         // note, these instructions are normally not executed and are used as a fallback for FASTCALL
@@ -596,7 +634,7 @@ struct Compiler
             }
             else
             {
-                AstExprLocal* le = FFlag::LuauCompileFreeReassign ? getExprLocal(arg) : arg->as<AstExprLocal>();
+                AstExprLocal* le = getExprLocal(arg);
                 Variable* lv = le ? variables.find(le->local) : nullptr;
 
                 // if the argument is a local that isn't mutated, we will simply reuse the existing register
@@ -717,6 +755,26 @@ struct Compiler
                 return compileExprSelectVararg(expr, target, targetCount, targetTop, multRet, regs);
             else
                 bfid = -1;
+        }
+
+        // Optimization: for bit32.extract with constant in-range f/w we compile using FASTCALL2K and a special builtin
+        if (FFlag::LuauCompileExtractK && bfid == LBF_BIT32_EXTRACT && expr->args.size == 3 && isConstant(expr->args.data[1]) && isConstant(expr->args.data[2]))
+        {
+            Constant fc = getConstant(expr->args.data[1]);
+            Constant wc = getConstant(expr->args.data[2]);
+
+            int fi = fc.type == Constant::Type_Number ? int(fc.valueNumber) : -1;
+            int wi = wc.type == Constant::Type_Number ? int(wc.valueNumber) : -1;
+
+            if (fi >= 0 && wi > 0 && fi + wi <= 32)
+            {
+                int fwp = fi | ((wi - 1) << 5);
+                int32_t cid = bytecode.addConstantNumber(fwp);
+                if (cid < 0)
+                    CompileError::raise(expr->location, "Exceeded constant limit; simplify the code to compile");
+
+                return compileExprFastcallN(expr, target, targetCount, targetTop, multRet, regs, LBF_BIT32_EXTRACTK, cid);
+            }
         }
 
         // Optimization: for 1/2 argument fast calls use specialized opcodes
@@ -1214,7 +1272,7 @@ struct Compiler
             {
                 // disambiguation: there's 4 cases (we only need truthy or falsy results based on onlyTruth)
                 // onlyTruth = 1: a and b transforms to a ? b : dontcare
-                // onlyTruth = 1: a or b transforms to a ? a : a
+                // onlyTruth = 1: a or b transforms to a ? a : b
                 // onlyTruth = 0: a and b transforms to !a ? a : b
                 // onlyTruth = 0: a or b transforms to !a ? b : dontcare
                 if (onlyTruth == (expr->op == AstExprBinary::And))
@@ -1529,6 +1587,76 @@ struct Compiler
             patchJumps(expr, elseJump, elseLabel);
             patchJump(expr, thenLabel, endLabel);
         }
+    }
+
+    void compileExprInterpString(AstExprInterpString* expr, uint8_t target, bool targetTemp)
+    {
+        size_t formatCapacity = 0;
+        for (AstArray<char> string : expr->strings)
+        {
+            formatCapacity += string.size + std::count(string.data, string.data + string.size, '%');
+        }
+
+        std::string formatString;
+        formatString.reserve(formatCapacity);
+
+        size_t stringsLeft = expr->strings.size;
+
+        for (AstArray<char> string : expr->strings)
+        {
+            if (memchr(string.data, '%', string.size))
+            {
+                for (size_t characterIndex = 0; characterIndex < string.size; ++characterIndex)
+                {
+                    char character = string.data[characterIndex];
+                    formatString.push_back(character);
+
+                    if (character == '%')
+                        formatString.push_back('%');
+                }
+            }
+            else
+                formatString.append(string.data, string.size);
+
+            stringsLeft--;
+
+            if (stringsLeft > 0)
+                formatString += "%*";
+        }
+
+        size_t formatStringSize = formatString.size();
+
+        // We can't use formatStringRef.data() directly, because short strings don't have their data
+        // pinned in memory, so when interpFormatStrings grows, these pointers will move and become invalid.
+        std::unique_ptr<char[]> formatStringPtr(new char[formatStringSize]);
+        memcpy(formatStringPtr.get(), formatString.data(), formatStringSize);
+
+        AstArray<char> formatStringArray{formatStringPtr.get(), formatStringSize};
+        interpStrings.emplace_back(std::move(formatStringPtr)); // invalidates formatStringPtr, but keeps formatStringArray intact
+
+        int32_t formatStringIndex = bytecode.addConstantString(sref(formatStringArray));
+        if (formatStringIndex < 0)
+            CompileError::raise(expr->location, "Exceeded constant limit; simplify the code to compile");
+
+        RegScope rs(this);
+
+        uint8_t baseReg = allocReg(expr, uint8_t(2 + expr->expressions.size));
+
+        emitLoadK(baseReg, formatStringIndex);
+
+        for (size_t index = 0; index < expr->expressions.size; ++index)
+            compileExprTempTop(expr->expressions.data[index], uint8_t(baseReg + 2 + index));
+
+        BytecodeBuilder::StringRef formatMethod = sref(AstName("format"));
+
+        int32_t formatMethodIndex = bytecode.addConstantString(formatMethod);
+        if (formatMethodIndex < 0)
+            CompileError::raise(expr->location, "Exceeded constant limit; simplify the code to compile");
+
+        bytecode.emitABC(LOP_NAMECALL, baseReg, baseReg, uint8_t(BytecodeBuilder::getStringHash(formatMethod)));
+        bytecode.emitAux(formatMethodIndex);
+        bytecode.emitABC(LOP_CALL, baseReg, uint8_t(expr->expressions.size + 2), 2);
+        bytecode.emitABC(LOP_MOVE, target, baseReg, 0);
     }
 
     static uint8_t encodeHashSize(unsigned int hashSize)
@@ -2005,6 +2133,10 @@ struct Compiler
         {
             compileExprIfElse(expr, target, targetTemp);
         }
+        else if (AstExprInterpString* interpString = node->as<AstExprInterpString>(); FFlag::LuauInterpolatedStringBaseSupport && interpString)
+        {
+            compileExprInterpString(interpString, target, targetTemp);
+        }
         else
         {
             LUAU_ASSERT(!"Unknown expression type");
@@ -2030,9 +2162,35 @@ struct Compiler
         return reg;
     }
 
+    // initializes target..target+targetCount-1 range using expression
+    // if expression is a call/vararg, we assume it returns all values, otherwise we fill the rest with nil
+    // assumes target register range can be clobbered and is at the top of the register space if targetTop = true
+    void compileExprTempN(AstExpr* node, uint8_t target, uint8_t targetCount, bool targetTop)
+    {
+        // we assume that target range is at the top of the register space and can be clobbered
+        // this is what allows us to compile the last call expression - if it's a call - using targetTop=true
+        LUAU_ASSERT(!targetTop || unsigned(target + targetCount) == regTop);
+
+        if (AstExprCall* expr = node->as<AstExprCall>())
+        {
+            compileExprCall(expr, target, targetCount, targetTop);
+        }
+        else if (AstExprVarargs* expr = node->as<AstExprVarargs>())
+        {
+            compileExprVarargs(expr, target, targetCount);
+        }
+        else
+        {
+            compileExprTemp(node, target);
+
+            for (size_t i = 1; i < targetCount; ++i)
+                bytecode.emitABC(LOP_LOADNIL, uint8_t(target + i), 0, 0);
+        }
+    }
+
     // initializes target..target+targetCount-1 range using expressions from the list
-    // if list has fewer expressions, and last expression is a call, we assume the call returns the rest of the values
-    // if list has fewer expressions, and last expression isn't a call, we fill the rest with nil
+    // if list has fewer expressions, and last expression is multret, we assume it returns the rest of the values
+    // if list has fewer expressions, and last expression isn't multret, we fill the rest with nil
     // assumes target register range can be clobbered and is at the top of the register space if targetTop = true
     void compileExprListTemp(const AstArray<AstExpr*>& list, uint8_t target, uint8_t targetCount, bool targetTop)
     {
@@ -2062,23 +2220,7 @@ struct Compiler
             for (size_t i = 0; i < list.size - 1; ++i)
                 compileExprTemp(list.data[i], uint8_t(target + i));
 
-            AstExpr* last = list.data[list.size - 1];
-
-            if (AstExprCall* expr = last->as<AstExprCall>())
-            {
-                compileExprCall(expr, uint8_t(target + list.size - 1), uint8_t(targetCount - (list.size - 1)), targetTop);
-            }
-            else if (AstExprVarargs* expr = last->as<AstExprVarargs>())
-            {
-                compileExprVarargs(expr, uint8_t(target + list.size - 1), uint8_t(targetCount - (list.size - 1)));
-            }
-            else
-            {
-                compileExprTemp(last, uint8_t(target + list.size - 1));
-
-                for (size_t i = list.size; i < targetCount; ++i)
-                    bytecode.emitABC(LOP_LOADNIL, uint8_t(target + i), 0, 0);
-            }
+            compileExprTempN(list.data[list.size - 1], uint8_t(target + list.size - 1), uint8_t(targetCount - (list.size - 1)), targetTop);
         }
         else
         {
@@ -2562,7 +2704,7 @@ struct Compiler
             return;
 
         // Optimization: for 1-1 local assignments, we can reuse the register *if* neither local is mutated
-        if (FFlag::LuauCompileFreeReassign && options.optimizationLevel >= 1 && stat->vars.size == 1 && stat->values.size == 1)
+        if (options.optimizationLevel >= 1 && stat->vars.size == 1 && stat->values.size == 1)
         {
             if (AstExprLocal* re = getExprLocal(stat->values.data[0]))
             {
@@ -2776,7 +2918,6 @@ struct Compiler
         LUAU_ASSERT(vars == regs + 3);
 
         LuauOpcode skipOp = LOP_FORGPREP;
-        LuauOpcode loopOp = LOP_FORGLOOP;
 
         // Optimization: when we iterate via pairs/ipairs, we generate special bytecode that optimizes the traversal using internal iteration index
         // These instructions dynamically check if generator is equal to next/inext and bail out
@@ -2788,25 +2929,16 @@ struct Compiler
                 Builtin builtin = getBuiltin(stat->values.data[0]->as<AstExprCall>()->func, globals, variables);
 
                 if (builtin.isGlobal("ipairs")) // for .. in ipairs(t)
-                {
                     skipOp = LOP_FORGPREP_INEXT;
-                    loopOp = FFlag::LuauCompileNoIpairs ? LOP_FORGLOOP : LOP_FORGLOOP_INEXT;
-                }
                 else if (builtin.isGlobal("pairs")) // for .. in pairs(t)
-                {
                     skipOp = LOP_FORGPREP_NEXT;
-                    loopOp = LOP_FORGLOOP;
-                }
             }
             else if (stat->values.size == 2)
             {
                 Builtin builtin = getBuiltin(stat->values.data[0], globals, variables);
 
                 if (builtin.isGlobal("next")) // for .. in next,t
-                {
                     skipOp = LOP_FORGPREP_NEXT;
-                    loopOp = LOP_FORGLOOP;
-                }
             }
         }
 
@@ -2832,19 +2964,9 @@ struct Compiler
 
         size_t backLabel = bytecode.emitLabel();
 
-        bytecode.emitAD(loopOp, regs, 0);
-
-        if (FFlag::LuauCompileNoIpairs)
-        {
-            // TODO: remove loopOp as it's a constant now
-            LUAU_ASSERT(loopOp == LOP_FORGLOOP);
-
-            // FORGLOOP uses aux to encode variable count and fast path flag for ipairs traversal in the high bit
-            bytecode.emitAux((skipOp == LOP_FORGPREP_INEXT ? 0x80000000 : 0) | uint32_t(stat->vars.size));
-        }
-        // note: FORGLOOP needs variable count encoded in AUX field, other loop instructions assume a fixed variable count
-        else if (loopOp == LOP_FORGLOOP)
-            bytecode.emitAux(uint32_t(stat->vars.size));
+        // FORGLOOP uses aux to encode variable count and fast path flag for ipairs traversal in the high bit
+        bytecode.emitAD(LOP_FORGLOOP, regs, 0);
+        bytecode.emitAux((skipOp == LOP_FORGPREP_INEXT ? 0x80000000 : 0) | uint32_t(stat->vars.size));
 
         size_t endLabel = bytecode.emitLabel();
 
@@ -2859,6 +2981,8 @@ struct Compiler
 
     void resolveAssignConflicts(AstStat* stat, std::vector<LValue>& vars)
     {
+        LUAU_ASSERT(!FFlag::LuauCompileOptimalAssignment);
+
         // regsUsed[i] is true if we have assigned the register during earlier assignments
         // regsRemap[i] is set to the register where the original (pre-assignment) copy was made
         // note: regsRemap is uninitialized intentionally to speed small assignments up; regsRemap[i] is valid iff regsUsed[i]
@@ -2911,12 +3035,98 @@ struct Compiler
         }
     }
 
+    struct Assignment
+    {
+        LValue lvalue;
+
+        uint8_t conflictReg = kInvalidReg;
+        uint8_t valueReg = kInvalidReg;
+    };
+
+    // This function analyzes assignments and marks assignment conflicts: cases when a variable is assigned on lhs
+    // but subsequently used on the rhs, assuming assignments are performed in order. Note that it's also possible
+    // for a variable to conflict on the lhs, if it's used in an lvalue expression after it's assigned.
+    // When conflicts are found, Assignment::conflictReg is allocated and that's where assignment is performed instead,
+    // until the final fixup in compileStatAssign. Assignment::valueReg is allocated by compileStatAssign as well.
+    //
+    // Per Lua manual, section 3.3.3 (Assignments), the proper assignment order is only guaranteed to hold for syntactic access:
+    //
+    //     Note that this guarantee covers only accesses syntactically inside the assignment statement. If a function or a metamethod called
+    //     during the assignment changes the value of a variable, Lua gives no guarantees about the order of that access.
+    //
+    // As such, we currently don't check if an assigned local is captured, which may mean it gets reassigned during a function call.
+    void resolveAssignConflicts(AstStat* stat, std::vector<Assignment>& vars, const AstArray<AstExpr*>& values)
+    {
+        struct Visitor : AstVisitor
+        {
+            Compiler* self;
+
+            std::bitset<256> conflict;
+            std::bitset<256> assigned;
+
+            Visitor(Compiler* self)
+                : self(self)
+            {
+            }
+
+            bool visit(AstExprLocal* node) override
+            {
+                int reg = self->getLocalReg(node->local);
+
+                if (reg >= 0 && assigned[reg])
+                    conflict[reg] = true;
+
+                return true;
+            }
+        };
+
+        Visitor visitor(this);
+
+        // mark any registers that are used *after* assignment as conflicting
+        for (size_t i = 0; i < vars.size(); ++i)
+        {
+            const LValue& li = vars[i].lvalue;
+
+            if (i < values.size)
+                values.data[i]->visit(&visitor);
+
+            if (li.kind == LValue::Kind_Local)
+                visitor.assigned[li.reg] = true;
+        }
+
+        // mark any registers used in trailing expressions as conflicting as well
+        for (size_t i = vars.size(); i < values.size; ++i)
+            values.data[i]->visit(&visitor);
+
+        // mark any registers used on left hand side that are also assigned anywhere as conflicting
+        // this is order-independent because we evaluate all right hand side arguments into registers before doing table assignments
+        for (const Assignment& var : vars)
+        {
+            const LValue& li = var.lvalue;
+
+            if ((li.kind == LValue::Kind_IndexName || li.kind == LValue::Kind_IndexNumber || li.kind == LValue::Kind_IndexExpr) &&
+                visitor.assigned[li.reg])
+                visitor.conflict[li.reg] = true;
+
+            if (li.kind == LValue::Kind_IndexExpr && visitor.assigned[li.index])
+                visitor.conflict[li.index] = true;
+        }
+
+        // for any conflicting var, we need to allocate a temporary register where the assignment is performed, so that we can move the value later
+        for (Assignment& var : vars)
+        {
+            const LValue& li = var.lvalue;
+
+            if (li.kind == LValue::Kind_Local && visitor.conflict[li.reg])
+                var.conflictReg = allocReg(stat, 1);
+        }
+    }
+
     void compileStatAssign(AstStatAssign* stat)
     {
         RegScope rs(this);
 
-        // Optimization: one to one assignments don't require complex conflict resolution machinery and allow us to skip temporary registers for
-        // locals
+        // Optimization: one to one assignments don't require complex conflict resolution machinery
         if (stat->vars.size == 1 && stat->values.size == 1)
         {
             LValue var = compileLValue(stat->vars.data[0], rs);
@@ -2936,28 +3146,110 @@ struct Compiler
             return;
         }
 
-        // compute all l-values: note that this doesn't assign anything yet but it allocates registers and computes complex expressions on the left
-        // hand side for example, in "a[expr] = foo" expr will get evaluated here
-        std::vector<LValue> vars(stat->vars.size);
-
-        for (size_t i = 0; i < stat->vars.size; ++i)
-            vars[i] = compileLValue(stat->vars.data[i], rs);
-
-        // perform conflict resolution: if any lvalue refers to a local reg that will be reassigned before that, we save the local variable in a
-        // temporary reg
-        resolveAssignConflicts(stat, vars);
-
-        // compute values into temporaries
-        uint8_t regs = allocReg(stat, unsigned(stat->vars.size));
-
-        compileExprListTemp(stat->values, regs, uint8_t(stat->vars.size), /* targetTop= */ true);
-
-        // assign variables that have associated values; note that if we have fewer values than variables, we'll assign nil because
-        // compileExprListTemp will generate nils
-        for (size_t i = 0; i < stat->vars.size; ++i)
+        if (FFlag::LuauCompileOptimalAssignment)
         {
-            setDebugLine(stat->vars.data[i]);
-            compileAssign(vars[i], uint8_t(regs + i));
+            // compute all l-values: note that this doesn't assign anything yet but it allocates registers and computes complex expressions on the
+            // left hand side - for example, in "a[expr] = foo" expr will get evaluated here
+            std::vector<Assignment> vars(stat->vars.size);
+
+            for (size_t i = 0; i < stat->vars.size; ++i)
+                vars[i].lvalue = compileLValue(stat->vars.data[i], rs);
+
+            // perform conflict resolution: if any expression refers to a local that is assigned before evaluating it, we assign to a temporary
+            // register after this, vars[i].conflictReg is set for locals that need to be assigned in the second pass
+            resolveAssignConflicts(stat, vars, stat->values);
+
+            // compute rhs into (mostly) fresh registers
+            // note that when the lhs assigment is a local, we evaluate directly into that register
+            // this is possible because resolveAssignConflicts renamed conflicting locals into temporaries
+            // after this, vars[i].valueReg is set to a register with the value for *all* vars, but some have already been assigned
+            for (size_t i = 0; i < stat->vars.size && i < stat->values.size; ++i)
+            {
+                AstExpr* value = stat->values.data[i];
+
+                if (i + 1 == stat->values.size && stat->vars.size > stat->values.size)
+                {
+                    // allocate a consecutive range of regs for all remaining vars and compute everything into temps
+                    // note, this also handles trailing nils
+                    uint8_t rest = uint8_t(stat->vars.size - stat->values.size + 1);
+                    uint8_t temp = allocReg(stat, rest);
+
+                    compileExprTempN(value, temp, rest, /* targetTop= */ true);
+
+                    for (size_t j = i; j < stat->vars.size; ++j)
+                        vars[j].valueReg = uint8_t(temp + (j - i));
+                }
+                else
+                {
+                    Assignment& var = vars[i];
+
+                    // if target is a local, use compileExpr directly to target
+                    if (var.lvalue.kind == LValue::Kind_Local)
+                    {
+                        var.valueReg = (var.conflictReg == kInvalidReg) ? var.lvalue.reg : var.conflictReg;
+
+                        compileExpr(stat->values.data[i], var.valueReg);
+                    }
+                    else
+                    {
+                        var.valueReg = compileExprAuto(stat->values.data[i], rs);
+                    }
+                }
+            }
+
+            // compute expressions with side effects for lulz
+            for (size_t i = stat->vars.size; i < stat->values.size; ++i)
+            {
+                RegScope rsi(this);
+                compileExprAuto(stat->values.data[i], rsi);
+            }
+
+            // almost done... let's assign everything left to right, noting that locals were either written-to directly, or will be written-to in a
+            // separate pass to avoid conflicts
+            for (const Assignment& var : vars)
+            {
+                LUAU_ASSERT(var.valueReg != kInvalidReg);
+
+                if (var.lvalue.kind != LValue::Kind_Local)
+                {
+                    setDebugLine(var.lvalue.location);
+                    compileAssign(var.lvalue, var.valueReg);
+                }
+            }
+
+            // all regular local writes are done by the prior loops by computing result directly into target, so this just handles conflicts OR
+            // local copies from temporary registers in multret context, since in that case we have to allocate consecutive temporaries
+            for (const Assignment& var : vars)
+            {
+                if (var.lvalue.kind == LValue::Kind_Local && var.valueReg != var.lvalue.reg)
+                    bytecode.emitABC(LOP_MOVE, var.lvalue.reg, var.valueReg, 0);
+            }
+        }
+        else
+        {
+            // compute all l-values: note that this doesn't assign anything yet but it allocates registers and computes complex expressions on the
+            // left hand side for example, in "a[expr] = foo" expr will get evaluated here
+            std::vector<LValue> vars(stat->vars.size);
+
+            for (size_t i = 0; i < stat->vars.size; ++i)
+                vars[i] = compileLValue(stat->vars.data[i], rs);
+
+            // perform conflict resolution: if any lvalue refers to a local reg that will be reassigned before that, we save the local variable in a
+            // temporary reg
+            resolveAssignConflicts(stat, vars);
+
+            // compute values into temporaries
+            uint8_t regs = allocReg(stat, unsigned(stat->vars.size));
+
+            compileExprListTemp(stat->values, regs, uint8_t(stat->vars.size), /* targetTop= */ true);
+
+            // assign variables that have associated values; note that if we have fewer values than variables, we'll assign nil because
+            // compileExprListTemp will generate nils
+            for (size_t i = 0; i < stat->vars.size; ++i)
+            {
+                setDebugLine(stat->vars.data[i]);
+                compileAssign(vars[i], uint8_t(regs + i));
+            }
         }
     }
 
@@ -3606,6 +3898,7 @@ struct Compiler
     std::vector<Loop> loops;
     std::vector<InlineFrame> inlineFrames;
     std::vector<Capture> captures;
+    std::vector<std::unique_ptr<char[]>> interpStrings;
 };
 
 void compileOrThrow(BytecodeBuilder& bytecode, const ParseResult& parseResult, const AstNameTable& names, const CompileOptions& inputOptions)
@@ -3664,7 +3957,8 @@ void compileOrThrow(BytecodeBuilder& bytecode, const ParseResult& parseResult, c
         compiler.compileFunction(expr);
 
     AstExprFunction main(root->location, /*generics= */ AstArray<AstGenericType>(), /*genericPacks= */ AstArray<AstGenericTypePack>(),
-        /* self= */ nullptr, AstArray<AstLocal*>(), /* vararg= */ Luau::Location(), root, /* functionDepth= */ 0, /* debugname= */ AstName());
+        /* self= */ nullptr, AstArray<AstLocal*>(), /* vararg= */ true, /* varargLocation= */ Luau::Location(), root, /* functionDepth= */ 0,
+        /* debugname= */ AstName());
     uint32_t mainid = compiler.compileFunction(&main);
 
     const Compiler::Function* mainf = compiler.functions.find(&main);

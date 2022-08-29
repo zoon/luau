@@ -43,6 +43,20 @@ TEST_CASE_FIXTURE(Fixture, "DeprecatedGlobal")
     CHECK_EQ(result.warnings[0].text, "Global 'Wait' is deprecated, use 'wait' instead");
 }
 
+TEST_CASE_FIXTURE(Fixture, "DeprecatedGlobalNoReplacement")
+{
+    ScopedFastFlag sff{"LuauLintFixDeprecationMessage", true};
+
+    // Normally this would be defined externally, so hack it in for testing
+    const char* deprecationReplacementString = "";
+    addGlobalBinding(typeChecker, "Version", Binding{typeChecker.anyType, {}, true, deprecationReplacementString});
+
+    LintResult result = lintTyped("Version()");
+
+    REQUIRE_EQ(result.warnings.size(), 1);
+    CHECK_EQ(result.warnings[0].text, "Global 'Version' is deprecated");
+}
+
 TEST_CASE_FIXTURE(Fixture, "PlaceholderRead")
 {
     LintResult result = lint(R"(
@@ -1662,20 +1676,34 @@ TEST_CASE_FIXTURE(Fixture, "WrongCommentOptimize")
 {
     LintResult result = lint(R"(
 --!optimize
---!optimize   
 --!optimize me
 --!optimize 100500
 --!optimize 2
 )");
 
-    REQUIRE_EQ(result.warnings.size(), 4);
+    REQUIRE_EQ(result.warnings.size(), 3);
     CHECK_EQ(result.warnings[0].text, "optimize directive requires an optimization level");
-    CHECK_EQ(result.warnings[1].text, "optimize directive requires an optimization level");
-    CHECK_EQ(result.warnings[2].text, "optimize directive uses unknown optimization level 'me', 0..2 expected");
-    CHECK_EQ(result.warnings[3].text, "optimize directive uses unknown optimization level '100500', 0..2 expected");
+    CHECK_EQ(result.warnings[1].text, "optimize directive uses unknown optimization level 'me', 0..2 expected");
+    CHECK_EQ(result.warnings[2].text, "optimize directive uses unknown optimization level '100500', 0..2 expected");
+
+    result = lint("--!optimize   ");
+    REQUIRE_EQ(result.warnings.size(), 1);
+    CHECK_EQ(result.warnings[0].text, "optimize directive requires an optimization level");
 }
 
-TEST_CASE_FIXTURE(Fixture, "LintIntegerParsing")
+TEST_CASE_FIXTURE(Fixture, "TestStringInterpolation")
+{
+    ScopedFastFlag sff{"LuauInterpolatedStringBaseSupport", true};
+
+    LintResult result = lint(R"(
+        --!nocheck
+        local _ = `unknown {foo}`
+    )");
+
+    REQUIRE_EQ(result.warnings.size(), 1);
+}
+
+TEST_CASE_FIXTURE(Fixture, "IntegerParsing")
 {
     ScopedFastFlag luauLintParseIntegerIssues{"LuauLintParseIntegerIssues", true};
 
@@ -1690,7 +1718,7 @@ local _ = 0x10000000000000000
 }
 
 // TODO: remove with FFlagLuauErrorDoubleHexPrefix
-TEST_CASE_FIXTURE(Fixture, "LintIntegerParsingDoublePrefix")
+TEST_CASE_FIXTURE(Fixture, "IntegerParsingDoublePrefix")
 {
     ScopedFastFlag luauLintParseIntegerIssues{"LuauLintParseIntegerIssues", true};
     ScopedFastFlag luauErrorDoubleHexPrefix{"LuauErrorDoubleHexPrefix", false}; // Lint will be available until we start rejecting code
@@ -1705,6 +1733,38 @@ local _ = 0x0xffffffffffffffffffffffffffffffffff
         "Hexadecimal number literal has a double prefix, which will fail to parse in the future; remove the extra 0x to fix");
     CHECK_EQ(result.warnings[1].text,
         "Hexadecimal number literal has a double prefix, which will fail to parse in the future; remove the extra 0x to fix");
+}
+
+TEST_CASE_FIXTURE(Fixture, "ComparisonPrecedence")
+{
+    ScopedFastFlag sff("LuauLintComparisonPrecedence", true);
+
+    LintResult result = lint(R"(
+local a, b = ...
+
+local _ = not a == b
+local _ = not a ~= b
+local _ = not a <= b
+local _ = a <= b == 0
+
+local _ = not a == not b -- weird but ok
+
+-- silence tests for all of the above
+local _ = not (a == b)
+local _ = (not a) == b
+local _ = not (a ~= b)
+local _ = (not a) ~= b
+local _ = not (a <= b)
+local _ = (not a) <= b
+local _ = (a <= b) == 0
+local _ = a <= (b == 0)
+)");
+
+    REQUIRE_EQ(result.warnings.size(), 4);
+    CHECK_EQ(result.warnings[0].text, "not X == Y is equivalent to (not X) == Y; consider using X ~= Y, or wrap one of the expressions in parentheses to silence");
+    CHECK_EQ(result.warnings[1].text, "not X ~= Y is equivalent to (not X) ~= Y; consider using X == Y, or wrap one of the expressions in parentheses to silence");
+    CHECK_EQ(result.warnings[2].text, "not X <= Y is equivalent to (not X) <= Y; wrap one of the expressions in parentheses to silence");
+    CHECK_EQ(result.warnings[3].text, "X <= Y == Z is equivalent to (X <= Y) == Z; wrap one of the expressions in parentheses to silence");
 }
 
 TEST_SUITE_END();
