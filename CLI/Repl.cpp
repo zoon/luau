@@ -203,22 +203,39 @@ static int lua_collectgarbage(lua_State* L)
 {
     const char* option = luaL_optstring(L, 1, "collect");
 
-    if (option == "collect") {
+    if (strcmp(option, "collect") == 0)
+    {
         lua_gc(L, LUA_GCCOLLECT, 0);
         return 0;
-    } else if (option == "restart") {
+    }
+
+    if (strcmp(option, "restart") == 0) {
         lua_gc(L, LUA_GCRESTART, 0);
         return 0;
-    } else if(option == "stop") {
+    }
+
+    if (strcmp(option, "stop") == 0)
+    {
         lua_gc(L, LUA_GCSTOP, 0);
         return 0;
-    } else if(option == "count") {
+    }
+
+    if (strcmp(option, "count") == 0)
+    {
         int c = lua_gc(L, LUA_GCCOUNT, 0);
         lua_pushnumber(L, c);
         return 1;
     }
+    if (strcmp(option, "countb") == 0)
+    {
+        int c = lua_gc(L, LUA_GCCOUNT, 0);
+        int b = lua_gc(L, LUA_GCCOUNTB, 0);
+        int64_t bytes = ((int64_t)c << 10) + b;
+        lua_pushnumber(L, (double)bytes);
+        return 1;
+    }
 
-    luaL_error(L, "collectgarbage must be called with 'stop', 'restart', 'collect' or 'count'");
+    luaL_error(L, "collectgarbage must be called with 'stop', 'restart', 'collect' or 'count[b]'");
 }
 
 static int lua_vector_dot(lua_State* L)
