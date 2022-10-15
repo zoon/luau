@@ -32,6 +32,24 @@ static int luaB_print(lua_State* L)
     return 0;
 }
 
+static int luaB_warn(lua_State* L)
+{
+    int n = lua_gettop(L); // number of arguments
+    writestring("\x1B[33m", 5);
+    for (int i = 1; i <= n; i++)
+    {
+        size_t l;
+        const char* s = luaL_tolstring(L, i, &l); // convert to string using __tostring et al
+        if (i > 1)
+            writestring("\t", 1);
+        writestring(s, l);
+        lua_pop(L, 1); // pop result
+    }
+    writestring("\x1B[0m", 4);
+    writestring("\n", 1);
+    return 0;
+}
+
 static int luaB_tonumber(lua_State* L)
 {
     int base = luaL_optinteger(L, 2, 10);
@@ -445,6 +463,7 @@ static const luaL_Reg base_funcs[] = {
     {"tostring", luaB_tostring},
     {"type", luaB_type},
     {"typeof", luaB_typeof},
+    {"warn", luaB_warn},
     {NULL, NULL},
 };
 
