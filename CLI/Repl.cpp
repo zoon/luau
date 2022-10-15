@@ -195,20 +195,22 @@ static int lua_collectgarbage(lua_State* L)
 {
     const char* option = luaL_optstring(L, 1, "collect");
 
-    if (strcmp(option, "collect") == 0)
-    {
+    if (option == "collect") {
         lua_gc(L, LUA_GCCOLLECT, 0);
         return 0;
-    }
-
-    if (strcmp(option, "count") == 0)
-    {
+    } else if (option == "restart") {
+        lua_gc(L, LUA_GCRESTART, 0);
+        return 0;
+    } else if(option == "stop") {
+        lua_gc(L, LUA_GCSTOP, 0);
+        return 0;
+    } else if(option == "count") {
         int c = lua_gc(L, LUA_GCCOUNT, 0);
         lua_pushnumber(L, c);
         return 1;
     }
 
-    luaL_error(L, "collectgarbage must be called with 'count' or 'collect'");
+    luaL_error(L, "collectgarbage must be called with 'stop', 'restart', 'collect' or 'count'");
 }
 
 static int lua_vector_dot(lua_State* L)
