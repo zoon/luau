@@ -14,6 +14,7 @@ LUAU_FASTFLAG(LuauLowerBoundsCalculation)
 LUAU_FASTFLAG(LuauUnknownAndNeverType)
 LUAU_FASTFLAGVARIABLE(LuauSpecialTypesAsterisked, false)
 LUAU_FASTFLAGVARIABLE(LuauFixNameMaps, false)
+LUAU_FASTFLAGVARIABLE(LuauUnseeArrayTtv, false)
 
 /*
  * Prefix generic typenames with gen-
@@ -632,6 +633,10 @@ struct TypeVarStringifier
             state.emit("{");
             stringify(ttv.indexer->indexResultType);
             state.emit("}");
+
+            if (FFlag::LuauUnseeArrayTtv)
+                state.unsee(&ttv);
+
             return;
         }
 
@@ -1511,6 +1516,15 @@ std::string toString(const Constraint& constraint, ToStringOptions& opts)
         else if constexpr (std::is_same_v<T, FunctionCallConstraint>)
         {
             return "call " + tos(c.fn, opts) + " with { result = " + tos(c.result, opts) + " }";
+        }
+        else if constexpr (std::is_same_v<T, PrimitiveTypeConstraint>)
+        {
+            return tos(c.resultType, opts) + " ~ prim " + tos(c.expectedType, opts) + ", " + tos(c.singletonType, opts) + ", " +
+                   tos(c.multitonType, opts);
+        }
+        else if constexpr (std::is_same_v<T, HasPropConstraint>)
+        {
+            return tos(c.resultType, opts) + " ~ hasProp " + tos(c.subjectType, opts) + ", \"" + c.prop + "\"";
         }
         else
             static_assert(always_false_v<T>, "Non-exhaustive constraint switch");

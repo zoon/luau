@@ -83,8 +83,13 @@ struct FrontendOptions
     // is complete.
     bool retainFullTypeGraphs = false;
 
-    // Run typechecking only in mode required for autocomplete (strict mode in order to get more precise type information)
+    // Run typechecking only in mode required for autocomplete (strict mode in
+    // order to get more precise type information)
     bool forAutocomplete = false;
+
+    // If not empty, randomly shuffle the constraint set before attempting to
+    // solve.  Use this value to seed the random number generator.
+    std::optional<unsigned> randomizeConstraintResolutionSeed;
 };
 
 struct CheckResult
@@ -157,7 +162,8 @@ struct Frontend
     ScopePtr getGlobalScope();
 
 private:
-    ModulePtr check(const SourceModule& sourceModule, Mode mode, const ScopePtr& environmentScope, std::vector<RequireCycle> requireCycles);
+    ModulePtr check(const SourceModule& sourceModule, Mode mode, const ScopePtr& environmentScope, std::vector<RequireCycle> requireCycles,
+        bool forAutocomplete = false);
 
     std::pair<SourceNode*, SourceModule*> getSourceNode(CheckResult& checkResult, const ModuleName& name);
     SourceModule parse(const ModuleName& name, std::string_view src, const ParseOptions& parseOptions);
@@ -171,10 +177,9 @@ private:
     std::unordered_map<std::string, ScopePtr> environments;
     std::unordered_map<std::string, std::function<void(TypeChecker&, ScopePtr)>> builtinDefinitions;
 
-    ScopePtr globalScope;
+    SingletonTypes singletonTypes_;
 
 public:
-    SingletonTypes singletonTypes_;
     const NotNull<SingletonTypes> singletonTypes;
 
     FileResolver* fileResolver;
@@ -186,13 +191,15 @@ public:
     FrontendOptions options;
     InternalErrorReporter iceHandler;
     TypeArena globalTypes;
-    TypeArena arenaForAutocomplete;
 
     std::unordered_map<ModuleName, SourceNode> sourceNodes;
     std::unordered_map<ModuleName, SourceModule> sourceModules;
     std::unordered_map<ModuleName, RequireTraceResult> requireTrace;
 
     Stats stats = {};
+
+private:
+    ScopePtr globalScope;
 };
 
 } // namespace Luau

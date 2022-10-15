@@ -271,30 +271,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "bail_early_if_unification_is_too_complicated
     }
 }
 
-// Should be in TypeInfer.tables.test.cpp
-// It's unsound to instantiate tables containing generic methods,
-// since mutating properties means table properties should be invariant.
-// We currently allow this but we shouldn't!
-TEST_CASE_FIXTURE(Fixture, "invariant_table_properties_means_instantiating_tables_in_call_is_unsound")
-{
-    CheckResult result = check(R"(
-        --!strict
-        local t = {}
-        function t.m(x) return x end
-        local a : string = t.m("hi")
-        local b : number = t.m(5)
-        function f(x : { m : (number)->number })
-            x.m = function(x) return 1+x end
-        end
-        f(t) -- This shouldn't typecheck
-        local c : string = t.m("hi")
-    )");
-
-    // TODO: this should error!
-    // This should be fixed by replacing generic tables by generics with type bounds.
-    LUAU_REQUIRE_NO_ERRORS(result);
-}
-
 // FIXME: Move this test to another source file when removing FFlag::LuauLowerBoundsCalculation
 TEST_CASE_FIXTURE(Fixture, "do_not_ice_when_trying_to_pick_first_of_generic_type_pack")
 {
@@ -439,13 +415,15 @@ TEST_CASE_FIXTURE(Fixture, "normalization_fails_on_certain_kinds_of_cyclic_table
 // Belongs in TypeInfer.builtins.test.cpp.
 TEST_CASE_FIXTURE(BuiltinsFixture, "pcall_returns_at_least_two_value_but_function_returns_nothing")
 {
+    ScopedFastFlag sff{"LuauBetterMessagingOnCountMismatch", true};
+
     CheckResult result = check(R"(
         local function f(): () end
         local ok, res = pcall(f)
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ("Function only returns 1 value. 2 are required here", toString(result.errors[0]));
+    CHECK_EQ("Function only returns 1 value, but 2 are required here", toString(result.errors[0]));
     // LUAU_REQUIRE_NO_ERRORS(result);
     // CHECK_EQ("boolean", toString(requireType("ok")));
     // CHECK_EQ("any", toString(requireType("res")));
@@ -558,11 +536,10 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "greedy_inference_with_shared_self_triggers_f
     CHECK_EQ("Not all codepaths in this function return 'self, a...'.", toString(result.errors[0]));
 }
 
-TEST_CASE_FIXTURE(Fixture, "dcr_cant_partially_dispatch_a_constraint")
+TEST_CASE_FIXTURE(Fixture, "dcr_can_partially_dispatch_a_constraint")
 {
     ScopedFastFlag sff[] = {
         {"DebugLuauDeferredConstraintResolution", true},
-        {"LuauSpecialTypesAsterisked", true},
     };
 
     CheckResult result = check(R"(
@@ -577,7 +554,6 @@ TEST_CASE_FIXTURE(Fixture, "dcr_cant_partially_dispatch_a_constraint")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    // We should be able to resolve this to number, but we're not there yet.
     // Solving this requires recognizing that we can partially solve the
     // following constraint:
     //
@@ -586,7 +562,7 @@ TEST_CASE_FIXTURE(Fixture, "dcr_cant_partially_dispatch_a_constraint")
     // The correct thing for us to do is to consider the constraint dispatched,
     // but we need to also record a new constraint number <: *blocked* to finish
     // the job later.
-    CHECK("<a>(a, *error-type*) -> ()" == toString(requireType("prime_iter")));
+    CHECK("<a>(a, number) -> ()" == toString(requireType("prime_iter")));
 }
 
 TEST_CASE_FIXTURE(Fixture, "free_options_cannot_be_unified_together")
@@ -608,7 +584,8 @@ TEST_CASE_FIXTURE(Fixture, "free_options_cannot_be_unified_together")
 
     InternalErrorReporter iceHandler;
     UnifierSharedState sharedState{&iceHandler};
-    Unifier u{&arena, singletonTypes, Mode::Strict, NotNull{scope.get()}, Location{}, Variance::Covariant, sharedState};
+    Normalizer normalizer{&arena, singletonTypes, NotNull{&sharedState}};
+    Unifier u{NotNull{&normalizer}, Mode::Strict, NotNull{scope.get()}, Location{}, Variance::Covariant};
 
     u.tryUnify(option1, option2);
 
@@ -633,6 +610,89 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "for_in_loop_with_zero_iterators")
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+// Ideally, we would not try to export a function type with generic types from incorrect scope
+TEST_CASE_FIXTURE(BuiltinsFixture, "generic_type_leak_to_module_interface")
+{
+    ScopedFastFlag LuauAnyifyModuleReturnGenerics{"LuauAnyifyModuleReturnGenerics", true};
+
+    fileResolver.source["game/A"] = R"(
+local wrapStrictTable
+
+local metatable = {
+    __index = function(self, key)
+        local value = self.__tbl[key]
+        if type(value) == "table" then
+            -- unification of the free 'wrapStrictTable' with this function type causes generics of this function to leak out of scope
+            return wrapStrictTable(value, self.__name .. "." .. key)
+        end
+        return value
+    end,
+}
+
+return wrapStrictTable
+    )";
+
+    frontend.check("game/A");
+
+    fileResolver.source["game/B"] = R"(
+local wrapStrictTable = require(game.A)
+
+local Constants = {}
+
+return wrapStrictTable(Constants, "Constants")
+    )";
+
+    frontend.check("game/B");
+
+    ModulePtr m = frontend.moduleResolver.modules["game/B"];
+    REQUIRE(m);
+
+    std::optional<TypeId> result = first(m->getModuleScope()->returnType);
+    REQUIRE(result);
+    CHECK(get<AnyTypeVar>(*result));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "generic_type_leak_to_module_interface_variadic")
+{
+    ScopedFastFlag LuauAnyifyModuleReturnGenerics{"LuauAnyifyModuleReturnGenerics", true};
+
+    fileResolver.source["game/A"] = R"(
+local wrapStrictTable
+
+local metatable = {
+    __index = function<T>(self, key, ...: T)
+        local value = self.__tbl[key]
+        if type(value) == "table" then
+            -- unification of the free 'wrapStrictTable' with this function type causes generics of this function to leak out of scope
+            return wrapStrictTable(value, self.__name .. "." .. key)
+        end
+        return ...
+    end,
+}
+
+return wrapStrictTable
+    )";
+
+    frontend.check("game/A");
+
+    fileResolver.source["game/B"] = R"(
+local wrapStrictTable = require(game.A)
+
+local Constants = {}
+
+return wrapStrictTable(Constants, "Constants")
+    )";
+
+    frontend.check("game/B");
+
+    ModulePtr m = frontend.moduleResolver.modules["game/B"];
+    REQUIRE(m);
+
+    std::optional<TypeId> result = first(m->getModuleScope()->returnType);
+    REQUIRE(result);
+    CHECK(get<AnyTypeVar>(*result));
 }
 
 TEST_SUITE_END();

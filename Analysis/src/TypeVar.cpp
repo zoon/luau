@@ -27,6 +27,7 @@ LUAU_FASTFLAG(LuauUnknownAndNeverType)
 LUAU_FASTFLAGVARIABLE(LuauMaybeGenericIntersectionTypes, false)
 LUAU_FASTFLAGVARIABLE(LuauStringFormatArgumentErrorFix, false)
 LUAU_FASTFLAGVARIABLE(LuauNoMoreGlobalSingletonTypes, false)
+LUAU_FASTFLAG(LuauInstantiateInSubtyping)
 
 namespace Luau
 {
@@ -339,6 +340,8 @@ bool isSubset(const UnionTypeVar& super, const UnionTypeVar& sub)
 // then instantiate U if `isGeneric(U)` is true, and `maybeGeneric(T)` is false.
 bool isGeneric(TypeId ty)
 {
+    LUAU_ASSERT(!FFlag::LuauInstantiateInSubtyping);
+
     ty = follow(ty);
     if (auto ftv = get<FunctionTypeVar>(ty))
         return ftv->generics.size() > 0 || ftv->genericPacks.size() > 0;
@@ -350,6 +353,8 @@ bool isGeneric(TypeId ty)
 
 bool maybeGeneric(TypeId ty)
 {
+    LUAU_ASSERT(!FFlag::LuauInstantiateInSubtyping);
+
     if (FFlag::LuauMaybeGenericIntersectionTypes)
     {
         ty = follow(ty);
@@ -474,6 +479,17 @@ FunctionTypeVar::FunctionTypeVar(TypeLevel level, TypePackId argTypes, TypePackI
 {
 }
 
+FunctionTypeVar::FunctionTypeVar(
+    TypeLevel level, Scope* scope, TypePackId argTypes, TypePackId retTypes, std::optional<FunctionDefinition> defn, bool hasSelf)
+    : level(level)
+    , scope(scope)
+    , argTypes(argTypes)
+    , retTypes(retTypes)
+    , definition(std::move(defn))
+    , hasSelf(hasSelf)
+{
+}
+
 FunctionTypeVar::FunctionTypeVar(std::vector<TypeId> generics, std::vector<TypePackId> genericPacks, TypePackId argTypes, TypePackId retTypes,
     std::optional<FunctionDefinition> defn, bool hasSelf)
     : generics(generics)
@@ -497,9 +513,23 @@ FunctionTypeVar::FunctionTypeVar(TypeLevel level, std::vector<TypeId> generics, 
 {
 }
 
-TableTypeVar::TableTypeVar(TableState state, TypeLevel level)
+FunctionTypeVar::FunctionTypeVar(TypeLevel level, Scope* scope, std::vector<TypeId> generics, std::vector<TypePackId> genericPacks,
+    TypePackId argTypes, TypePackId retTypes, std::optional<FunctionDefinition> defn, bool hasSelf)
+    : level(level)
+    , scope(scope)
+    , generics(generics)
+    , genericPacks(genericPacks)
+    , argTypes(argTypes)
+    , retTypes(retTypes)
+    , definition(std::move(defn))
+    , hasSelf(hasSelf)
+{
+}
+
+TableTypeVar::TableTypeVar(TableState state, TypeLevel level, Scope* scope)
     : state(state)
     , level(level)
+    , scope(scope)
 {
 }
 
@@ -508,6 +538,15 @@ TableTypeVar::TableTypeVar(const Props& props, const std::optional<TableIndexer>
     , indexer(indexer)
     , state(state)
     , level(level)
+{
+}
+
+TableTypeVar::TableTypeVar(const Props& props, const std::optional<TableIndexer>& indexer, TypeLevel level, Scope* scope, TableState state)
+    : props(props)
+    , indexer(indexer)
+    , state(state)
+    , level(level)
+    , scope(scope)
 {
 }
 

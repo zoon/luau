@@ -2,6 +2,7 @@
 
 #include "Luau/AstQuery.h"
 #include "Luau/BuiltinDefinitions.h"
+#include "Luau/Error.h"
 #include "Luau/Scope.h"
 #include "Luau/TypeInfer.h"
 #include "Luau/TypeVar.h"
@@ -14,6 +15,7 @@
 using namespace Luau;
 
 LUAU_FASTFLAG(LuauLowerBoundsCalculation);
+LUAU_FASTFLAG(LuauInstantiateInSubtyping);
 LUAU_FASTFLAG(LuauSpecialTypesAsterisked);
 
 TEST_SUITE_BEGIN("TypeInferFunctions");
@@ -837,6 +839,8 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "calling_function_with_anytypepack_doesnt_lea
 
 TEST_CASE_FIXTURE(Fixture, "too_many_return_values")
 {
+    ScopedFastFlag sff{"LuauBetterMessagingOnCountMismatch", true};
+
     CheckResult result = check(R"(
         --!strict
 
@@ -851,7 +855,49 @@ TEST_CASE_FIXTURE(Fixture, "too_many_return_values")
 
     CountMismatch* acm = get<CountMismatch>(result.errors[0]);
     REQUIRE(acm);
-    CHECK_EQ(acm->context, CountMismatch::Result);
+    CHECK_EQ(acm->context, CountMismatch::FunctionResult);
+    CHECK_EQ(acm->expected, 1);
+    CHECK_EQ(acm->actual, 2);
+}
+
+TEST_CASE_FIXTURE(Fixture, "too_many_return_values_in_parentheses")
+{
+    ScopedFastFlag sff{"LuauBetterMessagingOnCountMismatch", true};
+
+    CheckResult result = check(R"(
+        --!strict
+
+        function f()
+            return 55
+        end
+
+        local a, b = (f())
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+
+    CountMismatch* acm = get<CountMismatch>(result.errors[0]);
+    REQUIRE(acm);
+    CHECK_EQ(acm->context, CountMismatch::FunctionResult);
+    CHECK_EQ(acm->expected, 1);
+    CHECK_EQ(acm->actual, 2);
+}
+
+TEST_CASE_FIXTURE(Fixture, "too_many_return_values_no_function")
+{
+    ScopedFastFlag sff{"LuauBetterMessagingOnCountMismatch", true};
+
+    CheckResult result = check(R"(
+        --!strict
+
+        local a, b = 55
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+
+    CountMismatch* acm = get<CountMismatch>(result.errors[0]);
+    REQUIRE(acm);
+    CHECK_EQ(acm->context, CountMismatch::ExprListResult);
     CHECK_EQ(acm->expected, 1);
     CHECK_EQ(acm->actual, 2);
 }
@@ -1043,10 +1089,20 @@ f(function(a, b, c, ...) return a + b end)
 
     LUAU_REQUIRE_ERRORS(result);
 
-    CHECK_EQ(R"(Type '(number, number, a) -> number' could not be converted into '(number, number) -> number'
+    if (FFlag::LuauInstantiateInSubtyping)
+    {
+        CHECK_EQ(R"(Type '<a>(number, number, a) -> number' could not be converted into '(number, number) -> number'
 caused by:
   Argument count mismatch. Function expects 3 arguments, but only 2 are specified)",
-        toString(result.errors[0]));
+            toString(result.errors[0]));
+    }
+    else
+    {
+        CHECK_EQ(R"(Type '(number, number, a) -> number' could not be converted into '(number, number) -> number'
+caused by:
+  Argument count mismatch. Function expects 3 arguments, but only 2 are specified)",
+            toString(result.errors[0]));
+    }
 
     // Infer from variadic packs into elements
     result = check(R"(
@@ -1145,10 +1201,20 @@ f(function(a, b, c, ...) return a + b end)
 
     LUAU_REQUIRE_ERRORS(result);
 
-    CHECK_EQ(R"(Type '(number, number, a) -> number' could not be converted into '(number, number) -> number'
+    if (FFlag::LuauInstantiateInSubtyping)
+    {
+        CHECK_EQ(R"(Type '<a>(number, number, a) -> number' could not be converted into '(number, number) -> number'
 caused by:
   Argument count mismatch. Function expects 3 arguments, but only 2 are specified)",
-        toString(result.errors[0]));
+            toString(result.errors[0]));
+    }
+    else
+    {
+        CHECK_EQ(R"(Type '(number, number, a) -> number' could not be converted into '(number, number) -> number'
+caused by:
+  Argument count mismatch. Function expects 3 arguments, but only 2 are specified)",
+            toString(result.errors[0]));
+    }
 
     // Infer from variadic packs into elements
     result = check(R"(
@@ -1271,7 +1337,7 @@ local b: B = a
     LUAU_REQUIRE_ERROR_COUNT(1, result);
     CHECK_EQ(toString(result.errors[0]), R"(Type '(number, number) -> number' could not be converted into '(number, number) -> (number, boolean)'
 caused by:
-  Function only returns 1 value. 2 are required here)");
+  Function only returns 1 value, but 2 are required here)");
 }
 
 TEST_CASE_FIXTURE(Fixture, "error_detailed_function_mismatch_ret")

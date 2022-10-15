@@ -682,7 +682,6 @@ TEST_CASE_FIXTURE(Fixture, "parse_numbers_binary")
 
 TEST_CASE_FIXTURE(Fixture, "parse_numbers_error")
 {
-    ScopedFastFlag luauLintParseIntegerIssues{"LuauLintParseIntegerIssues", true};
     ScopedFastFlag luauErrorDoubleHexPrefix{"LuauErrorDoubleHexPrefix", true};
 
     CHECK_EQ(getParseError("return 0b123"), "Malformed number");
@@ -695,7 +694,6 @@ TEST_CASE_FIXTURE(Fixture, "parse_numbers_error")
 
 TEST_CASE_FIXTURE(Fixture, "parse_numbers_error_soft")
 {
-    ScopedFastFlag luauLintParseIntegerIssues{"LuauLintParseIntegerIssues", true};
     ScopedFastFlag luauErrorDoubleHexPrefix{"LuauErrorDoubleHexPrefix", false};
 
     CHECK_EQ(getParseError("return 0x0x0x0x0x0x0x0"), "Malformed number");
@@ -2722,6 +2720,61 @@ TEST_CASE_FIXTURE(Fixture, "error_message_for_using_function_as_type_annotation"
     REQUIRE_EQ(1, result.errors.size());
     CHECK_EQ("Using 'function' as a type annotation is not supported, consider replacing with a function type annotation e.g. '(...any) -> ...any'",
         result.errors[0].getMessage());
+}
+
+TEST_CASE_FIXTURE(Fixture, "get_a_nice_error_when_there_is_an_extra_comma_at_the_end_of_a_function_argument_list")
+{
+    ScopedFastFlag sff{"LuauCommaParenWarnings", true};
+
+    ParseResult result = tryParse(R"(
+        foo(a, b, c,)
+    )");
+
+    REQUIRE(1 == result.errors.size());
+
+    CHECK(Location({1, 20}, {1, 21}) == result.errors[0].getLocation());
+    CHECK("Expected expression after ',' but got ')' instead" == result.errors[0].getMessage());
+}
+
+TEST_CASE_FIXTURE(Fixture, "get_a_nice_error_when_there_is_an_extra_comma_at_the_end_of_a_function_parameter_list")
+{
+    ScopedFastFlag sff{"LuauCommaParenWarnings", true};
+
+    ParseResult result = tryParse(R"(
+        export type VisitFn = (
+            any,
+            Array<TAnyNode | Array<TAnyNode>>, -- extra comma here
+        ) -> any
+    )");
+
+    REQUIRE(1 == result.errors.size());
+
+    CHECK(Location({4, 8}, {4, 9}) == result.errors[0].getLocation());
+    CHECK("Expected type after ',' but got ')' instead" == result.errors[0].getMessage());
+}
+
+TEST_CASE_FIXTURE(Fixture, "get_a_nice_error_when_there_is_an_extra_comma_at_the_end_of_a_generic_parameter_list")
+{
+    ScopedFastFlag sff{"LuauCommaParenWarnings", true};
+
+    ParseResult result = tryParse(R"(
+        export type VisitFn = <A, B,>(a: A, b: B) -> ()
+    )");
+
+    REQUIRE(1 == result.errors.size());
+
+    CHECK(Location({1, 36}, {1, 37}) == result.errors[0].getLocation());
+    CHECK("Expected type after ',' but got '>' instead" == result.errors[0].getMessage());
+
+    REQUIRE(1 == result.root->body.size);
+
+    AstStatTypeAlias* t = result.root->body.data[0]->as<AstStatTypeAlias>();
+    REQUIRE(t != nullptr);
+
+    AstTypeFunction* f = t->type->as<AstTypeFunction>();
+    REQUIRE(f != nullptr);
+
+    CHECK(2 == f->generics.size);
 }
 
 TEST_SUITE_END();

@@ -62,6 +62,29 @@ LOADN R0 5
 LOADK R1 K0
 RETURN R0 2
 )");
+
+    CHECK_EQ("\n" + bcb.dumpEverything(), R"(
+Function 0 (??):
+LOADN R0 5
+LOADK R1 K0
+RETURN R0 2
+
+)");
+}
+
+TEST_CASE("CompileError")
+{
+    std::string source = "local " + rep("a,", 300) + "a = ...";
+
+    // fails to parse
+    std::string bc1 = Luau::compile(source + " !#*$!#$^&!*#&$^*");
+
+    // parses, but fails to compile (too many locals)
+    std::string bc2 = Luau::compile(source);
+
+    // 0 acts as a special marker for error bytecode
+    CHECK_EQ(bc1[0], 0);
+    CHECK_EQ(bc2[0], 0);
 }
 
 TEST_CASE("LocalsDirectReference")
@@ -775,6 +798,8 @@ RETURN R0 1
 
 TEST_CASE("TableSizePredictionSetMetatable")
 {
+    ScopedFastFlag sff("LuauCompileBuiltinMT", true);
+
     CHECK_EQ("\n" + compileFunction0(R"(
 local t = setmetatable({}, nil)
 t.field1 = 1
@@ -782,14 +807,15 @@ t.field2 = 2
 return t
 )"),
         R"(
-GETIMPORT R0 1
 NEWTABLE R1 2 0
-LOADNIL R2
+FASTCALL2K 61 R1 K0 L0
+LOADK R2 K0
+GETIMPORT R0 2
 CALL R0 2 1
-LOADN R1 1
-SETTABLEKS R1 R0 K2
-LOADN R1 2
+L0: LOADN R1 1
 SETTABLEKS R1 R0 K3
+LOADN R1 2
+SETTABLEKS R1 R0 K4
 RETURN R0 1
 )");
 }
@@ -1227,6 +1253,27 @@ JUMP L3
 L2: LOADN R0 40
 L3: SETGLOBAL R0 K6
 RETURN R0 0
+)");
+}
+
+TEST_CASE("UnaryBasic")
+{
+    CHECK_EQ("\n" + compileFunction0("local a = ... return not a"), R"(
+GETVARARGS R0 1
+NOT R1 R0
+RETURN R1 1
+)");
+
+    CHECK_EQ("\n" + compileFunction0("local a = ... return -a"), R"(
+GETVARARGS R0 1
+MINUS R1 R0
+RETURN R1 1
+)");
+
+    CHECK_EQ("\n" + compileFunction0("local a = ... return #a"), R"(
+GETVARARGS R0 1
+LENGTH R1 R0
+RETURN R1 1
 )");
 }
 
@@ -4975,6 +5022,27 @@ MOVE R1 R0
 CALL R1 0 1
 RETURN R1 1
 )");
+
+    // we can't inline any functions in modules with getfenv/setfenv
+    CHECK_EQ("\n" + compileFunction(R"(
+local function foo()
+    return 42
+end
+
+local x = foo()
+getfenv()
+return x
+)",
+                        1, 2),
+        R"(
+DUPCLOSURE R0 K0
+MOVE R1 R0
+CALL R1 0 1
+GETIMPORT R2 2
+CALL R2 0 0
+RETURN R1 1
+)");
+
 }
 
 TEST_CASE("InlineNestedLoops")
@@ -6101,6 +6169,7 @@ return
     bit32.extract(-1, 31),
     bit32.replace(100, 1, 0),
     math.log(100, 10),
+    typeof(nil),
     (type("fin"))
 )",
                         0, 2),
@@ -6156,7 +6225,8 @@ LOADN R47 1
 LOADN R48 101
 LOADN R49 2
 LOADK R50 K3
-RETURN R0 51
+LOADK R51 K4
+RETURN R0 52
 )");
 }
 

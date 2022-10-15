@@ -16,7 +16,7 @@ struct TypeMismatch
     TypeMismatch() = default;
     TypeMismatch(TypeId wantedType, TypeId givenType);
     TypeMismatch(TypeId wantedType, TypeId givenType, std::string reason);
-    TypeMismatch(TypeId wantedType, TypeId givenType, std::string reason, TypeError error);
+    TypeMismatch(TypeId wantedType, TypeId givenType, std::string reason, std::optional<TypeError> error);
 
     TypeId wantedType = nullptr;
     TypeId givenType = nullptr;
@@ -81,7 +81,7 @@ struct OnlyTablesCanHaveMethods
 struct DuplicateTypeDefinition
 {
     Name name;
-    Location previousLocation;
+    std::optional<Location> previousLocation;
 
     bool operator==(const DuplicateTypeDefinition& rhs) const;
 };
@@ -91,7 +91,8 @@ struct CountMismatch
     enum Context
     {
         Arg,
-        Result,
+        FunctionResult,
+        ExprListResult,
         Return,
     };
     size_t expected;

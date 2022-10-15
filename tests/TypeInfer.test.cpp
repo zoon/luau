@@ -17,7 +17,9 @@
 LUAU_FASTFLAG(LuauLowerBoundsCalculation);
 LUAU_FASTFLAG(LuauFixLocationSpanTableIndexExpr);
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAG(LuauInstantiateInSubtyping);
 LUAU_FASTFLAG(LuauSpecialTypesAsterisked);
+LUAU_FASTFLAG(LuauCheckGenericHOFTypes);
 
 using namespace Luau;
 
@@ -999,7 +1001,26 @@ TEST_CASE_FIXTURE(Fixture, "cli_50041_committing_txnlog_in_apollo_client_error")
         end
     )");
 
-    LUAU_REQUIRE_NO_ERRORS(result);
+    if (FFlag::LuauInstantiateInSubtyping && !FFlag::LuauCheckGenericHOFTypes)
+    {
+        // though this didn't error before the flag, it seems as though it should error since fields of a table are invariant.
+        // the user's intent would likely be that these "method" fields would be read-only, but without an annotation, accepting this should be unsound.
+
+        LUAU_REQUIRE_ERROR_COUNT(1, result);
+
+        CHECK_EQ(R"(Type 't1 where t1 = {+ getStoreFieldName: (t1, {| fieldName: string |} & {| from: number? |}) -> (a, b...) +}' could not be converted into 'Policies'
+caused by:
+  Property 'getStoreFieldName' is not compatible. Type 't1 where t1 = ({+ getStoreFieldName: t1 +}, {| fieldName: string |} & {| from: number? |}) -> (a, b...)' could not be converted into '(Policies, FieldSpecifier) -> string'
+caused by:
+  Argument #2 type is not compatible. Type 'FieldSpecifier' could not be converted into 'FieldSpecifier & {| from: number? |}'
+caused by:
+  Not all intersection parts are compatible. Table type 'FieldSpecifier' not compatible with type '{| from: number? |}' because the former has extra field 'fieldName')",
+                 toString(result.errors[0]));
+    }
+    else
+    {
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "type_infer_recursion_limit_no_ice")
@@ -1018,6 +1039,43 @@ TEST_CASE_FIXTURE(Fixture, "type_infer_recursion_limit_no_ice")
 
     LUAU_REQUIRE_ERRORS(result);
     CHECK_EQ("Code is too complex to typecheck! Consider simplifying the code around this area", toString(result.errors[0]));
+}
+
+TEST_CASE_FIXTURE(Fixture, "type_infer_recursion_limit_normalizer")
+{
+    ScopedFastInt sfi("LuauTypeInferRecursionLimit", 10);
+    ScopedFastFlag sffs[] {
+        {"LuauSubtypeNormalizer", true},
+        {"LuauTypeNormalization2", true},
+        {"LuauAutocompleteDynamicLimits", true},
+    };
+
+    CheckResult result = check(R"(
+        function f<a,b,c,d,e,f,g,h,i,j>()
+            local x : a&b&c&d&e&f&g&h&(i?)
+            local y : (a&b&c&d&e&f&g&h&i)? = x
+        end
+    )");
+
+    LUAU_REQUIRE_ERRORS(result);
+    CHECK_EQ("Internal error: Code is too complex to typecheck! Consider adding type annotations around this area", toString(result.errors[0]));
+}
+
+TEST_CASE_FIXTURE(Fixture, "type_infer_cache_limit_normalizer")
+{
+    ScopedFastInt sfi("LuauNormalizeCacheLimit", 10);
+    ScopedFastFlag sffs[] {
+        {"LuauSubtypeNormalizer", true},
+        {"LuauTypeNormalization2", true},
+    };
+
+    CheckResult result = check(R"(
+        local x : ((number) -> number) & ((string) -> string) & ((nil) -> nil) & (({}) -> {})
+        local y : (number | string | nil | {}) -> (number | string | nil | {}) = x
+    )");
+
+    LUAU_REQUIRE_ERRORS(result);
+    CHECK_EQ("Internal error: Code is too complex to typecheck! Consider adding type annotations around this area", toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "follow_on_new_types_in_substitution")
@@ -1082,7 +1140,7 @@ TEST_CASE_FIXTURE(Fixture, "do_not_bind_a_free_table_to_a_union_containing_that_
     )");
 }
 
-TEST_CASE_FIXTURE(Fixture, "types stored in astResolvedTypes")
+TEST_CASE_FIXTURE(Fixture, "types_stored_in_astResolvedTypes")
 {
     CheckResult result = check(R"(
 type alias = typeof("hello")
@@ -1120,6 +1178,77 @@ TEST_CASE_FIXTURE(Fixture, "bidirectional_checking_of_higher_order_function")
     Location location = result.errors[0].location;
     CHECK(location.begin.line == 4);
     CHECK(location.end.line == 4);
+}
+
+TEST_CASE_FIXTURE(Fixture, "dcr_can_partially_dispatch_a_constraint")
+{
+    ScopedFastFlag sff[] = {
+        {"DebugLuauDeferredConstraintResolution", true},
+    };
+
+    CheckResult result = check(R"(
+        local function hasDivisors(value: number)
+        end
+
+        function prime_iter(state, index)
+            hasDivisors(index)
+            index += 1
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    // Solving this requires recognizing that we can't dispatch a constraint
+    // like this without doing further work:
+    //
+    //     (*blocked*) -> () <: (number) -> (b...)
+    //
+    // We solve this by searching both types for BlockedTypeVars and block the
+    // constraint on any we find.  It also gets the job done, but I'm worried
+    // about the efficiency of doing so many deep type traversals and it may
+    // make us more prone to getting stuck on constraint cycles.
+    //
+    // If this doesn't pan out, a possible solution is to go further down the
+    // path of supporting partial constraint dispatch.  The way it would work is
+    // that we'd dispatch the above constraint by binding b... to (), but we
+    // would append a new constraint number <: *blocked* to the constraint set
+    // to be solved later.  This should be faster and theoretically less prone
+    // to cyclic constraint dependencies.
+    CHECK("<a>(a, number) -> ()" == toString(requireType("prime_iter")));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "it_is_ok_to_have_inconsistent_number_of_return_values_in_nonstrict")
+{
+    CheckResult result = check(R"(
+        --!nonstrict
+        function validate(stats, hits, misses)
+            local checked = {}
+
+            for _,l in ipairs(hits) do
+                if not (stats[l] and stats[l] > 0) then
+                    return false, string.format("expected line %d to be hit", l)
+                end
+                checked[l] = true
+            end
+
+            for _,l in ipairs(misses) do
+                if not (stats[l] and stats[l] == 0) then
+                    return false, string.format("expected line %d to be missed", l)
+                end
+                checked[l] = true
+            end
+
+            for k,v in pairs(stats) do
+                if type(k) == "number" and not checked[k] then
+                    return false, string.format("expected line %d to be absent", k)
+                end
+            end
+
+            return true
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
 }
 
 TEST_SUITE_END();

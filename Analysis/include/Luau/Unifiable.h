@@ -85,6 +85,7 @@ struct Free
 {
     explicit Free(TypeLevel level);
     explicit Free(Scope* scope);
+    explicit Free(Scope* scope, TypeLevel level);
 
     int index;
     TypeLevel level;
@@ -95,7 +96,7 @@ struct Free
     bool forwardedTypeAlias = false;
 
 private:
-    static int nextIndex;
+    static int DEPRECATED_nextIndex;
 };
 
 template<typename Id>
@@ -126,7 +127,7 @@ struct Generic
     bool explicitName = false;
 
 private:
-    static int nextIndex;
+    static int DEPRECATED_nextIndex;
 };
 
 struct Error

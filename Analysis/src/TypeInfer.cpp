@@ -32,21 +32,25 @@ LUAU_FASTINTVARIABLE(LuauCheckRecursionLimit, 300)
 LUAU_FASTINTVARIABLE(LuauVisitRecursionLimit, 500)
 LUAU_FASTFLAG(LuauKnowsTheDataModel3)
 LUAU_FASTFLAG(LuauAutocompleteDynamicLimits)
+LUAU_FASTFLAG(LuauTypeNormalization2)
 LUAU_FASTFLAGVARIABLE(LuauFunctionArgMismatchDetails, false)
-LUAU_FASTFLAGVARIABLE(LuauInplaceDemoteSkipAllBound, false)
 LUAU_FASTFLAGVARIABLE(LuauLowerBoundsCalculation, false)
 LUAU_FASTFLAGVARIABLE(DebugLuauFreezeDuringUnification, false)
-LUAU_FASTFLAGVARIABLE(LuauSelfCallAutocompleteFix3, false)
 LUAU_FASTFLAGVARIABLE(LuauReturnAnyInsteadOfICE, false) // Eventually removed as false.
 LUAU_FASTFLAGVARIABLE(DebugLuauSharedSelf, false)
+LUAU_FASTFLAGVARIABLE(LuauAnyifyModuleReturnGenerics, false)
 LUAU_FASTFLAGVARIABLE(LuauUnknownAndNeverType, false)
 LUAU_FASTFLAGVARIABLE(LuauCallUnifyPackTails, false)
 LUAU_FASTFLAGVARIABLE(LuauCheckGenericHOFTypes, false)
 LUAU_FASTFLAGVARIABLE(LuauBinaryNeedsExpectedTypesToo, false)
+LUAU_FASTFLAGVARIABLE(LuauFixVarargExprHeadType, false)
 LUAU_FASTFLAGVARIABLE(LuauNeverTypesAndOperatorsInference, false)
 LUAU_FASTFLAGVARIABLE(LuauReturnsFromCallsitesAreNotWidened, false)
+LUAU_FASTFLAG(LuauInstantiateInSubtyping)
 LUAU_FASTFLAGVARIABLE(LuauCompleteVisitor, false)
 LUAU_FASTFLAGVARIABLE(LuauUnionOfTypesFollow, false)
+LUAU_FASTFLAGVARIABLE(LuauReportShadowedTypeAlias, false)
+LUAU_FASTFLAGVARIABLE(LuauBetterMessagingOnCountMismatch, false)
 
 namespace Luau
 {
@@ -66,9 +70,7 @@ static void defaultLuauPrintLine(const std::string& s)
     printf("%s\n", s.c_str());
 }
 
-using PrintLineProc = decltype(&defaultLuauPrintLine);
-
-static PrintLineProc luauPrintLine = &defaultLuauPrintLine;
+PrintLineProc luauPrintLine = &defaultLuauPrintLine;
 
 void setPrintLine(PrintLineProc pl)
 {
@@ -255,6 +257,7 @@ TypeChecker::TypeChecker(ModuleResolver* resolver, NotNull<SingletonTypes> singl
     , singletonTypes(singletonTypes)
     , iceHandler(iceHandler)
     , unifierState(iceHandler)
+    , normalizer(nullptr, singletonTypes, NotNull{&unifierState})
     , nilType(singletonTypes->nilType)
     , numberType(singletonTypes->numberType)
     , stringType(singletonTypes->stringType)
@@ -270,16 +273,16 @@ TypeChecker::TypeChecker(ModuleResolver* resolver, NotNull<SingletonTypes> singl
 {
     globalScope = std::make_shared<Scope>(globalTypes.addTypePack(TypePackVar{FreeTypePack{TypeLevel{}}}));
 
-    globalScope->exportedTypeBindings["any"] = TypeFun{{}, anyType};
-    globalScope->exportedTypeBindings["nil"] = TypeFun{{}, nilType};
-    globalScope->exportedTypeBindings["number"] = TypeFun{{}, numberType};
-    globalScope->exportedTypeBindings["string"] = TypeFun{{}, stringType};
-    globalScope->exportedTypeBindings["boolean"] = TypeFun{{}, booleanType};
-    globalScope->exportedTypeBindings["thread"] = TypeFun{{}, threadType};
+    globalScope->addBuiltinTypeBinding("any", TypeFun{{}, anyType});
+    globalScope->addBuiltinTypeBinding("nil", TypeFun{{}, nilType});
+    globalScope->addBuiltinTypeBinding("number", TypeFun{{}, numberType});
+    globalScope->addBuiltinTypeBinding("string", TypeFun{{}, stringType});
+    globalScope->addBuiltinTypeBinding("boolean", TypeFun{{}, booleanType});
+    globalScope->addBuiltinTypeBinding("thread", TypeFun{{}, threadType});
     if (FFlag::LuauUnknownAndNeverType)
     {
-        globalScope->exportedTypeBindings["unknown"] = TypeFun{{}, unknownType};
-        globalScope->exportedTypeBindings["never"] = TypeFun{{}, neverType};
+        globalScope->addBuiltinTypeBinding("unknown", TypeFun{{}, unknownType});
+        globalScope->addBuiltinTypeBinding("never", TypeFun{{}, neverType});
     }
 }
 
@@ -301,12 +304,13 @@ ModulePtr TypeChecker::checkWithoutRecursionCheck(const SourceModule& module, Mo
     LUAU_TIMETRACE_SCOPE("TypeChecker::check", "TypeChecker");
     LUAU_TIMETRACE_ARGUMENT("module", module.name.c_str());
 
-    currentModule.reset(new Module());
+    currentModule.reset(new Module);
     currentModule->type = module.type;
     currentModule->allocator = module.allocator;
     currentModule->names = module.names;
 
     iceHandler->moduleName = module.name;
+    normalizer.arena = &currentModule->internalTypes;
 
     if (FFlag::LuauAutocompleteDynamicLimits)
     {
@@ -351,14 +355,22 @@ ModulePtr TypeChecker::checkWithoutRecursionCheck(const SourceModule& module, Mo
     if (get<FreeTypePack>(follow(moduleScope->returnType)))
         moduleScope->returnType = addTypePack(TypePack{{}, std::nullopt});
     else
-    {
         moduleScope->returnType = anyify(moduleScope, moduleScope->returnType, Location{});
-    }
+
+    if (FFlag::LuauAnyifyModuleReturnGenerics)
+        moduleScope->returnType = anyifyModuleReturnTypePackGenerics(moduleScope->returnType);
 
     for (auto& [_, typeFun] : moduleScope->exportedTypeBindings)
         typeFun.type = anyify(moduleScope, typeFun.type, Location{});
 
     prepareErrorsForDisplay(currentModule->errors);
+
+    if (FFlag::LuauTypeNormalization2)
+    {
+        // Clear the normalizer caches, since they contain types from the internal type surface
+        normalizer.clearCaches();
+        normalizer.arena = nullptr;
+    }
 
     currentModule->clonePublicInterface(singletonTypes, *iceHandler);
 
@@ -474,7 +486,7 @@ struct InplaceDemoter : TypeVarOnceVisitor
     TypeArena* arena;
 
     InplaceDemoter(TypeLevel level, TypeArena* arena)
-        : TypeVarOnceVisitor(/* skipBoundTypes= */ FFlag::LuauInplaceDemoteSkipAllBound)
+        : TypeVarOnceVisitor(/* skipBoundTypes= */ true)
         , newLevel(level)
         , arena(arena)
     {
@@ -492,12 +504,6 @@ struct InplaceDemoter : TypeVarOnceVisitor
         }
 
         return false;
-    }
-
-    bool visit(TypeId ty, const BoundTypeVar& btyRef) override
-    {
-        LUAU_ASSERT(!FFlag::LuauInplaceDemoteSkipAllBound);
-        return true;
     }
 
     bool visit(TypeId ty) override
@@ -534,7 +540,7 @@ void TypeChecker::checkBlockWithoutRecursionCheck(const ScopePtr& scope, const A
     {
         if (const auto& typealias = stat->as<AstStatTypeAlias>())
         {
-            check(scope, *typealias, subLevel, true);
+            prototype(scope, *typealias, subLevel);
             ++subLevel;
         }
     }
@@ -698,6 +704,10 @@ LUAU_NOINLINE void TypeChecker::checkBlockTypeAliases(const ScopePtr& scope, std
             auto& bindings = typealias->exported ? scope->exportedTypeBindings : scope->privateTypeBindings;
 
             Name name = typealias->name.value;
+
+            if (FFlag::LuauReportShadowedTypeAlias && duplicateTypeAliases.contains({typealias->exported, name}))
+                continue;
+
             TypeId type = bindings[name].type;
             if (get<FreeTypeVar>(follow(type)))
             {
@@ -1025,8 +1035,11 @@ void TypeChecker::check(const ScopePtr& scope, const AstStatAssign& assign)
 
         if (right)
         {
-            if (!maybeGeneric(left) && isGeneric(right))
-                right = instantiate(scope, right, loc);
+            if (!FFlag::LuauInstantiateInSubtyping)
+            {
+                if (!maybeGeneric(left) && isGeneric(right))
+                    right = instantiate(scope, right, loc);
+            }
 
             // Setting a table entry to nil doesn't mean nil is the type of the indexer, it is just deleting the entry
             const TableTypeVar* destTableTypeReceivingNil = nullptr;
@@ -1100,7 +1113,9 @@ void TypeChecker::check(const ScopePtr& scope, const AstStatLocal& local)
         variableTypes.push_back(ty);
         expectedTypes.push_back(ty);
 
-        instantiateGenerics.push_back(annotation != nullptr && !maybeGeneric(ty));
+        // with FFlag::LuauInstantiateInSubtyping enabled, we shouldn't need to produce instantiateGenerics at all.
+        if (!FFlag::LuauInstantiateInSubtyping)
+            instantiateGenerics.push_back(annotation != nullptr && !maybeGeneric(ty));
     }
 
     if (local.values.size > 0)
@@ -1109,8 +1124,23 @@ void TypeChecker::check(const ScopePtr& scope, const AstStatLocal& local)
         TypePackId valuePack =
             checkExprList(scope, local.location, local.values, /* substituteFreeForNil= */ true, instantiateGenerics, expectedTypes).type;
 
+        // If the expression list only contains one expression and it's a function call or is otherwise within parentheses, use FunctionResult.
+        // Otherwise, we'll want to use ExprListResult to make the error messaging more general.
+        CountMismatch::Context ctx = FFlag::LuauBetterMessagingOnCountMismatch ? CountMismatch::ExprListResult : CountMismatch::FunctionResult;
+        if (FFlag::LuauBetterMessagingOnCountMismatch)
+        {
+            if (local.values.size == 1)
+            {
+                AstExpr* e = local.values.data[0];
+                while (auto group = e->as<AstExprGroup>())
+                    e = group->expr;
+                if (e->is<AstExprCall>())
+                    ctx = CountMismatch::FunctionResult;
+            }
+        }
+
         Unifier state = mkUnifier(scope, local.location);
-        state.ctx = CountMismatch::Result;
+        state.ctx = ctx;
         state.tryUnify(valuePack, variablePack);
         reportErrors(state.errors);
 
@@ -1472,10 +1502,8 @@ void TypeChecker::check(const ScopePtr& scope, TypeId ty, const ScopePtr& funSco
     scope->bindings[function.name] = {quantify(funScope, ty, function.name->location), function.name->location};
 }
 
-void TypeChecker::check(const ScopePtr& scope, const AstStatTypeAlias& typealias, int subLevel, bool forwardDeclare)
+void TypeChecker::check(const ScopePtr& scope, const AstStatTypeAlias& typealias)
 {
-    // This function should be called at most twice for each type alias.
-    // Once with forwardDeclare, and once without.
     Name name = typealias.name.value;
 
     // If the alias is missing a name, we can't do anything with it.  Ignore it.
@@ -1490,14 +1518,134 @@ void TypeChecker::check(const ScopePtr& scope, const AstStatTypeAlias& typealias
 
     auto& bindingsMap = typealias.exported ? scope->exportedTypeBindings : scope->privateTypeBindings;
 
-    if (forwardDeclare)
-    {
-        if (binding)
-        {
-            Location location = scope->typeAliasLocations[name];
-            reportError(TypeError{typealias.location, DuplicateTypeDefinition{name, location}});
+    // If the first pass failed (this should mean a duplicate definition), the second pass isn't going to be
+    // interesting.
+    if (duplicateTypeAliases.find({typealias.exported, name}))
+        return;
 
+    // By now this alias must have been `prototype()`d first.
+    if (!binding)
+        ice("Not predeclared");
+
+    ScopePtr aliasScope = childScope(scope, typealias.location);
+    aliasScope->level = scope->level.incr();
+
+    for (auto param : binding->typeParams)
+    {
+        auto generic = get<GenericTypeVar>(param.ty);
+        LUAU_ASSERT(generic);
+        aliasScope->privateTypeBindings[generic->name] = TypeFun{{}, param.ty};
+    }
+
+    for (auto param : binding->typePackParams)
+    {
+        auto generic = get<GenericTypePack>(param.tp);
+        LUAU_ASSERT(generic);
+        aliasScope->privateTypePackBindings[generic->name] = param.tp;
+    }
+
+    TypeId ty = resolveType(aliasScope, *typealias.type);
+    if (auto ttv = getMutable<TableTypeVar>(follow(ty)))
+    {
+        // If the table is already named and we want to rename the type function, we have to bind new alias to a copy
+        // Additionally, we can't modify types that come from other modules
+        if (ttv->name || follow(ty)->owningArena != &currentModule->internalTypes)
+        {
+            bool sameTys = std::equal(ttv->instantiatedTypeParams.begin(), ttv->instantiatedTypeParams.end(), binding->typeParams.begin(),
+                binding->typeParams.end(), [](auto&& itp, auto&& tp) {
+                    return itp == tp.ty;
+                });
+            bool sameTps = std::equal(ttv->instantiatedTypePackParams.begin(), ttv->instantiatedTypePackParams.end(), binding->typePackParams.begin(),
+                binding->typePackParams.end(), [](auto&& itpp, auto&& tpp) {
+                    return itpp == tpp.tp;
+                });
+
+            // Copy can be skipped if this is an identical alias
+            if (!ttv->name || ttv->name != name || !sameTys || !sameTps)
+            {
+                // This is a shallow clone, original recursive links to self are not updated
+                TableTypeVar clone = TableTypeVar{ttv->props, ttv->indexer, ttv->level, ttv->state};
+                clone.definitionModuleName = ttv->definitionModuleName;
+                clone.name = name;
+
+                for (auto param : binding->typeParams)
+                    clone.instantiatedTypeParams.push_back(param.ty);
+
+                for (auto param : binding->typePackParams)
+                    clone.instantiatedTypePackParams.push_back(param.tp);
+
+                bool isNormal = ty->normal;
+                ty = addType(std::move(clone));
+
+                if (FFlag::LuauLowerBoundsCalculation)
+                    asMutable(ty)->normal = isNormal;
+            }
+        }
+        else
+        {
+            ttv->name = name;
+
+            ttv->instantiatedTypeParams.clear();
+            for (auto param : binding->typeParams)
+                ttv->instantiatedTypeParams.push_back(param.ty);
+
+            ttv->instantiatedTypePackParams.clear();
+            for (auto param : binding->typePackParams)
+                ttv->instantiatedTypePackParams.push_back(param.tp);
+        }
+    }
+    else if (auto mtv = getMutable<MetatableTypeVar>(follow(ty)))
+    {
+        // We can't modify types that come from other modules
+        if (follow(ty)->owningArena == &currentModule->internalTypes)
+            mtv->syntheticName = name;
+    }
+
+    TypeId& bindingType = bindingsMap[name].type;
+
+    if (unify(ty, bindingType, aliasScope, typealias.location))
+        bindingType = ty;
+
+    if (FFlag::LuauLowerBoundsCalculation)
+    {
+        auto [t, ok] = normalize(bindingType, currentModule, singletonTypes, *iceHandler);
+        bindingType = t;
+        if (!ok)
+            reportError(typealias.location, NormalizationTooComplex{});
+    }
+}
+
+void TypeChecker::prototype(const ScopePtr& scope, const AstStatTypeAlias& typealias, int subLevel)
+{
+    Name name = typealias.name.value;
+
+    // If the alias is missing a name, we can't do anything with it.  Ignore it.
+    if (name == kParseNameError)
+        return;
+
+    std::optional<TypeFun> binding;
+    if (auto it = scope->exportedTypeBindings.find(name); it != scope->exportedTypeBindings.end())
+        binding = it->second;
+    else if (auto it = scope->privateTypeBindings.find(name); it != scope->privateTypeBindings.end())
+        binding = it->second;
+
+    auto& bindingsMap = typealias.exported ? scope->exportedTypeBindings : scope->privateTypeBindings;
+
+    if (binding)
+    {
+        Location location = scope->typeAliasLocations[name];
+        reportError(TypeError{typealias.location, DuplicateTypeDefinition{name, location}});
+
+        if (!FFlag::LuauReportShadowedTypeAlias)
             bindingsMap[name] = TypeFun{binding->typeParams, binding->typePackParams, errorRecoveryType(anyType)};
+
+        duplicateTypeAliases.insert({typealias.exported, name});
+    }
+    else if (FFlag::LuauReportShadowedTypeAlias)
+    {
+        if (globalScope->builtinTypeNames.contains(name))
+        {
+            reportError(typealias.location, DuplicateTypeDefinition{name});
             duplicateTypeAliases.insert({typealias.exported, name});
         }
         else
@@ -1520,100 +1668,20 @@ void TypeChecker::check(const ScopePtr& scope, const AstStatTypeAlias& typealias
     }
     else
     {
-        // If the first pass failed (this should mean a duplicate definition), the second pass isn't going to be
-        // interesting.
-        if (duplicateTypeAliases.find({typealias.exported, name}))
-            return;
-
-        if (!binding)
-            ice("Not predeclared");
-
         ScopePtr aliasScope = childScope(scope, typealias.location);
         aliasScope->level = scope->level.incr();
+        aliasScope->level.subLevel = subLevel;
 
-        for (auto param : binding->typeParams)
-        {
-            auto generic = get<GenericTypeVar>(param.ty);
-            LUAU_ASSERT(generic);
-            aliasScope->privateTypeBindings[generic->name] = TypeFun{{}, param.ty};
-        }
+        auto [generics, genericPacks] =
+            createGenericTypes(aliasScope, scope->level, typealias, typealias.generics, typealias.genericPacks, /* useCache = */ true);
 
-        for (auto param : binding->typePackParams)
-        {
-            auto generic = get<GenericTypePack>(param.tp);
-            LUAU_ASSERT(generic);
-            aliasScope->privateTypePackBindings[generic->name] = param.tp;
-        }
+        TypeId ty = freshType(aliasScope);
+        FreeTypeVar* ftv = getMutable<FreeTypeVar>(ty);
+        LUAU_ASSERT(ftv);
+        ftv->forwardedTypeAlias = true;
+        bindingsMap[name] = {std::move(generics), std::move(genericPacks), ty};
 
-        TypeId ty = resolveType(aliasScope, *typealias.type);
-        if (auto ttv = getMutable<TableTypeVar>(follow(ty)))
-        {
-            // If the table is already named and we want to rename the type function, we have to bind new alias to a copy
-            // Additionally, we can't modify types that come from other modules
-            if (ttv->name || follow(ty)->owningArena != &currentModule->internalTypes)
-            {
-                bool sameTys = std::equal(ttv->instantiatedTypeParams.begin(), ttv->instantiatedTypeParams.end(), binding->typeParams.begin(),
-                    binding->typeParams.end(), [](auto&& itp, auto&& tp) {
-                        return itp == tp.ty;
-                    });
-                bool sameTps = std::equal(ttv->instantiatedTypePackParams.begin(), ttv->instantiatedTypePackParams.end(),
-                    binding->typePackParams.begin(), binding->typePackParams.end(), [](auto&& itpp, auto&& tpp) {
-                        return itpp == tpp.tp;
-                    });
-
-                // Copy can be skipped if this is an identical alias
-                if (!ttv->name || ttv->name != name || !sameTys || !sameTps)
-                {
-                    // This is a shallow clone, original recursive links to self are not updated
-                    TableTypeVar clone = TableTypeVar{ttv->props, ttv->indexer, ttv->level, ttv->state};
-                    clone.definitionModuleName = ttv->definitionModuleName;
-                    clone.name = name;
-
-                    for (auto param : binding->typeParams)
-                        clone.instantiatedTypeParams.push_back(param.ty);
-
-                    for (auto param : binding->typePackParams)
-                        clone.instantiatedTypePackParams.push_back(param.tp);
-
-                    bool isNormal = ty->normal;
-                    ty = addType(std::move(clone));
-
-                    if (FFlag::LuauLowerBoundsCalculation)
-                        asMutable(ty)->normal = isNormal;
-                }
-            }
-            else
-            {
-                ttv->name = name;
-
-                ttv->instantiatedTypeParams.clear();
-                for (auto param : binding->typeParams)
-                    ttv->instantiatedTypeParams.push_back(param.ty);
-
-                ttv->instantiatedTypePackParams.clear();
-                for (auto param : binding->typePackParams)
-                    ttv->instantiatedTypePackParams.push_back(param.tp);
-            }
-        }
-        else if (auto mtv = getMutable<MetatableTypeVar>(follow(ty)))
-        {
-            // We can't modify types that come from other modules
-            if (follow(ty)->owningArena == &currentModule->internalTypes)
-                mtv->syntheticName = name;
-        }
-
-        TypeId& bindingType = bindingsMap[name].type;
-
-        if (unify(ty, bindingType, aliasScope, typealias.location))
-            bindingType = ty;
-
-        if (FFlag::LuauLowerBoundsCalculation)
-        {
-            auto [t, ok] = normalize(bindingType, currentModule, singletonTypes, *iceHandler);
-            bindingType = t;
-            if (!ok)
-                reportError(typealias.location, NormalizationTooComplex{});
-        }
+        scope->typeAliasLocations[name] = typealias.location;
     }
 }
 
@@ -1672,9 +1740,7 @@ void TypeChecker::check(const ScopePtr& scope, const AstStatDeclareClass& declar
             {
                 ftv->argNames.insert(ftv->argNames.begin(), FunctionArgument{"self", {}});
                 ftv->argTypes = addTypePack(TypePack{{classTy}, ftv->argTypes});
-
-                if (FFlag::LuauSelfCallAutocompleteFix3)
-                    ftv->hasSelf = true;
+                ftv->hasSelf = true;
             }
         }
 
@@ -1848,8 +1914,18 @@ WithPredicate<TypeId> TypeChecker::checkExpr(const ScopePtr& scope, const AstExp
 
     if (get<TypePack>(varargPack))
     {
-        std::vector<TypeId> types = flatten(varargPack).first;
-        return {!types.empty() ? types[0] : nilType};
+        if (FFlag::LuauFixVarargExprHeadType)
+        {
+            if (std::optional<TypeId> ty = first(varargPack))
+                return {*ty};
+
+            return {nilType};
+        }
+        else
+        {
+            std::vector<TypeId> types = flatten(varargPack).first;
+            return {!types.empty() ? types[0] : nilType};
+        }
     }
     else if (get<FreeTypePack>(varargPack))
     {
@@ -3910,7 +3986,10 @@ void TypeChecker::checkArgumentList(const ScopePtr& scope, const AstExpr& funNam
         }
         else
         {
-            unifyWithInstantiationIfNeeded(*argIter, *paramIter, scope, state);
+            if (FFlag::LuauInstantiateInSubtyping)
+                state.tryUnify(*argIter, *paramIter, /*isFunctionCall*/ false);
+            else
+                unifyWithInstantiationIfNeeded(*argIter, *paramIter, scope, state);
             ++argIter;
             ++paramIter;
         }
@@ -4152,7 +4231,7 @@ std::optional<WithPredicate<TypePackId>> TypeChecker::checkCallOverload(const Sc
             TypePackId adjustedArgPack = addTypePack(TypePack{std::move(adjustedArgTypes), it.tail()});
 
             TxnLog log;
-            promoteTypeLevels(log, &currentModule->internalTypes, level, retPack);
+            promoteTypeLevels(log, &currentModule->internalTypes, level, /*scope*/ nullptr, /*useScope*/ false, retPack);
             log.commit();
 
             *asMutable(fn) = FunctionTypeVar{level, adjustedArgPack, retPack};
@@ -4466,8 +4545,11 @@ WithPredicate<TypePackId> TypeChecker::checkExprList(const ScopePtr& scope, cons
 
             TypeId actualType = substituteFreeForNil && expr->is<AstExprConstantNil>() ? freshType(scope) : type;
 
-            if (instantiateGenerics.size() > i && instantiateGenerics[i])
-                actualType = instantiate(scope, actualType, expr->location);
+            if (!FFlag::LuauInstantiateInSubtyping)
+            {
+                if (instantiateGenerics.size() > i && instantiateGenerics[i])
+                    actualType = instantiate(scope, actualType, expr->location);
+            }
 
             if (expectedType)
             {
@@ -4629,6 +4711,8 @@ bool TypeChecker::unifyWithInstantiationIfNeeded(TypeId subTy, TypeId superTy, c
 
 void TypeChecker::unifyWithInstantiationIfNeeded(TypeId subTy, TypeId superTy, const ScopePtr& scope, Unifier& state)
 {
+    LUAU_ASSERT(!FFlag::LuauInstantiateInSubtyping);
+
     if (!maybeGeneric(subTy))
         // Quick check to see if we definitely can't instantiate
         state.tryUnify(subTy, superTy, /*isFunctionCall*/ false);
@@ -4712,7 +4796,7 @@ TypeId TypeChecker::instantiate(const ScopePtr& scope, TypeId ty, Location locat
     if (ftv && ftv->hasNoGenerics)
         return ty;
 
-    Instantiation instantiation{log, &currentModule->internalTypes, scope->level};
+    Instantiation instantiation{log, &currentModule->internalTypes, scope->level, /*scope*/ nullptr};
 
     if (FFlag::LuauAutocompleteDynamicLimits && instantiationChildLimit)
         instantiation.childLimit = *instantiationChildLimit;
@@ -4769,6 +4853,33 @@ TypePackId TypeChecker::anyify(const ScopePtr& scope, TypePackId ty, Location lo
         reportError(location, UnificationTooComplex{});
         return errorRecoveryTypePack(anyTypePack);
     }
+}
+
+TypePackId TypeChecker::anyifyModuleReturnTypePackGenerics(TypePackId tp)
+{
+    tp = follow(tp);
+
+    if (const VariadicTypePack* vtp = get<VariadicTypePack>(tp))
+        return get<GenericTypeVar>(vtp->ty) ? anyTypePack : tp;
+
+    if (!get<TypePack>(follow(tp)))
+        return tp;
+
+    std::vector<TypeId> resultTypes;
+    std::optional<TypePackId> resultTail;
+
+    TypePackIterator it = begin(tp);
+
+    for (TypePackIterator e = end(tp); it != e; ++it)
+    {
+        TypeId ty = follow(*it);
+        resultTypes.push_back(get<GenericTypeVar>(ty) ? anyType : ty);
+    }
+
+    if (std::optional<TypePackId> tail = it.tail())
+        resultTail = anyifyModuleReturnTypePackGenerics(*tail);
+
+    return addTypePack(resultTypes, resultTail);
 }
 
 void TypeChecker::reportError(const TypeError& error)
@@ -4898,8 +5009,7 @@ void TypeChecker::merge(RefinementMap& l, const RefinementMap& r)
 
 Unifier TypeChecker::mkUnifier(const ScopePtr& scope, const Location& location)
 {
-    return Unifier{
-        &currentModule->internalTypes, singletonTypes, currentModule->mode, NotNull{scope.get()}, location, Variance::Covariant, unifierState};
+    return Unifier{NotNull{&normalizer}, currentModule->mode, NotNull{scope.get()}, location, Variance::Covariant};
 }
 
 TypeId TypeChecker::freshType(const ScopePtr& scope)
