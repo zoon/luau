@@ -47,7 +47,7 @@ void luaL_sandbox(lua_State* L)
     lua_pop(L, 2);
 
     // set globals to readonly and activate safeenv since the env is immutable
-    lua_setreadonly(L, LUA_GLOBALSINDEX, true);
+    lua_setreadonly(L, LUA_GLOBALSINDEX, false);
     lua_setsafeenv(L, LUA_GLOBALSINDEX, true);
 }
 
