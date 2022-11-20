@@ -76,8 +76,8 @@ struct ConstraintSolver
 
     DcrLogger* logger;
 
-    explicit ConstraintSolver(NotNull<Normalizer> normalizer, NotNull<Scope> rootScope, ModuleName moduleName, NotNull<ModuleResolver> moduleResolver,
-        std::vector<RequireCycle> requireCycles, DcrLogger* logger);
+    explicit ConstraintSolver(NotNull<Normalizer> normalizer, NotNull<Scope> rootScope, std::vector<NotNull<Constraint>> constraints,
+        ModuleName moduleName, NotNull<ModuleResolver> moduleResolver, std::vector<RequireCycle> requireCycles, DcrLogger* logger);
 
     // Randomize the order in which to dispatch constraints
     void randomize(unsigned seed);
@@ -110,6 +110,8 @@ struct ConstraintSolver
     bool tryDispatch(const FunctionCallConstraint& c, NotNull<const Constraint> constraint);
     bool tryDispatch(const PrimitiveTypeConstraint& c, NotNull<const Constraint> constraint);
     bool tryDispatch(const HasPropConstraint& c, NotNull<const Constraint> constraint);
+    bool tryDispatch(const SetPropConstraint& c, NotNull<const Constraint> constraint);
+    bool tryDispatch(const SingletonOrTopTypeConstraint& c, NotNull<const Constraint> constraint);
 
     // for a, ... in some_table do
     // also handles __iter metamethod
@@ -118,6 +120,8 @@ struct ConstraintSolver
     // for a, ... in next_function, t, ... do
     bool tryDispatchIterableFunction(
         TypeId nextTy, TypeId tableTy, TypeId firstIndexTy, const IterableConstraint& c, NotNull<const Constraint> constraint, bool force);
+
+    std::optional<TypeId> lookupTableProp(TypeId subjectType, const std::string& propName);
 
     void block(NotNull<const Constraint> target, NotNull<const Constraint> constraint);
     /**
@@ -214,6 +218,8 @@ private:
 
     TypeId errorRecoveryType() const;
     TypePackId errorRecoveryTypePack() const;
+
+    TypeId unionOfTypes(TypeId a, TypeId b, NotNull<Scope> scope, bool unifyFreeTypes);
 
     ToStringOptions opts;
 };

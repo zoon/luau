@@ -461,23 +461,27 @@ TEST_CASE_FIXTURE(Fixture, "dcr_can_partially_dispatch_a_constraint")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    // Solving this requires recognizing that we can partially solve the
-    // following constraint:
+    // Solving this requires recognizing that we can't dispatch a constraint
+    // like this without doing further work:
     //
     //     (*blocked*) -> () <: (number) -> (b...)
     //
-    // The correct thing for us to do is to consider the constraint dispatched,
-    // but we need to also record a new constraint number <: *blocked* to finish
-    // the job later.
+    // We solve this by searching both types for BlockedTypeVars and block the
+    // constraint on any we find.  It also gets the job done, but I'm worried
+    // about the efficiency of doing so many deep type traversals and it may
+    // make us more prone to getting stuck on constraint cycles.
+    //
+    // If this doesn't pan out, a possible solution is to go further down the
+    // path of supporting partial constraint dispatch.  The way it would work is
+    // that we'd dispatch the above constraint by binding b... to (), but we
+    // would append a new constraint number <: *blocked* to the constraint set
+    // to be solved later.  This should be faster and theoretically less prone
+    // to cyclic constraint dependencies.
     CHECK("<a>(a, number) -> ()" == toString(requireType("prime_iter")));
 }
 
 TEST_CASE_FIXTURE(Fixture, "free_options_cannot_be_unified_together")
 {
-    ScopedFastFlag sff[] = {
-        {"LuauFixNameMaps", true},
-    };
-
     TypeArena arena;
     TypeId nilType = singletonTypes->nilType;
 
@@ -522,8 +526,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "for_in_loop_with_zero_iterators")
 // Ideally, we would not try to export a function type with generic types from incorrect scope
 TEST_CASE_FIXTURE(BuiltinsFixture, "generic_type_leak_to_module_interface")
 {
-    ScopedFastFlag LuauAnyifyModuleReturnGenerics{"LuauAnyifyModuleReturnGenerics", true};
-
     fileResolver.source["game/A"] = R"(
 local wrapStrictTable
 
@@ -563,8 +565,6 @@ return wrapStrictTable(Constants, "Constants")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "generic_type_leak_to_module_interface_variadic")
 {
-    ScopedFastFlag LuauAnyifyModuleReturnGenerics{"LuauAnyifyModuleReturnGenerics", true};
-
     fileResolver.source["game/A"] = R"(
 local wrapStrictTable
 
@@ -624,15 +624,18 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "table_insert_with_a_singleton_argument")
     CHECK_EQ("{string | string}", toString(requireType("t")));
 }
 
-struct NormalizeFixture : Fixture
+namespace
+{
+struct IsSubtypeFixture : Fixture
 {
     bool isSubtype(TypeId a, TypeId b)
     {
         return ::Luau::isSubtype(a, b, NotNull{getMainModule()->getModuleScope().get()}, singletonTypes, ice);
     }
 };
+} // namespace
 
-TEST_CASE_FIXTURE(NormalizeFixture, "intersection_of_functions_of_different_arities")
+TEST_CASE_FIXTURE(IsSubtypeFixture, "intersection_of_functions_of_different_arities")
 {
     check(R"(
         type A = (any) -> ()
@@ -653,7 +656,7 @@ TEST_CASE_FIXTURE(NormalizeFixture, "intersection_of_functions_of_different_arit
     CHECK("((any) -> ()) & ((any, any) -> ())" == toString(requireType("t")));
 }
 
-TEST_CASE_FIXTURE(NormalizeFixture, "functions_with_mismatching_arity")
+TEST_CASE_FIXTURE(IsSubtypeFixture, "functions_with_mismatching_arity")
 {
     check(R"(
         local a: (number) -> ()
@@ -676,7 +679,7 @@ TEST_CASE_FIXTURE(NormalizeFixture, "functions_with_mismatching_arity")
     CHECK(!isSubtype(b, c));
 }
 
-TEST_CASE_FIXTURE(NormalizeFixture, "functions_with_mismatching_arity_but_optional_parameters")
+TEST_CASE_FIXTURE(IsSubtypeFixture, "functions_with_mismatching_arity_but_optional_parameters")
 {
     /*
      * (T0..TN) <: (T0..TN, A?)
@@ -736,7 +739,7 @@ TEST_CASE_FIXTURE(NormalizeFixture, "functions_with_mismatching_arity_but_option
     // CHECK(!isSubtype(b, c));
 }
 
-TEST_CASE_FIXTURE(NormalizeFixture, "functions_with_mismatching_arity_but_any_is_an_optional_param")
+TEST_CASE_FIXTURE(IsSubtypeFixture, "functions_with_mismatching_arity_but_any_is_an_optional_param")
 {
     check(R"(
         local a: (number?) -> ()

@@ -8,6 +8,7 @@
 using namespace Luau;
 
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
+LUAU_FASTFLAG(LuauNoMoreGlobalSingletonTypes)
 
 TEST_SUITE_BEGIN("TypeAliases");
 
@@ -509,11 +510,21 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "general_require_multi_assign")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "type_alias_import_mutation")
 {
+    ScopedFastFlag luauNewLibraryTypeNames{"LuauNewLibraryTypeNames", true};
+
     CheckResult result = check("type t10<x> = typeof(table)");
     LUAU_REQUIRE_NO_ERRORS(result);
 
     TypeId ty = getGlobalBinding(frontend, "table");
-    CHECK_EQ(toString(ty), "table");
+
+    if (FFlag::LuauNoMoreGlobalSingletonTypes)
+    {
+        CHECK_EQ(toString(ty), "typeof(table)");
+    }
+    else
+    {
+        CHECK_EQ(toString(ty), "table");
+    }
 
     const TableTypeVar* ttv = get<TableTypeVar>(ty);
     REQUIRE(ttv);
@@ -846,8 +857,16 @@ TEST_CASE_FIXTURE(Fixture, "forward_declared_alias_is_not_clobbered_by_prior_uni
         type FutureIntersection = A & B
     )");
 
-    // TODO: shared self causes this test to break in bizarre ways.
-    LUAU_REQUIRE_ERRORS(result);
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        // To be quite honest, I don't know exactly why DCR fixes this.
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
+    else
+    {
+        // TODO: shared self causes this test to break in bizarre ways.
+        LUAU_REQUIRE_ERRORS(result);
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "recursive_types_restriction_ok")
@@ -903,6 +922,16 @@ TEST_CASE_FIXTURE(Fixture, "it_is_ok_to_shadow_user_defined_alias")
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "cannot_create_cyclic_type_with_unknown_module")
+{
+    CheckResult result = check(R"(
+        type AAA = B.AAA
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    CHECK(toString(result.errors[0]) == "Unknown type 'B.AAA'");
 }
 
 TEST_SUITE_END();

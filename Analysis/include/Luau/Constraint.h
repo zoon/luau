@@ -2,9 +2,10 @@
 #pragma once
 
 #include "Luau/Ast.h" // Used for some of the enumerations
+#include "Luau/Def.h"
 #include "Luau/NotNull.h"
-#include "Luau/Variant.h"
 #include "Luau/TypeVar.h"
+#include "Luau/Variant.h"
 
 #include <string>
 #include <memory>
@@ -131,9 +132,33 @@ struct HasPropConstraint
     std::string prop;
 };
 
-using ConstraintV =
-    Variant<SubtypeConstraint, PackSubtypeConstraint, GeneralizationConstraint, InstantiationConstraint, UnaryConstraint, BinaryConstraint,
-        IterableConstraint, NameConstraint, TypeAliasExpansionConstraint, FunctionCallConstraint, PrimitiveTypeConstraint, HasPropConstraint>;
+// result ~ setProp subjectType ["prop", "prop2", ...] propType
+//
+// If the subject is a table or table-like thing that already has the named
+// property chain, we unify propType with that existing property type.
+//
+// If the subject is a free table, we augment it in place.
+//
+// If the subject is an unsealed table, result is an augmented table that
+// includes that new prop.
+struct SetPropConstraint
+{
+    TypeId resultType;
+    TypeId subjectType;
+    std::vector<std::string> path;
+    TypeId propType;
+};
+
+// result ~ if isSingleton D then ~D else unknown where D = discriminantType
+struct SingletonOrTopTypeConstraint
+{
+    TypeId resultType;
+    TypeId discriminantType;
+};
+
+using ConstraintV = Variant<SubtypeConstraint, PackSubtypeConstraint, GeneralizationConstraint, InstantiationConstraint, UnaryConstraint,
+    BinaryConstraint, IterableConstraint, NameConstraint, TypeAliasExpansionConstraint, FunctionCallConstraint, PrimitiveTypeConstraint,
+    HasPropConstraint, SetPropConstraint, SingletonOrTopTypeConstraint>;
 
 struct Constraint
 {
@@ -143,7 +168,7 @@ struct Constraint
     Constraint& operator=(const Constraint&) = delete;
 
     NotNull<Scope> scope;
-    Location location;
+    Location location; // TODO: Extract this out into only the constraints that needs a location. Not all constraints needs locations.
     ConstraintV c;
 
     std::vector<NotNull<Constraint>> dependencies;

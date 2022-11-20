@@ -309,6 +309,23 @@ TEST_CASE_FIXTURE(Fixture, "definitions_documentation_symbols")
     CHECK_EQ(yTtv->props["x"].documentationSymbol, "@test/global/y.x");
 }
 
+TEST_CASE_FIXTURE(Fixture, "definitions_symbols_are_generated_for_recursively_referenced_types")
+{
+    ScopedFastFlag LuauPersistTypesAfterGeneratingDocSyms("LuauPersistTypesAfterGeneratingDocSyms", true);
+
+    loadDefinition(R"(
+        declare class MyClass
+            function myMethod(self)
+        end
+
+        declare function myFunc(): MyClass
+    )");
+
+    std::optional<TypeFun> myClassTy = typeChecker.globalScope->lookupType("MyClass");
+    REQUIRE(bool(myClassTy));
+    CHECK_EQ(myClassTy->type->documentationSymbol, "@test/globaltype/MyClass");
+}
+
 TEST_CASE_FIXTURE(Fixture, "documentation_symbols_dont_attach_to_persistent_types")
 {
     loadDefinition(R"(
@@ -360,6 +377,23 @@ TEST_CASE_FIXTURE(Fixture, "class_definition_overload_metamethods")
     LUAU_REQUIRE_NO_ERRORS(result);
     CHECK_EQ(toString(requireType("shouldBeCFrame")), "CFrame");
     CHECK_EQ(toString(requireType("shouldBeVector")), "Vector3");
+}
+
+TEST_CASE_FIXTURE(Fixture, "class_definition_string_props")
+{
+    loadDefinition(R"(
+        declare class Foo
+            ["a property"]: string
+        end
+    )");
+
+    CheckResult result = check(R"(
+        local x: Foo
+        local y = x["a property"]
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    CHECK_EQ(toString(requireType("y")), "string");
 }
 
 TEST_SUITE_END();

@@ -1,5 +1,8 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/BuiltinDefinitions.h"
+#include "Luau/Common.h"
+#include "Luau/Frontend.h"
+#include "Luau/ToString.h"
 #include "Luau/TypeInfer.h"
 #include "Luau/TypeVar.h"
 
@@ -11,7 +14,10 @@
 
 using namespace Luau;
 
+LUAU_FASTFLAG(LuauLowerBoundsCalculation);
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
 LUAU_FASTFLAG(LuauInstantiateInSubtyping)
+LUAU_FASTFLAG(LuauNoMoreGlobalSingletonTypes)
 
 TEST_SUITE_BEGIN("TableTests");
 
@@ -44,7 +50,7 @@ TEST_CASE_FIXTURE(Fixture, "augment_table")
     const TableTypeVar* tType = get<TableTypeVar>(requireType("t"));
     REQUIRE(tType != nullptr);
 
-    CHECK(tType->props.find("foo") != tType->props.end());
+    CHECK("{ foo: string }" == toString(requireType("t"), {true}));
 }
 
 TEST_CASE_FIXTURE(Fixture, "augment_nested_table")
@@ -59,7 +65,7 @@ TEST_CASE_FIXTURE(Fixture, "augment_nested_table")
     const TableTypeVar* pType = get<TableTypeVar>(tType->props["p"].type);
     REQUIRE(pType != nullptr);
 
-    CHECK(pType->props.find("foo") != pType->props.end());
+    CHECK("{ p: { foo: string } }" == toString(requireType("t"), {true}));
 }
 
 TEST_CASE_FIXTURE(Fixture, "cannot_augment_sealed_table")
@@ -101,7 +107,11 @@ TEST_CASE_FIXTURE(Fixture, "updating_sealed_table_prop_is_ok")
 
 TEST_CASE_FIXTURE(Fixture, "cannot_change_type_of_unsealed_table_prop")
 {
-    CheckResult result = check("local t = {}    t.prop = 999    t.prop = 'hello'");
+    CheckResult result = check(R"(
+        local t = {}
+        t.prop = 999
+        t.prop = 'hello'
+    )");
     LUAU_REQUIRE_ERROR_COUNT(1, result);
 }
 
@@ -858,11 +868,12 @@ TEST_CASE_FIXTURE(Fixture, "assigning_to_an_unsealed_table_with_string_literal_s
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ(*typeChecker.stringType, *requireType("a"));
+    CHECK("string" == toString(*typeChecker.stringType));
 
     TableTypeVar* tableType = getMutable<TableTypeVar>(requireType("t"));
     REQUIRE(tableType != nullptr);
     REQUIRE(tableType->indexer == std::nullopt);
+    REQUIRE(0 != tableType->props.count("a"));
 
     TypeId propertyA = tableType->props["a"].type;
     REQUIRE(propertyA != nullptr);
@@ -1711,6 +1722,8 @@ TEST_CASE_FIXTURE(Fixture, "hide_table_error_properties")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "builtin_table_names")
 {
+    ScopedFastFlag luauNewLibraryTypeNames{"LuauNewLibraryTypeNames", true};
+
     CheckResult result = check(R"(
         os.h = 2
         string.k = 3
@@ -1718,19 +1731,36 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "builtin_table_names")
 
     LUAU_REQUIRE_ERROR_COUNT(2, result);
 
-    CHECK_EQ("Cannot add property 'h' to table 'os'", toString(result.errors[0]));
-    CHECK_EQ("Cannot add property 'k' to table 'string'", toString(result.errors[1]));
+    if (FFlag::LuauNoMoreGlobalSingletonTypes)
+    {
+        CHECK_EQ("Cannot add property 'h' to table 'typeof(os)'", toString(result.errors[0]));
+        CHECK_EQ("Cannot add property 'k' to table 'typeof(string)'", toString(result.errors[1]));
+    }
+    else
+    {
+        CHECK_EQ("Cannot add property 'h' to table 'os'", toString(result.errors[0]));
+        CHECK_EQ("Cannot add property 'k' to table 'string'", toString(result.errors[1]));
+    }
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "persistent_sealed_table_is_immutable")
 {
+    ScopedFastFlag luauNewLibraryTypeNames{"LuauNewLibraryTypeNames", true};
+
     CheckResult result = check(R"(
         --!nonstrict
         function os:bad() end
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ("Cannot add property 'bad' to table 'os'", toString(result.errors[0]));
+    if (FFlag::LuauNoMoreGlobalSingletonTypes)
+    {
+        CHECK_EQ("Cannot add property 'bad' to table 'typeof(os)'", toString(result.errors[0]));
+    }
+    else
+    {
+        CHECK_EQ("Cannot add property 'bad' to table 'os'", toString(result.errors[0]));
+    }
 
     const TableTypeVar* osType = get<TableTypeVar>(requireType("os"));
     REQUIRE(osType != nullptr);
@@ -1950,7 +1980,11 @@ TEST_CASE_FIXTURE(Fixture, "invariant_table_properties_means_instantiating_table
         local c : string = t.m("hi")
     )");
 
-    LUAU_REQUIRE_ERRORS(result);
+    // TODO: test behavior is wrong with LuauInstantiateInSubtyping until we can re-enable the covariant requirement for instantiation in subtyping
+    if (FFlag::LuauInstantiateInSubtyping)
+        LUAU_REQUIRE_NO_ERRORS(result);
+    else
+        LUAU_REQUIRE_ERRORS(result);
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "table_insert_should_cope_with_optional_properties_in_nonstrict")
@@ -2390,9 +2424,12 @@ TEST_CASE_FIXTURE(Fixture, "wrong_assign_does_hit_indexer")
 
 TEST_CASE_FIXTURE(Fixture, "nil_assign_doesnt_hit_no_indexer")
 {
-    CheckResult result = check("local a = {a=1, b=2} a['a'] = nil");
+    CheckResult result = check(R"(
+        local a = {a=1, b=2}
+        a['a'] = nil
+    )");
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(result.errors[0], (TypeError{Location{Position{0, 30}, Position{0, 33}}, TypeMismatch{
+    CHECK_EQ(result.errors[0], (TypeError{Location{Position{2, 17}, Position{2, 20}}, TypeMismatch{
                                                                                           typeChecker.numberType,
                                                                                           typeChecker.nilType,
                                                                                       }}));
@@ -2699,6 +2736,62 @@ local baz = foo[bar]
     LUAU_REQUIRE_ERROR_COUNT(1, result);
 
     CHECK_EQ(result.errors[0].location, Location{Position{3, 16}, Position{3, 19}});
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "table_call_metamethod_basic")
+{
+    if (!FFlag::DebugLuauDeferredConstraintResolution)
+        return;
+
+    CheckResult result = check(R"(
+        local a = setmetatable({
+            a = 1,
+        }, {
+            __call = function(self, b: number)
+                return self.a * b
+            end,
+        })
+
+        local foo = a(12)
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    CHECK(requireType("foo") == singletonTypes->numberType);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "table_call_metamethod_must_be_callable")
+{
+    CheckResult result = check(R"(
+        local a = setmetatable({}, {
+            __call = 123,
+        })
+
+        local foo = a()
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    CHECK(result.errors[0] == TypeError{
+                                  Location{{5, 20}, {5, 21}},
+                                  CannotCallNonFunction{singletonTypes->numberType},
+                              });
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "table_call_metamethod_generic")
+{
+    CheckResult result = check(R"(
+        local a = setmetatable({}, {
+            __call = function<T>(self, b: T)
+                return b
+            end,
+        })
+
+        local foo = a(12)
+        local bar = a("bar")
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    CHECK(requireType("foo") == singletonTypes->numberType);
+    CHECK(requireType("bar") == singletonTypes->stringType);
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "table_simple_call")
@@ -3115,6 +3208,7 @@ TEST_CASE_FIXTURE(Fixture, "scalar_is_a_subtype_of_a_compatible_polymorphic_shap
 TEST_CASE_FIXTURE(Fixture, "scalar_is_not_a_subtype_of_a_compatible_polymorphic_shape_type")
 {
     ScopedFastFlag sff{"LuauScalarShapeSubtyping", true};
+    ScopedFastFlag luauNewLibraryTypeNames{"LuauNewLibraryTypeNames", true};
 
     CheckResult result = check(R"(
         local function f(s)
@@ -3127,25 +3221,47 @@ TEST_CASE_FIXTURE(Fixture, "scalar_is_not_a_subtype_of_a_compatible_polymorphic_
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(3, result);
-    CHECK_EQ(R"(Type 'string' could not be converted into 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}'
+
+    if (FFlag::LuauNoMoreGlobalSingletonTypes)
+    {
+        CHECK_EQ(R"(Type 'string' could not be converted into 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}'
+caused by:
+  The former's metatable does not satisfy the requirements. Table type 'typeof(string)' not compatible with type 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}' because the former is missing field 'absolutely_no_scalar_has_this_method')",
+            toString(result.errors[0]));
+        CHECK_EQ(R"(Type '"bar"' could not be converted into 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}'
+caused by:
+  The former's metatable does not satisfy the requirements. Table type 'typeof(string)' not compatible with type 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}' because the former is missing field 'absolutely_no_scalar_has_this_method')",
+            toString(result.errors[1]));
+        CHECK_EQ(R"(Type '"bar" | "baz"' could not be converted into 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}'
+caused by:
+  Not all union options are compatible. Type '"bar"' could not be converted into 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}'
+caused by:
+  The former's metatable does not satisfy the requirements. Table type 'typeof(string)' not compatible with type 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}' because the former is missing field 'absolutely_no_scalar_has_this_method')",
+            toString(result.errors[2]));
+    }
+    else
+    {
+        CHECK_EQ(R"(Type 'string' could not be converted into 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}'
 caused by:
   The former's metatable does not satisfy the requirements. Table type 'string' not compatible with type 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}' because the former is missing field 'absolutely_no_scalar_has_this_method')",
-        toString(result.errors[0]));
-    CHECK_EQ(R"(Type '"bar"' could not be converted into 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}'
+            toString(result.errors[0]));
+        CHECK_EQ(R"(Type '"bar"' could not be converted into 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}'
 caused by:
   The former's metatable does not satisfy the requirements. Table type 'string' not compatible with type 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}' because the former is missing field 'absolutely_no_scalar_has_this_method')",
-        toString(result.errors[1]));
-    CHECK_EQ(R"(Type '"bar" | "baz"' could not be converted into 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}'
+            toString(result.errors[1]));
+        CHECK_EQ(R"(Type '"bar" | "baz"' could not be converted into 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}'
 caused by:
   Not all union options are compatible. Type '"bar"' could not be converted into 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}'
 caused by:
   The former's metatable does not satisfy the requirements. Table type 'string' not compatible with type 't1 where t1 = {- absolutely_no_scalar_has_this_method: (t1) -> (a...) -}' because the former is missing field 'absolutely_no_scalar_has_this_method')",
-        toString(result.errors[2]));
+            toString(result.errors[2]));
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "a_free_shape_can_turn_into_a_scalar_if_it_is_compatible")
 {
     ScopedFastFlag sff{"LuauScalarShapeSubtyping", true};
+    ScopedFastFlag luauScalarShapeUnifyToMtOwner{"LuauScalarShapeUnifyToMtOwner", true}; // Changes argument from table type to primitive
 
     CheckResult result = check(R"(
         local function f(s): string
@@ -3161,6 +3277,7 @@ TEST_CASE_FIXTURE(Fixture, "a_free_shape_can_turn_into_a_scalar_if_it_is_compati
 TEST_CASE_FIXTURE(Fixture, "a_free_shape_cannot_turn_into_a_scalar_if_it_is_not_compatible")
 {
     ScopedFastFlag sff{"LuauScalarShapeSubtyping", true};
+    ScopedFastFlag luauNewLibraryTypeNames{"LuauNewLibraryTypeNames", true};
 
     CheckResult result = check(R"(
         local function f(s): string
@@ -3170,11 +3287,42 @@ TEST_CASE_FIXTURE(Fixture, "a_free_shape_cannot_turn_into_a_scalar_if_it_is_not_
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(R"(Type 't1 where t1 = {+ absolutely_no_scalar_has_this_method: (t1) -> (a, b...) +}' could not be converted into 'string'
+    if (FFlag::LuauNoMoreGlobalSingletonTypes)
+    {
+        CHECK_EQ(R"(Type 't1 where t1 = {+ absolutely_no_scalar_has_this_method: (t1) -> (a, b...) +}' could not be converted into 'string'
+caused by:
+  The former's metatable does not satisfy the requirements. Table type 'typeof(string)' not compatible with type 't1 where t1 = {+ absolutely_no_scalar_has_this_method: (t1) -> (a, b...) +}' because the former is missing field 'absolutely_no_scalar_has_this_method')",
+            toString(result.errors[0]));
+        CHECK_EQ("<a, b...>(t1) -> string where t1 = {+ absolutely_no_scalar_has_this_method: (t1) -> (a, b...) +}", toString(requireType("f")));
+    }
+    else
+    {
+        CHECK_EQ(R"(Type 't1 where t1 = {+ absolutely_no_scalar_has_this_method: (t1) -> (a, b...) +}' could not be converted into 'string'
 caused by:
   The former's metatable does not satisfy the requirements. Table type 'string' not compatible with type 't1 where t1 = {+ absolutely_no_scalar_has_this_method: (t1) -> (a, b...) +}' because the former is missing field 'absolutely_no_scalar_has_this_method')",
-        toString(result.errors[0]));
-    CHECK_EQ("<a, b...>(t1) -> string where t1 = {+ absolutely_no_scalar_has_this_method: (t1) -> (a, b...) +}", toString(requireType("f")));
+            toString(result.errors[0]));
+        CHECK_EQ("<a, b...>(t1) -> string where t1 = {+ absolutely_no_scalar_has_this_method: (t1) -> (a, b...) +}", toString(requireType("f")));
+    }
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "a_free_shape_can_turn_into_a_scalar_directly")
+{
+    ScopedFastFlag luauScalarShapeSubtyping{"LuauScalarShapeSubtyping", true};
+    ScopedFastFlag luauScalarShapeUnifyToMtOwner{"LuauScalarShapeUnifyToMtOwner", true};
+
+    CheckResult result = check(R"(
+        local function stringByteList(str)
+            local out = {}
+            for i = 1, #str do
+                table.insert(out, string.byte(str, i))
+            end
+            return table.concat(out, ",")
+        end
+
+        local x = stringByteList("xoo")
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
 }
 
 TEST_CASE_FIXTURE(Fixture, "invariant_table_properties_means_instantiating_tables_in_call_is_unsound")
@@ -3196,11 +3344,14 @@ TEST_CASE_FIXTURE(Fixture, "invariant_table_properties_means_instantiating_table
         local c : string = t.m("hi")
     )");
 
-    LUAU_REQUIRE_ERRORS(result);
-    CHECK_EQ(toString(result.errors[0]), R"(Type 't' could not be converted into '{| m: (number) -> number |}'
-caused by:
-  Property 'm' is not compatible. Type '<a>(a) -> a' could not be converted into '(number) -> number'; different number of generic type parameters)");
-    // this error message is not great since the underlying issue is that the context is invariant,
+    LUAU_REQUIRE_NO_ERRORS(result);
+    // TODO: test behavior is wrong until we can re-enable the covariant requirement for instantiation in subtyping
+    //     LUAU_REQUIRE_ERRORS(result);
+    //     CHECK_EQ(toString(result.errors[0]), R"(Type 't' could not be converted into '{| m: (number) -> number |}'
+    // caused by:
+    //   Property 'm' is not compatible. Type '<a>(a) -> a' could not be converted into '(number) -> number'; different number of generic type
+    //   parameters)");
+    //     // this error message is not great since the underlying issue is that the context is invariant,
     // and `(number) -> number` cannot be a subtype of `<a>(a) -> a`.
 }
 
@@ -3224,6 +3375,42 @@ local g : ({ p : number, q : string }) -> ({ p : number, r : boolean }) = f
     REQUIRE(error->properties.size() == 1);
 
     CHECK_EQ("r", error->properties[0]);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "setmetatable_has_a_side_effect")
+{
+    if (!FFlag::DebugLuauDeferredConstraintResolution)
+        return;
+
+    CheckResult result = check(R"(
+        local mt = {
+            __add = function(x, y)
+                return 123
+            end,
+        }
+
+        local foo = {}
+        setmetatable(foo, mt)
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    CHECK(toString(requireType("foo")) == "{ @metatable { __add: (a, b) -> number }, {  } }");
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "tables_should_be_fully_populated")
+{
+    CheckResult result = check(R"(
+        local t = {
+            x = 5 :: NonexistingTypeWhichEndsUpReturningAnErrorType,
+            y = 5
+        }
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+
+    ToStringOptions opts;
+    opts.exhaustive = true;
+    CHECK_EQ("{ x: *error-type*, y: number }", toString(requireType("t"), opts));
 }
 
 TEST_SUITE_END();

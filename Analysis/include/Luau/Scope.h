@@ -38,11 +38,6 @@ struct Scope
     std::unordered_map<Symbol, Binding> bindings;
     TypePackId returnType;
     std::optional<TypePackId> varargPack;
-    // All constraints belonging to this scope.
-    std::vector<ConstraintPtr> constraints;
-    // Constraints belonging to this scope that are queued manually by other
-    // constraints.
-    std::vector<ConstraintPtr> unqueuedConstraints;
 
     TypeLevel level;
 
@@ -54,7 +49,9 @@ struct Scope
     DenseHashSet<Name> builtinTypeNames{""};
     void addBuiltinTypeBinding(const Name& name, const TypeFun& tyFun);
 
-    std::optional<TypeId> lookup(Symbol sym);
+    std::optional<TypeId> lookup(Symbol sym) const;
+    std::optional<TypeId> lookup(DefId def) const;
+    std::optional<std::pair<TypeId, Scope*>> lookupEx(Symbol sym);
 
     std::optional<TypeFun> lookupType(const Name& name);
     std::optional<TypeFun> lookupImportedType(const Name& moduleAlias, const Name& name);
@@ -66,6 +63,7 @@ struct Scope
     std::optional<Binding> linearSearchForBinding(const std::string& name, bool traverseScopeChain = true) const;
 
     RefinementMap refinements;
+    DenseHashMap<const Def*, TypeId> dcrRefinements{nullptr};
 
     // For mutually recursive type aliases, it's important that
     // they use the same types for the same names.

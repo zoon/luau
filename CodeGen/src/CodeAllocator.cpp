@@ -20,7 +20,11 @@ const size_t kPageSize = 4096;
 #include <sys/mman.h>
 #include <unistd.h>
 
+#if defined(__FreeBSD__) && !(_POSIX_C_SOURCE >= 200112L)
+const size_t kPageSize = getpagesize();
+#else
 const size_t kPageSize = sysconf(_SC_PAGESIZE);
+#endif
 #endif
 
 static size_t alignToPageSize(size_t size)
@@ -110,8 +114,8 @@ CodeAllocator::~CodeAllocator()
 bool CodeAllocator::allocate(
     uint8_t* data, size_t dataSize, uint8_t* code, size_t codeSize, uint8_t*& result, size_t& resultSize, uint8_t*& resultCodeStart)
 {
-    // 'Round up' to preserve 16 byte alignment
-    size_t alignedDataSize = (dataSize + 15) & ~15;
+    // 'Round up' to preserve code alignment
+    size_t alignedDataSize = (dataSize + (kCodeAlignment - 1)) & ~(kCodeAlignment - 1);
 
     size_t totalSize = alignedDataSize + codeSize;
 
@@ -187,8 +191,8 @@ bool CodeAllocator::allocateNewBlock(size_t& unwindInfoSize)
     {
         void* unwindInfo = createBlockUnwindInfo(context, block, blockSize, unwindInfoSize);
 
-        // 'Round up' to preserve 16 byte alignment of the following data and code
-        unwindInfoSize = (unwindInfoSize + 15) & ~15;
+        // 'Round up' to preserve alignment of the following data and code
+        unwindInfoSize = (unwindInfoSize + (kCodeAlignment - 1)) & ~(kCodeAlignment - 1);
 
         LUAU_ASSERT(unwindInfoSize <= kMaxReservedDataSize);
 

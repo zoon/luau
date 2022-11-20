@@ -467,6 +467,8 @@ type I<S..., R...> = W<number, (string, S...), R...>
 
 TEST_CASE_FIXTURE(Fixture, "type_alias_type_pack_explicit")
 {
+    ScopedFastFlag sff("LuauFunctionReturnStringificationFixup", true);
+
     CheckResult result = check(R"(
 type X<T...> = (T...) -> (T...)
 
@@ -490,6 +492,8 @@ type F = X<(string, ...number)>
 
 TEST_CASE_FIXTURE(Fixture, "type_alias_type_pack_explicit_multi")
 {
+    ScopedFastFlag sff("LuauFunctionReturnStringificationFixup", true);
+
     CheckResult result = check(R"(
 type Y<T..., U...> = (T...) -> (U...)
 
@@ -998,8 +1002,6 @@ TEST_CASE_FIXTURE(Fixture, "unify_variadic_tails_in_arguments_free")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "type_packs_with_tails_in_vararg_adjustment")
 {
-    ScopedFastFlag luauFixVarargExprHeadType{"LuauFixVarargExprHeadType", true};
-
     CheckResult result = check(R"(
         local function wrapReject<TArg, TResult>(fn: (self: any, ...TArg) -> ...TResult): (self: any, ...TArg) -> ...TResult
             return function(self, ...)

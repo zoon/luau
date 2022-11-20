@@ -34,7 +34,6 @@ struct ToStringOptions
     size_t maxTableLength = size_t(FInt::LuauTableTypeMaximumStringifierLength); // Only applied to TableTypeVars
     size_t maxTypeLength = size_t(FInt::LuauTypeMaximumStringifierLength);
     ToStringNameMap nameMap;
-    std::optional<ToStringNameMap> DEPRECATED_nameMap;
     std::shared_ptr<Scope> scope; // If present, module names will be added and types that are not available in scope will be marked as 'invalid'
     std::vector<std::string> namedFunctionOverrideArgNames; // If present, named function argument names will be overridden
 };
@@ -42,7 +41,6 @@ struct ToStringOptions
 struct ToStringResult
 {
     std::string name;
-    ToStringNameMap DEPRECATED_nameMap;
 
     bool invalid = false;
     bool error = false;
@@ -116,6 +114,8 @@ inline std::string toStringNamedFunction(const std::string& funcName, const Func
     ToStringOptions opts;
     return toStringNamedFunction(funcName, ftv, opts);
 }
+
+std::optional<std::string> getFunctionNameAsString(const AstExpr& expr);
 
 // It could be useful to see the text representation of a type during a debugging session instead of exploring the content of the class
 // These functions will dump the type to stdout and can be evaluated in Watch/Immediate windows or as gdb/lldb expression

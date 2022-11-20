@@ -31,28 +31,30 @@ LUAU_FASTINTVARIABLE(LuauTypeInferTypePackLoopLimit, 5000)
 LUAU_FASTINTVARIABLE(LuauCheckRecursionLimit, 300)
 LUAU_FASTINTVARIABLE(LuauVisitRecursionLimit, 500)
 LUAU_FASTFLAG(LuauKnowsTheDataModel3)
-LUAU_FASTFLAG(LuauAutocompleteDynamicLimits)
 LUAU_FASTFLAG(LuauTypeNormalization2)
 LUAU_FASTFLAGVARIABLE(DebugLuauFreezeDuringUnification, false)
 LUAU_FASTFLAGVARIABLE(LuauReturnAnyInsteadOfICE, false) // Eventually removed as false.
 LUAU_FASTFLAGVARIABLE(DebugLuauSharedSelf, false)
-LUAU_FASTFLAGVARIABLE(LuauAnyifyModuleReturnGenerics, false)
+LUAU_FASTFLAGVARIABLE(LuauLvaluelessPath, false)
+LUAU_FASTFLAGVARIABLE(LuauNilIterator, false)
 LUAU_FASTFLAGVARIABLE(LuauUnknownAndNeverType, false)
 LUAU_FASTFLAGVARIABLE(LuauBinaryNeedsExpectedTypesToo, false)
-LUAU_FASTFLAGVARIABLE(LuauFixVarargExprHeadType, false)
 LUAU_FASTFLAGVARIABLE(LuauNeverTypesAndOperatorsInference, false)
 LUAU_FASTFLAGVARIABLE(LuauReturnsFromCallsitesAreNotWidened, false)
+LUAU_FASTFLAGVARIABLE(LuauTryhardAnd, false)
 LUAU_FASTFLAG(LuauInstantiateInSubtyping)
 LUAU_FASTFLAGVARIABLE(LuauCompleteVisitor, false)
-LUAU_FASTFLAGVARIABLE(LuauUnionOfTypesFollow, false)
+LUAU_FASTFLAGVARIABLE(LuauOptionalNextKey, false)
 LUAU_FASTFLAGVARIABLE(LuauReportShadowedTypeAlias, false)
 LUAU_FASTFLAGVARIABLE(LuauBetterMessagingOnCountMismatch, false)
+LUAU_FASTFLAGVARIABLE(LuauArgMismatchReportFunctionLocation, false)
+LUAU_FASTFLAGVARIABLE(LuauImplicitElseRefinement, false)
 
 namespace Luau
 {
-
-const char* TimeLimitError::what() const throw()
+const char* TimeLimitError_DEPRECATED::what() const throw()
 {
+    LUAU_ASSERT(!FFlag::LuauIceExceptionInheritanceChange);
     return "Typeinfer failed to complete in allotted time";
 }
 
@@ -265,6 +267,11 @@ ModulePtr TypeChecker::check(const SourceModule& module, Mode mode, std::optiona
         reportErrorCodeTooComplex(module.root->location);
         return std::move(currentModule);
     }
+    catch (const RecursionLimitException_DEPRECATED&)
+    {
+        reportErrorCodeTooComplex(module.root->location);
+        return std::move(currentModule);
+    }
 }
 
 ModulePtr TypeChecker::checkWithoutRecursionCheck(const SourceModule& module, Mode mode, std::optional<ScopePtr> environmentScope)
@@ -280,11 +287,8 @@ ModulePtr TypeChecker::checkWithoutRecursionCheck(const SourceModule& module, Mo
     iceHandler->moduleName = module.name;
     normalizer.arena = &currentModule->internalTypes;
 
-    if (FFlag::LuauAutocompleteDynamicLimits)
-    {
-        unifierState.counters.recursionLimit = FInt::LuauTypeInferRecursionLimit;
-        unifierState.counters.iterationLimit = unifierIterationLimit ? *unifierIterationLimit : FInt::LuauTypeInferIterationLimit;
-    }
+    unifierState.counters.recursionLimit = FInt::LuauTypeInferRecursionLimit;
+    unifierState.counters.iterationLimit = unifierIterationLimit ? *unifierIterationLimit : FInt::LuauTypeInferIterationLimit;
 
     ScopePtr parentScope = environmentScope.value_or(globalScope);
     ScopePtr moduleScope = std::make_shared<Scope>(parentScope);
@@ -312,6 +316,10 @@ ModulePtr TypeChecker::checkWithoutRecursionCheck(const SourceModule& module, Mo
     {
         currentModule->timeout = true;
     }
+    catch (const TimeLimitError_DEPRECATED&)
+    {
+        currentModule->timeout = true;
+    }
 
     if (FFlag::DebugLuauSharedSelf)
     {
@@ -325,8 +333,7 @@ ModulePtr TypeChecker::checkWithoutRecursionCheck(const SourceModule& module, Mo
     else
         moduleScope->returnType = anyify(moduleScope, moduleScope->returnType, Location{});
 
-    if (FFlag::LuauAnyifyModuleReturnGenerics)
-        moduleScope->returnType = anyifyModuleReturnTypePackGenerics(moduleScope->returnType);
+    moduleScope->returnType = anyifyModuleReturnTypePackGenerics(moduleScope->returnType);
 
     for (auto& [_, typeFun] : moduleScope->exportedTypeBindings)
         typeFun.type = anyify(moduleScope, typeFun.type, Location{});
@@ -419,7 +426,7 @@ void TypeChecker::check(const ScopePtr& scope, const AstStat& program)
         ice("Unknown AstStat");
 
     if (finishTime && TimeTrace::getClock() > *finishTime)
-        throw TimeLimitError();
+        throwTimeLimitError();
 }
 
 // This particular overload is for do...end. If you need to not increase the scope level, use checkBlock directly.
@@ -442,6 +449,11 @@ void TypeChecker::checkBlock(const ScopePtr& scope, const AstStatBlock& block)
         checkBlockWithoutRecursionCheck(scope, block);
     }
     catch (const RecursionLimitException&)
+    {
+        reportErrorCodeTooComplex(block.location);
+        return;
+    }
+    catch (const RecursionLimitException_DEPRECATED&)
     {
         reportErrorCodeTooComplex(block.location);
         return;
@@ -771,16 +783,6 @@ void TypeChecker::check(const ScopePtr& scope, const AstStatRepeat& statement)
     checkBlock(repScope, *statement.body);
 
     checkExpr(repScope, *statement.condition);
-}
-
-void TypeChecker::unifyLowerBound(TypePackId subTy, TypePackId superTy, TypeLevel demotedLevel, const ScopePtr& scope, const Location& location)
-{
-    Unifier state = mkUnifier(scope, location);
-    state.unifyLowerBound(subTy, superTy, demotedLevel);
-
-    state.log.commit();
-
-    reportErrors(state.errors);
 }
 
 struct Demoter : Substitution
@@ -1208,10 +1210,10 @@ void TypeChecker::check(const ScopePtr& scope, const AstStatForIn& forin)
     AstExpr* firstValue = forin.values.data[0];
 
     // next is a function that takes Table<K, V> and an optional index of type K
-    //      next<K, V>(t: Table<K, V>, index: K | nil) -> (K, V)
+    //      next<K, V>(t: Table<K, V>, index: K | nil) -> (K?, V)
     // however, pairs and ipairs are quite messy, but they both share the same types
     // pairs returns 'next, t, nil', thus the type would be
-    //      pairs<K, V>(t: Table<K, V>) -> ((Table<K, V>, K | nil) -> (K, V), Table<K, V>, K | nil)
+    //      pairs<K, V>(t: Table<K, V>) -> ((Table<K, V>, K | nil) -> (K?, V), Table<K, V>, K | nil)
     // ipairs returns 'next, t, 0', thus ipairs will also share the same type as pairs, except K = number
     //
     // we can also define our own custom iterators by by returning a wrapped coroutine that calls coroutine.yield
@@ -1253,6 +1255,9 @@ void TypeChecker::check(const ScopePtr& scope, const AstStatForIn& forin)
     {
         iterTy = instantiate(scope, checkExpr(scope, *firstValue).type, firstValue->location);
     }
+
+    if (FFlag::LuauNilIterator)
+        iterTy = stripFromNilAndReport(iterTy, firstValue->location);
 
     if (std::optional<TypeId> iterMM = findMetatableEntry(iterTy, "__iter", firstValue->location, /* addErrors= */ true))
     {
@@ -1337,21 +1342,61 @@ void TypeChecker::check(const ScopePtr& scope, const AstStatForIn& forin)
         reportErrors(state.errors);
     }
 
-    TypePackId varPack = addTypePack(TypePackVar{TypePack{varTypes, freshTypePack(scope)}});
-
-    if (forin.values.size >= 2)
+    if (FFlag::LuauOptionalNextKey)
     {
-        AstArray<AstExpr*> arguments{forin.values.data + 1, forin.values.size - 1};
+        TypePackId retPack = iterFunc->retTypes;
 
-        Position start = firstValue->location.begin;
-        Position end = values[forin.values.size - 1]->location.end;
-        AstExprCall exprCall{Location(start, end), firstValue, arguments, /* self= */ false, Location()};
+        if (forin.values.size >= 2)
+        {
+            AstArray<AstExpr*> arguments{forin.values.data + 1, forin.values.size - 1};
 
-        TypePackId retPack = checkExprPack(scope, exprCall).type;
+            Position start = firstValue->location.begin;
+            Position end = values[forin.values.size - 1]->location.end;
+            AstExprCall exprCall{Location(start, end), firstValue, arguments, /* self= */ false, Location()};
+
+            retPack = checkExprPack(scope, exprCall).type;
+        }
+
+        // We need to remove 'nil' from the set of options of the first return value
+        // Because for loop stops when it gets 'nil', this result is never actually assigned to the first variable
+        if (std::optional<TypeId> fty = first(retPack); fty && !varTypes.empty())
+        {
+            TypeId keyTy = follow(*fty);
+
+            if (get<UnionTypeVar>(keyTy))
+            {
+                if (std::optional<TypeId> ty = tryStripUnionFromNil(keyTy))
+                    keyTy = *ty;
+            }
+
+            unify(keyTy, varTypes.front(), scope, forin.location);
+
+            // We have already handled the first variable type, make it match in the pack check
+            varTypes.front() = *fty;
+        }
+
+        TypePackId varPack = addTypePack(TypePackVar{TypePack{varTypes, freshTypePack(scope)}});
+
         unify(retPack, varPack, scope, forin.location);
     }
     else
-        unify(iterFunc->retTypes, varPack, scope, forin.location);
+    {
+        TypePackId varPack = addTypePack(TypePackVar{TypePack{varTypes, freshTypePack(scope)}});
+
+        if (forin.values.size >= 2)
+        {
+            AstArray<AstExpr*> arguments{forin.values.data + 1, forin.values.size - 1};
+
+            Position start = firstValue->location.begin;
+            Position end = values[forin.values.size - 1]->location.end;
+            AstExprCall exprCall{Location(start, end), firstValue, arguments, /* self= */ false, Location()};
+
+            TypePackId retPack = checkExprPack(scope, exprCall).type;
+            unify(retPack, varPack, scope, forin.location);
+        }
+        else
+            unify(iterFunc->retTypes, varPack, scope, forin.location);
+    }
 
     check(loopScope, *forin.body);
 }
@@ -1854,18 +1899,10 @@ WithPredicate<TypeId> TypeChecker::checkExpr(const ScopePtr& scope, const AstExp
 
     if (get<TypePack>(varargPack))
     {
-        if (FFlag::LuauFixVarargExprHeadType)
-        {
-            if (std::optional<TypeId> ty = first(varargPack))
-                return {*ty};
+        if (std::optional<TypeId> ty = first(varargPack))
+            return {*ty};
 
-            return {nilType};
-        }
-        else
-        {
-            std::vector<TypeId> types = flatten(varargPack).first;
-            return {!types.empty() ? types[0] : nilType};
-        }
+        return {nilType};
     }
     else if (get<FreeTypePack>(varargPack))
     {
@@ -2089,39 +2126,6 @@ std::optional<TypeId> TypeChecker::getIndexTypeFromTypeImpl(
         reportError(location, UnknownProperty{type, name});
 
     return std::nullopt;
-}
-
-std::vector<TypeId> TypeChecker::reduceUnion(const std::vector<TypeId>& types)
-{
-    std::vector<TypeId> result;
-    for (TypeId t : types)
-    {
-        t = follow(t);
-        if (get<NeverTypeVar>(t))
-            continue;
-
-        if (get<ErrorTypeVar>(t) || get<AnyTypeVar>(t))
-            return {t};
-
-        if (const UnionTypeVar* utv = get<UnionTypeVar>(t))
-        {
-            for (TypeId ty : utv)
-            {
-                ty = follow(ty);
-                if (get<NeverTypeVar>(ty))
-                    continue;
-                if (get<ErrorTypeVar>(ty) || get<AnyTypeVar>(ty))
-                    return {ty};
-
-                if (result.end() == std::find(result.begin(), result.end(), ty))
-                    result.push_back(ty);
-            }
-        }
-        else if (std::find(result.begin(), result.end(), t) == result.end())
-            result.push_back(t);
-    }
-
-    return result;
 }
 
 std::optional<TypeId> TypeChecker::tryStripUnionFromNil(TypeId ty)
@@ -2503,11 +2507,8 @@ std::string opToMetaTableEntry(const AstExprBinary::Op& op)
 
 TypeId TypeChecker::unionOfTypes(TypeId a, TypeId b, const ScopePtr& scope, const Location& location, bool unifyFreeTypes)
 {
-    if (FFlag::LuauUnionOfTypesFollow)
-    {
-        a = follow(a);
-        b = follow(b);
-    }
+    a = follow(a);
+    b = follow(b);
 
     if (unifyFreeTypes && (get<FreeTypeVar>(a) || get<FreeTypeVar>(b)))
     {
@@ -2752,12 +2753,54 @@ TypeId TypeChecker::checkRelationalOperation(
 
     case AstExprBinary::And:
         if (lhsIsAny)
+        {
             return lhsType;
-        return unionOfTypes(rhsType, booleanType, scope, expr.location, false);
+        }
+        else if (FFlag::LuauTryhardAnd)
+        {
+            // If lhs is free, we can't tell which 'falsy' components it has, if any
+            if (get<FreeTypeVar>(lhsType))
+                return unionOfTypes(addType(UnionTypeVar{{nilType, singletonType(false)}}), rhsType, scope, expr.location, false);
+
+            auto [oty, notNever] = pickTypesFromSense(lhsType, false, neverType); // Filter out falsy types
+
+            if (notNever)
+            {
+                LUAU_ASSERT(oty);
+                return unionOfTypes(*oty, rhsType, scope, expr.location, false);
+            }
+            else
+            {
+                return rhsType;
+            }
+        }
+        else
+        {
+            return unionOfTypes(rhsType, booleanType, scope, expr.location, false);
+        }
     case AstExprBinary::Or:
         if (lhsIsAny)
+        {
             return lhsType;
-        return unionOfTypes(lhsType, rhsType, scope, expr.location);
+        }
+        else if (FFlag::LuauTryhardAnd)
+        {
+            auto [oty, notNever] = pickTypesFromSense(lhsType, true, neverType); // Filter out truthy types
+
+            if (notNever)
+            {
+                LUAU_ASSERT(oty);
+                return unionOfTypes(*oty, rhsType, scope, expr.location);
+            }
+            else
+            {
+                return rhsType;
+            }
+        }
+        else
+        {
+            return unionOfTypes(lhsType, rhsType, scope, expr.location);
+        }
     default:
         LUAU_ASSERT(0);
         ice(format("checkRelationalOperation called with incorrect binary expression '%s'", toString(expr.op).c_str()), expr.location);
@@ -3643,8 +3686,17 @@ void TypeChecker::checkArgumentList(const ScopePtr& scope, const AstExpr& funNam
             location = {state.location.begin, argLocations.back().end};
 
         std::string namePath;
-        if (std::optional<LValue> lValue = tryGetLValue(funName))
-            namePath = toString(*lValue);
+
+        if (FFlag::LuauLvaluelessPath)
+        {
+            if (std::optional<std::string> path = getFunctionNameAsString(funName))
+                namePath = *path;
+        }
+        else
+        {
+            if (std::optional<LValue> lValue = tryGetLValue(funName))
+                namePath = toString(*lValue);
+        }
 
         auto [minParams, optMaxParams] = getParameterExtents(&state.log, paramPack);
         state.reportError(TypeError{location,
@@ -3753,11 +3805,28 @@ void TypeChecker::checkArgumentList(const ScopePtr& scope, const AstExpr& funNam
                     bool isVariadic = tail && Luau::isVariadic(*tail);
 
                     std::string namePath;
-                    if (std::optional<LValue> lValue = tryGetLValue(funName))
-                        namePath = toString(*lValue);
 
-                    state.reportError(TypeError{
-                        state.location, CountMismatch{minParams, optMaxParams, paramIndex, CountMismatch::Context::Arg, isVariadic, namePath}});
+                    if (FFlag::LuauLvaluelessPath)
+                    {
+                        if (std::optional<std::string> path = getFunctionNameAsString(funName))
+                            namePath = *path;
+                    }
+                    else
+                    {
+                        if (std::optional<LValue> lValue = tryGetLValue(funName))
+                            namePath = toString(*lValue);
+                    }
+
+                    if (FFlag::LuauArgMismatchReportFunctionLocation)
+                    {
+                        state.reportError(TypeError{
+                            funName.location, CountMismatch{minParams, optMaxParams, paramIndex, CountMismatch::Context::Arg, isVariadic, namePath}});
+                    }
+                    else
+                    {
+                        state.reportError(TypeError{
+                            state.location, CountMismatch{minParams, optMaxParams, paramIndex, CountMismatch::Context::Arg, isVariadic, namePath}});
+                    }
                     return;
                 }
                 ++paramIter;
@@ -4597,7 +4666,7 @@ TypeId TypeChecker::instantiate(const ScopePtr& scope, TypeId ty, Location locat
 
     Instantiation instantiation{log, &currentModule->internalTypes, scope->level, /*scope*/ nullptr};
 
-    if (FFlag::LuauAutocompleteDynamicLimits && instantiationChildLimit)
+    if (instantiationChildLimit)
         instantiation.childLimit = *instantiationChildLimit;
 
     std::optional<TypeId> instantiated = instantiation.substitute(ty);
@@ -4692,6 +4761,19 @@ void TypeChecker::ice(const std::string& message, const Location& location)
 void TypeChecker::ice(const std::string& message)
 {
     iceHandler->ice(message);
+}
+
+// TODO: Inline me when LuauIceExceptionInheritanceChange is deleted.
+void TypeChecker::throwTimeLimitError()
+{
+    if (FFlag::LuauIceExceptionInheritanceChange)
+    {
+        throw TimeLimitError(iceHandler->moduleName);
+    }
+    else
+    {
+        throw TimeLimitError_DEPRECATED();
+    }
 }
 
 void TypeChecker::prepareErrorsForDisplay(ErrorVec& errVec)
@@ -4836,9 +4918,9 @@ TypePackId TypeChecker::errorRecoveryTypePack(TypePackId guess)
     return singletonTypes->errorRecoveryTypePack(guess);
 }
 
-TypeIdPredicate TypeChecker::mkTruthyPredicate(bool sense)
+TypeIdPredicate TypeChecker::mkTruthyPredicate(bool sense, TypeId emptySetTy)
 {
-    return [this, sense](TypeId ty) -> std::optional<TypeId> {
+    return [this, sense, emptySetTy](TypeId ty) -> std::optional<TypeId> {
         // any/error/free gets a special pass unconditionally because they can't be decided.
         if (get<AnyTypeVar>(ty) || get<ErrorTypeVar>(ty) || get<FreeTypeVar>(ty))
             return ty;
@@ -4856,7 +4938,7 @@ TypeIdPredicate TypeChecker::mkTruthyPredicate(bool sense)
             return sense ? std::nullopt : std::optional<TypeId>(ty);
 
         // at this point, anything else is kept if sense is true, or replaced by nil
-        return sense ? ty : nilType;
+        return sense ? ty : emptySetTy;
     };
 }
 
@@ -4882,9 +4964,9 @@ std::pair<std::optional<TypeId>, bool> TypeChecker::filterMap(TypeId type, TypeI
     }
 }
 
-std::pair<std::optional<TypeId>, bool> TypeChecker::pickTypesFromSense(TypeId type, bool sense)
+std::pair<std::optional<TypeId>, bool> TypeChecker::pickTypesFromSense(TypeId type, bool sense, TypeId emptySetTy)
 {
-    return filterMap(type, mkTruthyPredicate(sense));
+    return filterMap(type, mkTruthyPredicate(sense, emptySetTy));
 }
 
 TypeId TypeChecker::addTV(TypeVar&& tv)
@@ -5653,7 +5735,7 @@ void TypeChecker::resolve(const TruthyPredicate& truthyP, RefinementMap& refis, 
     if (ty && fromOr)
         return addRefinement(refis, truthyP.lvalue, *ty);
 
-    refineLValue(truthyP.lvalue, refis, scope, mkTruthyPredicate(sense));
+    refineLValue(truthyP.lvalue, refis, scope, mkTruthyPredicate(sense, nilType));
 }
 
 void TypeChecker::resolve(const AndPredicate& andP, RefinementMap& refis, const ScopePtr& scope, bool sense)
@@ -5846,13 +5928,57 @@ void TypeChecker::resolve(const EqPredicate& eqP, RefinementMap& refis, const Sc
 
         if (maybeSingleton(eqP.type))
         {
-            // Normally we'd write option <: eqP.type, but singletons are always the subtype, so we flip this.
-            if (!sense || canUnify(eqP.type, option, scope, eqP.location).empty())
-                return sense ? eqP.type : option;
+            if (FFlag::LuauImplicitElseRefinement)
+            {
+                bool optionIsSubtype = canUnify(option, eqP.type, scope, eqP.location).empty();
+                bool targetIsSubtype = canUnify(eqP.type, option, scope, eqP.location).empty();
 
-            // local variable works around an odd gcc 9.3 warning: <anonymous> may be used uninitialized
-            std::optional<TypeId> res = std::nullopt;
-            return res;
+                // terminology refresher:
+                // - option is the type of the expression `x`, and
+                // - eqP.type is the type of the expression `"hello"`
+                //
+                // "hello" == x where
+                // x : "hello" | "world" -> x : "hello"
+                // x : number | string   -> x : "hello"
+                // x : number            -> x : never
+                //
+                // "hello" ~= x where
+                // x : "hello" | "world" -> x : "world"
+                // x : number | string   -> x : number | string
+                // x : number            -> x : number
+
+                // local variable works around an odd gcc 9.3 warning: <anonymous> may be used uninitialized
+                std::optional<TypeId> nope = std::nullopt;
+
+                if (sense)
+                {
+                    if (optionIsSubtype && !targetIsSubtype)
+                        return option;
+                    else if (!optionIsSubtype && targetIsSubtype)
+                        return eqP.type;
+                    else if (!optionIsSubtype && !targetIsSubtype)
+                        return nope;
+                    else if (optionIsSubtype && targetIsSubtype)
+                        return eqP.type;
+                }
+                else
+                {
+                    bool isOptionSingleton = get<SingletonTypeVar>(option);
+                    if (!isOptionSingleton)
+                        return option;
+                    else if (optionIsSubtype && targetIsSubtype)
+                        return nope;
+                }
+            }
+            else
+            {
+                if (!sense || canUnify(eqP.type, option, scope, eqP.location).empty())
+                    return sense ? eqP.type : option;
+
+                // local variable works around an odd gcc 9.3 warning: <anonymous> may be used uninitialized
+                std::optional<TypeId> res = std::nullopt;
+                return res;
+            }
         }
 
         return option;
