@@ -1,11 +1,11 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
-#include <memory>
-#include <unordered_map>
-
 #include "Luau/TypeVar.h"
 #include "Luau/TypePack.h"
+
+#include <memory>
+#include <unordered_map>
 
 namespace Luau
 {
@@ -108,6 +108,8 @@ struct TxnLog
     // If both logs talk about the same type, pack, or table, the rhs takes
     // priority.
     void concat(TxnLog rhs);
+    void concatAsIntersections(TxnLog rhs, NotNull<TypeArena> arena);
+    void concatAsUnion(TxnLog rhs, NotNull<TypeArena> arena);
 
     // Commits the TxnLog, rebinding all type pointers to their pending states.
     // Clears the TxnLog afterwards.

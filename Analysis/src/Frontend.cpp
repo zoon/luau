@@ -7,7 +7,7 @@
 #include "Luau/Config.h"
 #include "Luau/ConstraintGraphBuilder.h"
 #include "Luau/ConstraintSolver.h"
-#include "Luau/DataFlowGraphBuilder.h"
+#include "Luau/DataFlowGraph.h"
 #include "Luau/DcrLogger.h"
 #include "Luau/FileResolver.h"
 #include "Luau/Parser.h"
@@ -21,17 +21,15 @@
 #include <algorithm>
 #include <chrono>
 #include <stdexcept>
+#include <string>
 
 LUAU_FASTINT(LuauTypeInferIterationLimit)
 LUAU_FASTINT(LuauTarjanChildLimit)
 LUAU_FASTFLAG(LuauInferInNoCheckMode)
-LUAU_FASTFLAG(LuauNoMoreGlobalSingletonTypes)
 LUAU_FASTFLAGVARIABLE(LuauKnowsTheDataModel3, false)
 LUAU_FASTINTVARIABLE(LuauAutocompleteCheckTimeoutMs, 100)
 LUAU_FASTFLAGVARIABLE(DebugLuauDeferredConstraintResolution, false)
 LUAU_FASTFLAG(DebugLuauLogSolverToJson);
-LUAU_FASTFLAGVARIABLE(LuauFixMarkDirtyReverseDeps, false)
-LUAU_FASTFLAGVARIABLE(LuauPersistTypesAfterGeneratingDocSyms, false)
 
 namespace Luau
 {
@@ -112,57 +110,32 @@ LoadDefinitionFileResult Frontend::loadDefinitionFile(std::string_view source, c
 
     CloneState cloneState;
 
-    if (FFlag::LuauPersistTypesAfterGeneratingDocSyms)
+    std::vector<TypeId> typesToPersist;
+    typesToPersist.reserve(checkedModule->declaredGlobals.size() + checkedModule->getModuleScope()->exportedTypeBindings.size());
+
+    for (const auto& [name, ty] : checkedModule->declaredGlobals)
     {
-        std::vector<TypeId> typesToPersist;
-        typesToPersist.reserve(checkedModule->declaredGlobals.size() + checkedModule->getModuleScope()->exportedTypeBindings.size());
+        TypeId globalTy = clone(ty, globalTypes, cloneState);
+        std::string documentationSymbol = packageName + "/global/" + name;
+        generateDocumentationSymbols(globalTy, documentationSymbol);
+        globalScope->bindings[typeChecker.globalNames.names->getOrAdd(name.c_str())] = {globalTy, Location(), false, {}, documentationSymbol};
 
-        for (const auto& [name, ty] : checkedModule->declaredGlobals)
-        {
-            TypeId globalTy = clone(ty, globalTypes, cloneState);
-            std::string documentationSymbol = packageName + "/global/" + name;
-            generateDocumentationSymbols(globalTy, documentationSymbol);
-            globalScope->bindings[typeChecker.globalNames.names->getOrAdd(name.c_str())] = {globalTy, Location(), false, {}, documentationSymbol};
-
-            typesToPersist.push_back(globalTy);
-        }
-
-        for (const auto& [name, ty] : checkedModule->getModuleScope()->exportedTypeBindings)
-        {
-            TypeFun globalTy = clone(ty, globalTypes, cloneState);
-            std::string documentationSymbol = packageName + "/globaltype/" + name;
-            generateDocumentationSymbols(globalTy.type, documentationSymbol);
-            globalScope->exportedTypeBindings[name] = globalTy;
-
-            typesToPersist.push_back(globalTy.type);
-        }
-
-        for (TypeId ty : typesToPersist)
-        {
-            persist(ty);
-        }
+        typesToPersist.push_back(globalTy);
     }
-    else
+
+    for (const auto& [name, ty] : checkedModule->getModuleScope()->exportedTypeBindings)
     {
-        for (const auto& [name, ty] : checkedModule->declaredGlobals)
-        {
-            TypeId globalTy = clone(ty, globalTypes, cloneState);
-            std::string documentationSymbol = packageName + "/global/" + name;
-            generateDocumentationSymbols(globalTy, documentationSymbol);
-            globalScope->bindings[typeChecker.globalNames.names->getOrAdd(name.c_str())] = {globalTy, Location(), false, {}, documentationSymbol};
+        TypeFun globalTy = clone(ty, globalTypes, cloneState);
+        std::string documentationSymbol = packageName + "/globaltype/" + name;
+        generateDocumentationSymbols(globalTy.type, documentationSymbol);
+        globalScope->exportedTypeBindings[name] = globalTy;
 
-            persist(globalTy);
-        }
+        typesToPersist.push_back(globalTy.type);
+    }
 
-        for (const auto& [name, ty] : checkedModule->getModuleScope()->exportedTypeBindings)
-        {
-            TypeFun globalTy = clone(ty, globalTypes, cloneState);
-            std::string documentationSymbol = packageName + "/globaltype/" + name;
-            generateDocumentationSymbols(globalTy.type, documentationSymbol);
-            globalScope->exportedTypeBindings[name] = globalTy;
-
-            persist(globalTy.type);
-        }
+    for (TypeId ty : typesToPersist)
+    {
+        persist(ty);
     }
 
     return LoadDefinitionFileResult{true, parseResult, checkedModule};
@@ -194,57 +167,32 @@ LoadDefinitionFileResult loadDefinitionFile(TypeChecker& typeChecker, ScopePtr t
 
     CloneState cloneState;
 
-    if (FFlag::LuauPersistTypesAfterGeneratingDocSyms)
+    std::vector<TypeId> typesToPersist;
+    typesToPersist.reserve(checkedModule->declaredGlobals.size() + checkedModule->getModuleScope()->exportedTypeBindings.size());
+
+    for (const auto& [name, ty] : checkedModule->declaredGlobals)
     {
-        std::vector<TypeId> typesToPersist;
-        typesToPersist.reserve(checkedModule->declaredGlobals.size() + checkedModule->getModuleScope()->exportedTypeBindings.size());
+        TypeId globalTy = clone(ty, typeChecker.globalTypes, cloneState);
+        std::string documentationSymbol = packageName + "/global/" + name;
+        generateDocumentationSymbols(globalTy, documentationSymbol);
+        targetScope->bindings[typeChecker.globalNames.names->getOrAdd(name.c_str())] = {globalTy, Location(), false, {}, documentationSymbol};
 
-        for (const auto& [name, ty] : checkedModule->declaredGlobals)
-        {
-            TypeId globalTy = clone(ty, typeChecker.globalTypes, cloneState);
-            std::string documentationSymbol = packageName + "/global/" + name;
-            generateDocumentationSymbols(globalTy, documentationSymbol);
-            targetScope->bindings[typeChecker.globalNames.names->getOrAdd(name.c_str())] = {globalTy, Location(), false, {}, documentationSymbol};
-
-            typesToPersist.push_back(globalTy);
-        }
-
-        for (const auto& [name, ty] : checkedModule->getModuleScope()->exportedTypeBindings)
-        {
-            TypeFun globalTy = clone(ty, typeChecker.globalTypes, cloneState);
-            std::string documentationSymbol = packageName + "/globaltype/" + name;
-            generateDocumentationSymbols(globalTy.type, documentationSymbol);
-            targetScope->exportedTypeBindings[name] = globalTy;
-
-            typesToPersist.push_back(globalTy.type);
-        }
-
-        for (TypeId ty : typesToPersist)
-        {
-            persist(ty);
-        }
+        typesToPersist.push_back(globalTy);
     }
-    else
+
+    for (const auto& [name, ty] : checkedModule->getModuleScope()->exportedTypeBindings)
     {
-        for (const auto& [name, ty] : checkedModule->declaredGlobals)
-        {
-            TypeId globalTy = clone(ty, typeChecker.globalTypes, cloneState);
-            std::string documentationSymbol = packageName + "/global/" + name;
-            generateDocumentationSymbols(globalTy, documentationSymbol);
-            targetScope->bindings[typeChecker.globalNames.names->getOrAdd(name.c_str())] = {globalTy, Location(), false, {}, documentationSymbol};
+        TypeFun globalTy = clone(ty, typeChecker.globalTypes, cloneState);
+        std::string documentationSymbol = packageName + "/globaltype/" + name;
+        generateDocumentationSymbols(globalTy.type, documentationSymbol);
+        targetScope->exportedTypeBindings[name] = globalTy;
 
-            persist(globalTy);
-        }
+        typesToPersist.push_back(globalTy.type);
+    }
 
-        for (const auto& [name, ty] : checkedModule->getModuleScope()->exportedTypeBindings)
-        {
-            TypeFun globalTy = clone(ty, typeChecker.globalTypes, cloneState);
-            std::string documentationSymbol = packageName + "/globaltype/" + name;
-            generateDocumentationSymbols(globalTy.type, documentationSymbol);
-            targetScope->exportedTypeBindings[name] = globalTy;
-
-            persist(globalTy.type);
-        }
+    for (TypeId ty : typesToPersist)
+    {
+        persist(ty);
     }
 
     return LoadDefinitionFileResult{true, parseResult, checkedModule};
@@ -460,7 +408,7 @@ double getTimestamp()
 } // namespace
 
 Frontend::Frontend(FileResolver* fileResolver, ConfigResolver* configResolver, const FrontendOptions& options)
-    : singletonTypes(NotNull{FFlag::LuauNoMoreGlobalSingletonTypes ? &singletonTypes_ : &DEPRECATED_getSingletonTypes()})
+    : singletonTypes(NotNull{&singletonTypes_})
     , fileResolver(fileResolver)
     , moduleResolver(this)
     , moduleResolverForAutocomplete(this)
@@ -493,13 +441,13 @@ CheckResult Frontend::check(const ModuleName& name, std::optional<FrontendOption
         {
             auto it2 = moduleResolverForAutocomplete.modules.find(name);
             if (it2 == moduleResolverForAutocomplete.modules.end() || it2->second == nullptr)
-                throwRuntimeError("Frontend::modules does not have data for " + name, name);
+                throw InternalCompilerError("Frontend::modules does not have data for " + name, name);
         }
         else
         {
             auto it2 = moduleResolver.modules.find(name);
             if (it2 == moduleResolver.modules.end() || it2->second == nullptr)
-                throwRuntimeError("Frontend::modules does not have data for " + name, name);
+                throw InternalCompilerError("Frontend::modules does not have data for " + name, name);
         }
 
         return CheckResult{
@@ -606,7 +554,7 @@ CheckResult Frontend::check(const ModuleName& name, std::optional<FrontendOption
         stats.filesNonstrict += mode == Mode::Nonstrict;
 
         if (module == nullptr)
-            throwRuntimeError("Frontend::check produced a nullptr module for " + moduleName, moduleName);
+            throw InternalCompilerError("Frontend::check produced a nullptr module for " + moduleName, moduleName);
 
         if (!frontendOptions.retainFullTypeGraphs)
         {
@@ -870,26 +818,13 @@ void Frontend::markDirty(const ModuleName& name, std::vector<ModuleName>* marked
         sourceNode.dirtyModule = true;
         sourceNode.dirtyModuleForAutocomplete = true;
 
-        if (FFlag::LuauFixMarkDirtyReverseDeps)
-        {
-            if (0 == reverseDeps.count(next))
-                continue;
+        if (0 == reverseDeps.count(next))
+            continue;
 
-            sourceModules.erase(next);
+        sourceModules.erase(next);
 
-            const std::vector<ModuleName>& dependents = reverseDeps[next];
-            queue.insert(queue.end(), dependents.begin(), dependents.end());
-        }
-        else
-        {
-            if (0 == reverseDeps.count(name))
-                continue;
-
-            sourceModules.erase(name);
-
-            const std::vector<ModuleName>& dependents = reverseDeps[name];
-            queue.insert(queue.end(), dependents.begin(), dependents.end());
-        }
+        const std::vector<ModuleName>& dependents = reverseDeps[next];
+        queue.insert(queue.end(), dependents.begin(), dependents.end());
     }
 }
 
@@ -970,6 +905,7 @@ ModulePtr Frontend::check(
     result->astTypes = std::move(cgb.astTypes);
     result->astTypePacks = std::move(cgb.astTypePacks);
     result->astOriginalCallTypes = std::move(cgb.astOriginalCallTypes);
+    result->astOverloadResolvedTypes = std::move(cgb.astOverloadResolvedTypes);
     result->astResolvedTypes = std::move(cgb.astResolvedTypes);
     result->astResolvedTypePacks = std::move(cgb.astResolvedTypePacks);
     result->type = sourceModule.type;

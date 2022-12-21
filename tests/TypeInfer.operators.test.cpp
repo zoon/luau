@@ -8,6 +8,7 @@
 #include "Luau/VisitTypeVar.h"
 
 #include "Fixture.h"
+#include "ClassFixture.h"
 
 #include "doctest.h"
 
@@ -24,8 +25,16 @@ TEST_CASE_FIXTURE(Fixture, "or_joins_types")
         local x:string|number = s
     )");
     LUAU_REQUIRE_NO_ERRORS(result);
-    CHECK_EQ(toString(*requireType("s")), "number | string");
-    CHECK_EQ(toString(*requireType("x")), "number | string");
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        CHECK_EQ(toString(*requireType("s")), "(string & ~(false?)) | number");
+        CHECK_EQ(toString(*requireType("x")), "number | string");
+    }
+    else
+    {
+        CHECK_EQ(toString(*requireType("s")), "number | string");
+        CHECK_EQ(toString(*requireType("x")), "number | string");
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "or_joins_types_with_no_extras")
@@ -36,8 +45,16 @@ TEST_CASE_FIXTURE(Fixture, "or_joins_types_with_no_extras")
         local y = x or "s"
     )");
     LUAU_REQUIRE_NO_ERRORS(result);
-    CHECK_EQ(toString(*requireType("s")), "number | string");
-    CHECK_EQ(toString(*requireType("y")), "number | string");
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        CHECK_EQ(toString(*requireType("s")), "(string & ~(false?)) | number");
+        CHECK_EQ(toString(*requireType("y")), "((number | string) & ~(false?)) | string");
+    }
+    else
+    {
+        CHECK_EQ(toString(*requireType("s")), "number | string");
+        CHECK_EQ(toString(*requireType("y")), "number | string");
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "or_joins_types_with_no_superfluous_union")
@@ -61,7 +78,14 @@ TEST_CASE_FIXTURE(Fixture, "and_does_not_always_add_boolean")
         local x:boolean|number = s
     )");
     LUAU_REQUIRE_NO_ERRORS(result);
-    CHECK_EQ(toString(*requireType("s")), "number");
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        CHECK_EQ(toString(*requireType("s")), "((false?) & string) | number");
+    }
+    else
+    {
+        CHECK_EQ(toString(*requireType("s")), "number");
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "and_adds_boolean_no_superfluous_union")
@@ -80,7 +104,14 @@ TEST_CASE_FIXTURE(Fixture, "and_or_ternary")
         local s = (1/2) > 0.5 and "a" or 10
     )");
     LUAU_REQUIRE_NO_ERRORS(result);
-    CHECK_EQ(toString(*requireType("s")), "number | string");
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        CHECK_EQ(toString(*requireType("s")), "((((false?) & boolean) | string) & ~(false?)) | number");
+    }
+    else
+    {
+        CHECK_EQ(toString(*requireType("s")), "number | string");
+    }
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "primitive_arith_no_metatable")
@@ -404,11 +435,9 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "compound_assign_mismatch_metatable")
         local v2: V2 = setmetatable({ x = 3, y = 4 }, VMT)
         v1 %= v2
     )");
-    LUAU_REQUIRE_ERROR_COUNT(1, result);
 
-    TypeMismatch* tm = get<TypeMismatch>(result.errors[0]);
-    CHECK_EQ(*tm->wantedType, *requireType("v2"));
-    CHECK_EQ(*tm->givenType, *typeChecker.numberType);
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    CHECK("Type 'number' could not be converted into 'V2'" == toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "CallOrOfFunctions")
@@ -780,7 +809,14 @@ local b: number = 1 or a
     TypeMismatch* tm = get<TypeMismatch>(result.errors[0]);
     REQUIRE(tm);
     CHECK_EQ(typeChecker.numberType, tm->wantedType);
-    CHECK_EQ("number?", toString(tm->givenType));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        CHECK_EQ("((number & ~(false?)) | number)?", toString(tm->givenType));
+    }
+    else
+    {
+        CHECK_EQ("number?", toString(tm->givenType));
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "operator_eq_verifies_types_do_intersect")
@@ -817,6 +853,21 @@ TEST_CASE_FIXTURE(Fixture, "operator_eq_operands_are_not_subtypes_of_each_other_
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
+TEST_CASE_FIXTURE(Fixture, "operator_eq_completely_incompatible")
+{
+    ScopedFastFlag sff{"LuauIntersectionTestForEquality", true};
+
+    CheckResult result = check(R"(
+        local a: string | number = "hi"
+        local b: {x: string}? = {x = "bye"}
+
+        local r1 = a == b
+        local r2 = b == a
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(2, result);
+}
+
 TEST_CASE_FIXTURE(Fixture, "refine_and_or")
 {
     CheckResult result = check(R"(
@@ -826,7 +877,14 @@ TEST_CASE_FIXTURE(Fixture, "refine_and_or")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ("number", toString(requireType("u")));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        CHECK_EQ("((((false?) & ({| x: number? |}?)) | a) & ~(false?)) | number", toString(requireType("u")));
+    }
+    else
+    {
+        CHECK_EQ("number", toString(requireType("u")));
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "infer_any_in_all_modes_when_lhs_is_unknown")
@@ -916,6 +974,31 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "expected_types_through_binary_or")
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
+TEST_CASE_FIXTURE(ClassFixture, "unrelated_classes_cannot_be_compared")
+{
+    ScopedFastFlag sff{"LuauIntersectionTestForEquality", true};
+
+    CheckResult result = check(R"(
+        local a = BaseClass.New()
+        local b = UnrelatedClass.New()
+
+        local c = a == b
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "unrelated_primitives_cannot_be_compared")
+{
+    ScopedFastFlag sff{"LuauIntersectionTestForEquality", true};
+
+    CheckResult result = check(R"(
+        local c = 5 == true
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+}
+
 TEST_CASE_FIXTURE(BuiltinsFixture, "mm_ops_must_return_a_value")
 {
     if (!FFlag::DebugLuauDeferredConstraintResolution)
@@ -994,10 +1077,10 @@ local w = c and 1
 
     if (FFlag::DebugLuauDeferredConstraintResolution)
     {
-        CHECK("number?" == toString(requireType("x")));
-        CHECK("number" == toString(requireType("y")));
-        CHECK("false | number" == toString(requireType("z")));
-        CHECK("number" == toString(requireType("w"))); // Normalizer considers free & falsy == never
+        CHECK("((false?) & (number?)) | number" == toString(requireType("x")));
+        CHECK("((false?) & string) | number" == toString(requireType("y")));
+        CHECK("((false?) & boolean) | number" == toString(requireType("z")));
+        CHECK("((false?) & a) | number" == toString(requireType("w")));
     }
     else
     {
@@ -1032,12 +1115,12 @@ local f1 = f or 'f'
 
     if (FFlag::DebugLuauDeferredConstraintResolution)
     {
-        CHECK("number | string" == toString(requireType("a1")));
-        CHECK("number" == toString(requireType("b1")));
-        CHECK("string | true" == toString(requireType("c1")));
-        CHECK("string | true" == toString(requireType("d1")));
-        CHECK("string" == toString(requireType("e1")));
-        CHECK("string" == toString(requireType("f1")));
+        CHECK("((false | number) & ~(false?)) | string" == toString(requireType("a1")));
+        CHECK("((number?) & ~(false?)) | number" == toString(requireType("b1")));
+        CHECK("(boolean & ~(false?)) | string" == toString(requireType("c1")));
+        CHECK("(true & ~(false?)) | string" == toString(requireType("d1")));
+        CHECK("(false & ~(false?)) | string" == toString(requireType("e1")));
+        CHECK("(nil & ~(false?)) | string" == toString(requireType("f1")));
     }
     else
     {

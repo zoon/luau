@@ -3,6 +3,7 @@
 
 #include "Luau/Ast.h" // Used for some of the enumerations
 #include "Luau/Def.h"
+#include "Luau/DenseHash.h"
 #include "Luau/NotNull.h"
 #include "Luau/TypeVar.h"
 #include "Luau/Variant.h"
@@ -67,6 +68,12 @@ struct BinaryConstraint
     TypeId leftType;
     TypeId rightType;
     TypeId resultType;
+
+    // When we dispatch this constraint, we update the key at this map to record
+    // the overload that we selected.
+    AstExpr* expr;
+    DenseHashMap<const AstExpr*, TypeId>* astOriginalCallTypes;
+    DenseHashMap<const AstExpr*, TypeId>* astOverloadResolvedTypes;
 };
 
 // iteratee is iterable
@@ -149,11 +156,15 @@ struct SetPropConstraint
     TypeId propType;
 };
 
-// result ~ if isSingleton D then ~D else unknown where D = discriminantType
+// if negation:
+//   result ~ if isSingleton D then ~D else unknown where D = discriminantType
+// if not negation:
+//   result ~ if isSingleton D then D else unknown where D = discriminantType
 struct SingletonOrTopTypeConstraint
 {
     TypeId resultType;
     TypeId discriminantType;
+    bool negated;
 };
 
 using ConstraintV = Variant<SubtypeConstraint, PackSubtypeConstraint, GeneralizationConstraint, InstantiationConstraint, UnaryConstraint,

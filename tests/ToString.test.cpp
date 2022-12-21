@@ -10,7 +10,6 @@
 using namespace Luau;
 
 LUAU_FASTFLAG(LuauRecursiveTypeParameterRestriction);
-LUAU_FASTFLAG(LuauFunctionReturnStringificationFixup);
 
 TEST_SUITE_BEGIN("ToString");
 
@@ -83,7 +82,7 @@ TEST_CASE_FIXTURE(Fixture, "table_respects_use_line_break")
 
     ToStringOptions opts;
     opts.useLineBreaks = true;
-    opts.indent = true;
+    opts.DEPRECATED_indent = true;
 
     //clang-format off
     CHECK_EQ("{|\n"
@@ -270,9 +269,9 @@ TEST_CASE_FIXTURE(Fixture, "quit_stringifying_type_when_length_is_exceeded")
     {
         o.maxTypeLength = 30;
         CHECK_EQ(toString(requireType("f0"), o), "() -> ()");
-        CHECK_EQ(toString(requireType("f1"), o), "<a>(a) -> () -> ()");
-        CHECK_EQ(toString(requireType("f2"), o), "<b>(b) -> <a>(a) -> () -> ()");
-        CHECK_EQ(toString(requireType("f3"), o), "<c>(c) -> <b>(b) -> <a>(a) -> (... *TRUNCATED*");
+        CHECK_EQ(toString(requireType("f1"), o), "<a>(a) -> (() -> ()) | (a & ~(false?))... *TRUNCATED*");
+        CHECK_EQ(toString(requireType("f2"), o), "<b>(b) -> (<a>(a) -> (() -> ()) | (a & ~(false?))... *TRUNCATED*");
+        CHECK_EQ(toString(requireType("f3"), o), "<c>(c) -> (<b>(b) -> (<a>(a) -> (() -> ()) | (a & ~(false?))... *TRUNCATED*");
     }
     else
     {
@@ -300,9 +299,9 @@ TEST_CASE_FIXTURE(Fixture, "stringifying_type_is_still_capped_when_exhaustive")
     {
         o.maxTypeLength = 30;
         CHECK_EQ(toString(requireType("f0"), o), "() -> ()");
-        CHECK_EQ(toString(requireType("f1"), o), "<a>(a) -> () -> ()");
-        CHECK_EQ(toString(requireType("f2"), o), "<b>(b) -> <a>(a) -> () -> ()");
-        CHECK_EQ(toString(requireType("f3"), o), "<c>(c) -> <b>(b) -> <a>(a) -> (... *TRUNCATED*");
+        CHECK_EQ(toString(requireType("f1"), o), "<a>(a) -> (() -> ()) | (a & ~(false?))... *TRUNCATED*");
+        CHECK_EQ(toString(requireType("f2"), o), "<b>(b) -> (<a>(a) -> (() -> ()) | (a & ~(false?))... *TRUNCATED*");
+        CHECK_EQ(toString(requireType("f3"), o), "<c>(c) -> (<b>(b) -> (<a>(a) -> (() -> ()) | (a & ~(false?))... *TRUNCATED*");
     }
     else
     {
@@ -568,10 +567,7 @@ TEST_CASE_FIXTURE(Fixture, "no_parentheses_around_return_type_if_pack_has_an_emp
 
     TypeId functionType = arena.addType(FunctionTypeVar{argList, emptyTail});
 
-    if (FFlag::LuauFunctionReturnStringificationFixup)
-        CHECK("(string) -> string" == toString(functionType));
-    else
-        CHECK("(string) -> (string)" == toString(functionType));
+    CHECK("(string) -> string" == toString(functionType));
 }
 
 TEST_CASE_FIXTURE(Fixture, "no_parentheses_around_cyclic_function_type_in_union")

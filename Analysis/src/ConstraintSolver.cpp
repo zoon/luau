@@ -15,7 +15,6 @@
 #include "Luau/TypeVar.h"
 #include "Luau/Unifier.h"
 #include "Luau/VisitTypeVar.h"
-#include "Luau/TypeUtils.h"
 
 LUAU_FASTFLAGVARIABLE(DebugLuauLogSolver, false);
 LUAU_FASTFLAGVARIABLE(DebugLuauLogSolverToJson, false);
@@ -635,9 +634,17 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
 
         if (mm)
         {
+            Instantiation instantiation{TxnLog::empty(), arena, TypeLevel{}, constraint->scope};
+            std::optional<TypeId> instantiatedMm = instantiation.substitute(*mm);
+            if (!instantiatedMm)
+            {
+                reportError(CodeTooComplex{}, constraint->location);
+                return true;
+            }
+
             // TODO: Is a table with __call legal here?
             // TODO: Overloads
-            if (const FunctionTypeVar* ftv = get<FunctionTypeVar>(follow(*mm)))
+            if (const FunctionTypeVar* ftv = get<FunctionTypeVar>(follow(*instantiatedMm)))
             {
                 TypePackId inferredArgs;
                 // For >= and > we invoke __lt and __le respectively with
@@ -673,6 +680,9 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
 
                 asMutable(resultType)->ty.emplace<BoundTypeVar>(mmResult);
                 unblock(resultType);
+
+                (*c.astOriginalCallTypes)[c.expr] = *mm;
+                (*c.astOverloadResolvedTypes)[c.expr] = *instantiatedMm;
                 return true;
             }
         }
@@ -743,19 +753,7 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
     {
         TypeId leftFilteredTy = arena->addType(IntersectionTypeVar{{singletonTypes->falsyType, leftType}});
 
-        // TODO: normaliztion here should be replaced by a more limited 'simplification'
-        const NormalizedType* normalized = normalizer->normalize(arena->addType(UnionTypeVar{{leftFilteredTy, rightType}}));
-
-        if (!normalized)
-        {
-            reportError(CodeTooComplex{}, constraint->location);
-            asMutable(resultType)->ty.emplace<BoundTypeVar>(errorRecoveryType());
-        }
-        else
-        {
-            asMutable(resultType)->ty.emplace<BoundTypeVar>(normalizer->typeFromNormal(*normalized));
-        }
-
+        asMutable(resultType)->ty.emplace<BoundTypeVar>(arena->addType(UnionTypeVar{{leftFilteredTy, rightType}}));
         unblock(resultType);
         return true;
     }
@@ -763,21 +761,9 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
     // LHS is falsey.
     case AstExprBinary::Op::Or:
     {
-        TypeId rightFilteredTy = arena->addType(IntersectionTypeVar{{singletonTypes->truthyType, leftType}});
+        TypeId leftFilteredTy = arena->addType(IntersectionTypeVar{{singletonTypes->truthyType, leftType}});
 
-        // TODO: normaliztion here should be replaced by a more limited 'simplification'
-        const NormalizedType* normalized = normalizer->normalize(arena->addType(UnionTypeVar{{rightFilteredTy, rightType}}));
-
-        if (!normalized)
-        {
-            reportError(CodeTooComplex{}, constraint->location);
-            asMutable(resultType)->ty.emplace<BoundTypeVar>(errorRecoveryType());
-        }
-        else
-        {
-            asMutable(resultType)->ty.emplace<BoundTypeVar>(normalizer->typeFromNormal(*normalized));
-        }
-
+        asMutable(resultType)->ty.emplace<BoundTypeVar>(arena->addType(UnionTypeVar{{leftFilteredTy, rightType}}));
         unblock(resultType);
         return true;
     }
@@ -1233,9 +1219,22 @@ bool ConstraintSolver::tryDispatch(const HasPropConstraint& c, NotNull<const Con
     if (isBlocked(subjectType) || get<PendingExpansionTypeVar>(subjectType))
         return block(subjectType, constraint);
 
+    if (get<FreeTypeVar>(subjectType))
+    {
+        TableTypeVar& ttv = asMutable(subjectType)->ty.emplace<TableTypeVar>(TableState::Free, TypeLevel{}, constraint->scope);
+        ttv.props[c.prop] = Property{c.resultType};
+        asMutable(c.resultType)->ty.emplace<FreeTypeVar>(constraint->scope);
+        unblock(c.resultType);
+        return true;
+    }
+
     std::optional<TypeId> resultType = lookupTableProp(subjectType, c.prop);
     if (!resultType)
-        return false;
+    {
+        asMutable(c.resultType)->ty.emplace<BoundTypeVar>(singletonTypes->errorRecoveryType());
+        unblock(c.resultType);
+        return true;
+    }
 
     if (isBlocked(*resultType))
     {
@@ -1418,8 +1417,10 @@ bool ConstraintSolver::tryDispatch(const SingletonOrTopTypeConstraint& c, NotNul
     TypeId followed = follow(c.discriminantType);
 
     // `nil` is a singleton type too! There's only one value of type `nil`.
-    if (get<SingletonTypeVar>(followed) || isNil(followed))
+    if (c.negated && (get<SingletonTypeVar>(followed) || isNil(followed)))
         *asMutable(c.resultType) = NegationTypeVar{c.discriminantType};
+    else if (!c.negated && get<SingletonTypeVar>(followed))
+        *asMutable(c.resultType) = BoundTypeVar{c.discriminantType};
     else
         *asMutable(c.resultType) = BoundTypeVar{singletonTypes->unknownType};
 
@@ -1509,17 +1510,17 @@ bool ConstraintSolver::tryDispatchIterableTable(TypeId iteratorTy, const Iterabl
                 TypePackId expectedIterArgs = arena->addTypePack({iteratorTy});
                 unify(iterFtv->argTypes, expectedIterArgs, constraint->scope);
 
-                std::vector<TypeId> iterRets = flatten(*arena, singletonTypes, iterFtv->retTypes, 2);
+                TypePack iterRets = extendTypePack(*arena, singletonTypes, iterFtv->retTypes, 2);
 
-                if (iterRets.size() < 1)
+                if (iterRets.head.size() < 1)
                 {
                     // We've done what we can; this will get reported as an
                     // error by the type checker.
                     return true;
                 }
 
-                TypeId nextFn = iterRets[0];
-                TypeId table = iterRets.size() == 2 ? iterRets[1] : arena->freshType(constraint->scope);
+                TypeId nextFn = iterRets.head[0];
+                TypeId table = iterRets.head.size() == 2 ? iterRets.head[1] : arena->freshType(constraint->scope);
 
                 if (std::optional<TypeId> instantiatedNextFn = instantiation.substitute(nextFn))
                 {

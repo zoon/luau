@@ -9,6 +9,8 @@
 
 using namespace Luau;
 
+LUAU_FASTFLAG(LuauTypeMismatchInvarianceInError)
+
 TEST_SUITE_BEGIN("ProvisionalTests");
 
 // These tests check for behavior that differs from the final behavior we'd
@@ -170,24 +172,12 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "error_on_eq_metamethod_returning_a_type_othe
     CHECK_EQ("Metamethod '__eq' must return type 'boolean'", ge->message);
 }
 
-// Requires success typing to confidently determine that this expression has no overlap.
-TEST_CASE_FIXTURE(Fixture, "operator_eq_completely_incompatible")
-{
-    CheckResult result = check(R"(
-        local a: string | number = "hi"
-        local b: {x: string}? = {x = "bye"}
-
-        local r1 = a == b
-        local r2 = b == a
-    )");
-
-    LUAU_REQUIRE_NO_ERRORS(result);
-}
-
 // Belongs in TypeInfer.refinements.test.cpp.
-// We'll need to not only report an error on `a == b`, but also to refine both operands as `never` in the `==` branch.
+// We need refine both operands as `never` in the `==` branch.
 TEST_CASE_FIXTURE(Fixture, "lvalue_equals_another_lvalue_with_no_overlap")
 {
+    ScopedFastFlag sff{"LuauIntersectionTestForEquality", true};
+
     CheckResult result = check(R"(
         local function f(a: string, b: boolean?)
             if a == b then
@@ -198,7 +188,7 @@ TEST_CASE_FIXTURE(Fixture, "lvalue_equals_another_lvalue_with_no_overlap")
         end
     )");
 
-    LUAU_REQUIRE_NO_ERRORS(result);
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
 
     CHECK_EQ(toString(requireTypeAtPosition({3, 33})), "string");   // a == b
     CHECK_EQ(toString(requireTypeAtPosition({3, 36})), "boolean?"); // a == b
@@ -786,6 +776,34 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "functions_with_mismatching_arity_but_any_is
      *      The packs have inequal lengths
      */
     // CHECK(!isSubtype(b, c));
+}
+
+TEST_CASE_FIXTURE(Fixture, "assign_table_with_refined_property_with_a_similar_type_is_illegal")
+{
+    CheckResult result = check(R"(
+        local t: {x: number?} = {x = nil}
+
+        if t.x then
+            local u: {x: number} = t
+        end
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+
+    if (FFlag::LuauTypeMismatchInvarianceInError)
+    {
+        CHECK_EQ(R"(Type '{| x: number? |}' could not be converted into '{| x: number |}'
+caused by:
+  Property 'x' is not compatible. Type 'number?' could not be converted into 'number' in an invariant context)",
+            toString(result.errors[0]));
+    }
+    else
+    {
+        CHECK_EQ(R"(Type '{| x: number? |}' could not be converted into '{| x: number |}'
+caused by:
+  Property 'x' is not compatible. Type 'number?' could not be converted into 'number')",
+            toString(result.errors[0]));
+    }
 }
 
 TEST_SUITE_END();

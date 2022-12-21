@@ -1,12 +1,17 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
-#include "Luau/Frontend.h"
 #include "Luau/Scope.h"
-#include "Luau/TypeInfer.h"
+#include "Luau/TypeVar.h"
+
+#include <optional>
 
 namespace Luau
 {
+
+struct Frontend;
+struct TypeChecker;
+struct TypeArena;
 
 void registerBuiltinTypes(Frontend& frontend);
 
@@ -40,6 +45,7 @@ TypeId makeFunction( // Polymorphic
 
 void attachMagicFunction(TypeId ty, MagicFunction fn);
 void attachDcrMagicFunction(TypeId ty, DcrMagicFunction fn);
+void attachDcrMagicRefinement(TypeId ty, DcrMagicRefinement fn);
 
 Property makeProperty(TypeId ty, std::optional<std::string> documentationSymbol = std::nullopt);
 void assignPropDocumentationSymbols(TableTypeVar::Props& props, const std::string& baseName);
