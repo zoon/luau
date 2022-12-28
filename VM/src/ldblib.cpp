@@ -153,9 +153,26 @@ static int db_traceback(lua_State* L)
     return 1;
 }
 
+static int db_noop_1arg(lua_State* L)
+{
+    int arg;
+    lua_State* _L1 = getthread(L, &arg);
+    const char* _label = luaL_checkstring(L, arg + 1);
+    return 0;
+}
+static int db_noop_0arg(lua_State* L)
+{
+    return 0;
+}
+
 static const luaL_Reg dblib[] = {
     {"info", db_info},
     {"traceback", db_traceback},
+    // empty functions for Studio compatibility
+    {"profilebegin", db_noop_1arg},
+    {"profileend", db_noop_0arg},
+    {"setmemorycategory", db_noop_1arg},
+    {"resetmemorycategory", db_noop_0arg},
     {NULL, NULL},
 };
 
