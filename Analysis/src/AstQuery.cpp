@@ -4,7 +4,7 @@
 #include "Luau/Module.h"
 #include "Luau/Scope.h"
 #include "Luau/TypeInfer.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 #include "Luau/ToString.h"
 
 #include "Luau/Common.h"
@@ -183,14 +183,24 @@ struct FindFullAncestry final : public AstVisitor
     std::vector<AstNode*> nodes;
     Position pos;
     Position documentEnd;
+    bool includeTypes = false;
 
-    explicit FindFullAncestry(Position pos, Position documentEnd)
+    explicit FindFullAncestry(Position pos, Position documentEnd, bool includeTypes = false)
         : pos(pos)
         , documentEnd(documentEnd)
+        , includeTypes(includeTypes)
     {
     }
 
-    bool visit(AstNode* node)
+    bool visit(AstType* type) override
+    {
+        if (includeTypes)
+            return visit(static_cast<AstNode*>(type));
+        else
+            return false;
+    }
+
+    bool visit(AstNode* node) override
     {
         if (node->location.contains(pos))
         {
@@ -220,13 +230,13 @@ std::vector<AstNode*> findAncestryAtPositionForAutocomplete(const SourceModule& 
     return finder.ancestry;
 }
 
-std::vector<AstNode*> findAstAncestryOfPosition(const SourceModule& source, Position pos)
+std::vector<AstNode*> findAstAncestryOfPosition(const SourceModule& source, Position pos, bool includeTypes)
 {
     const Position end = source.root->location.end;
     if (pos > end)
         pos = end;
 
-    FindFullAncestry finder(pos, end);
+    FindFullAncestry finder(pos, end, includeTypes);
     source.root->visit(&finder);
     return finder.nodes;
 }
@@ -256,7 +266,8 @@ AstExpr* findExprAtPosition(const SourceModule& source, Position pos)
 
 ScopePtr findScopeAtPosition(const Module& module, Position pos)
 {
-    LUAU_ASSERT(!module.scopes.empty());
+    if (module.scopes.empty())
+        return nullptr;
 
     Location scopeLocation = module.scopes.front().first;
     ScopePtr scope = module.scopes.front().second;
@@ -320,7 +331,6 @@ std::optional<Binding> findBindingAtPosition(const Module& module, const SourceM
         return std::nullopt;
 
     ScopePtr currentScope = findScopeAtPosition(module, pos);
-    LUAU_ASSERT(currentScope);
 
     while (currentScope)
     {
@@ -447,7 +457,7 @@ static std::optional<DocumentationSymbol> checkOverloadedDocumentationSymbol(
         return std::nullopt;
 
     // This might be an overloaded function.
-    if (get<IntersectionTypeVar>(follow(ty)))
+    if (get<IntersectionType>(follow(ty)))
     {
         TypeId matchingOverload = nullptr;
         if (parentExpr && parentExpr->is<AstExprCall>())
@@ -487,12 +497,12 @@ std::optional<DocumentationSymbol> getDocumentationSymbolAtPosition(const Source
             if (auto it = module.astTypes.find(indexName->expr))
             {
                 TypeId parentTy = follow(*it);
-                if (const TableTypeVar* ttv = get<TableTypeVar>(parentTy))
+                if (const TableType* ttv = get<TableType>(parentTy))
                 {
                     if (auto propIt = ttv->props.find(indexName->index.value); propIt != ttv->props.end())
                         return checkOverloadedDocumentationSymbol(module, propIt->second.type, parentExpr, propIt->second.documentationSymbol);
                 }
-                else if (const ClassTypeVar* ctv = get<ClassTypeVar>(parentTy))
+                else if (const ClassType* ctv = get<ClassType>(parentTy))
                 {
                     if (auto propIt = ctv->props.find(indexName->index.value); propIt != ctv->props.end())
                         return checkOverloadedDocumentationSymbol(module, propIt->second.type, parentExpr, propIt->second.documentationSymbol);

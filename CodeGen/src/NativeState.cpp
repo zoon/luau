@@ -42,7 +42,6 @@ void initFallbackTable(NativeState& data)
     CODEGEN_SET_FALLBACK(LOP_GETVARARGS, 0);
     CODEGEN_SET_FALLBACK(LOP_DUPCLOSURE, 0);
     CODEGEN_SET_FALLBACK(LOP_PREPVARARGS, 0);
-    CODEGEN_SET_FALLBACK(LOP_COVERAGE, 0);
     CODEGEN_SET_FALLBACK(LOP_BREAK, 0);
 
     // Fallbacks that are called from partial implementation of an instruction
@@ -80,13 +79,37 @@ void initHelperFunctions(NativeState& data)
 
     data.context.luaF_close = luaF_close;
 
+    data.context.luaT_gettm = luaT_gettm;
+    data.context.luaT_objtypenamestr = luaT_objtypenamestr;
+
+    data.context.libm_exp = exp;
     data.context.libm_pow = pow;
+    data.context.libm_fmod = fmod;
+    data.context.libm_log = log;
+    data.context.libm_log2 = log2;
+    data.context.libm_log10 = log10;
+    data.context.libm_ldexp = ldexp;
+    data.context.libm_round = round;
+    data.context.libm_frexp = frexp;
+    data.context.libm_modf = modf;
+
+    data.context.libm_asin = asin;
+    data.context.libm_sin = sin;
+    data.context.libm_sinh = sinh;
+    data.context.libm_acos = acos;
+    data.context.libm_cos = cos;
+    data.context.libm_cosh = cosh;
+    data.context.libm_atan = atan;
+    data.context.libm_atan2 = atan2;
+    data.context.libm_tan = tan;
+    data.context.libm_tanh = tanh;
 
     data.context.forgLoopNodeIter = forgLoopNodeIter;
     data.context.forgLoopNonTableFallback = forgLoopNonTableFallback;
     data.context.forgPrepXnextFallback = forgPrepXnextFallback;
     data.context.callProlog = callProlog;
     data.context.callEpilogC = callEpilogC;
+    data.context.returnFallback = returnFallback;
 }
 
 } // namespace CodeGen

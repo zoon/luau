@@ -10,18 +10,17 @@ using namespace Luau;
 
 namespace
 {
+
 struct NegationFixture : Fixture
 {
     TypeArena arena;
-    ScopedFastFlag sff[1]{
-        {"LuauSubtypeNormalizer", true},
-    };
 
     NegationFixture()
     {
-        registerHiddenTypes(*this, arena);
+        registerHiddenTypes(&frontend);
     }
 };
+
 } // namespace
 
 TEST_SUITE_BEGIN("Negations");

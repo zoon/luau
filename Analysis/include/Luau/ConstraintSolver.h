@@ -7,7 +7,8 @@
 #include "Luau/Module.h"
 #include "Luau/Normalize.h"
 #include "Luau/ToString.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
+#include "Luau/TypeReduction.h"
 #include "Luau/Variant.h"
 
 #include <vector>
@@ -19,7 +20,12 @@ struct DcrLogger;
 
 // TypeId, TypePackId, or Constraint*. It is impossible to know which, but we
 // never dereference this pointer.
-using BlockedConstraintId = const void*;
+using BlockedConstraintId = Variant<TypeId, TypePackId, const Constraint*>;
+
+struct HashBlockedConstraintId
+{
+    size_t operator()(const BlockedConstraintId& bci) const;
+};
 
 struct ModuleResolver;
 
@@ -44,9 +50,10 @@ struct HashInstantiationSignature
 struct ConstraintSolver
 {
     TypeArena* arena;
-    NotNull<SingletonTypes> singletonTypes;
+    NotNull<BuiltinTypes> builtinTypes;
     InternalErrorReporter iceReporter;
     NotNull<Normalizer> normalizer;
+    NotNull<TypeReduction> reducer;
     // The entire set of constraints that the solver is trying to resolve.
     std::vector<NotNull<Constraint>> constraints;
     NotNull<Scope> rootScope;
@@ -65,7 +72,7 @@ struct ConstraintSolver
     // anything.
     std::unordered_map<NotNull<const Constraint>, size_t> blockedConstraints;
     // A mapping of type/pack pointers to the constraints they block.
-    std::unordered_map<BlockedConstraintId, std::vector<NotNull<const Constraint>>> blocked;
+    std::unordered_map<BlockedConstraintId, std::vector<NotNull<const Constraint>>, HashBlockedConstraintId> blocked;
     // Memoized instantiations of type aliases.
     DenseHashMap<InstantiationSignature, TypeId, HashInstantiationSignature> instantiatedAliases{{}};
 
@@ -78,7 +85,8 @@ struct ConstraintSolver
     DcrLogger* logger;
 
     explicit ConstraintSolver(NotNull<Normalizer> normalizer, NotNull<Scope> rootScope, std::vector<NotNull<Constraint>> constraints,
-        ModuleName moduleName, NotNull<ModuleResolver> moduleResolver, std::vector<RequireCycle> requireCycles, DcrLogger* logger);
+        ModuleName moduleName, NotNull<TypeReduction> reducer, NotNull<ModuleResolver> moduleResolver, std::vector<RequireCycle> requireCycles,
+        DcrLogger* logger);
 
     // Randomize the order in which to dispatch constraints
     void randomize(unsigned seed);
@@ -111,8 +119,10 @@ struct ConstraintSolver
     bool tryDispatch(const FunctionCallConstraint& c, NotNull<const Constraint> constraint);
     bool tryDispatch(const PrimitiveTypeConstraint& c, NotNull<const Constraint> constraint);
     bool tryDispatch(const HasPropConstraint& c, NotNull<const Constraint> constraint);
-    bool tryDispatch(const SetPropConstraint& c, NotNull<const Constraint> constraint);
+    bool tryDispatch(const SetPropConstraint& c, NotNull<const Constraint> constraint, bool force);
+    bool tryDispatch(const SetIndexerConstraint& c, NotNull<const Constraint> constraint, bool force);
     bool tryDispatch(const SingletonOrTopTypeConstraint& c, NotNull<const Constraint> constraint);
+    bool tryDispatch(const UnpackConstraint& c, NotNull<const Constraint> constraint);
 
     // for a, ... in some_table do
     // also handles __iter metamethod
@@ -122,17 +132,26 @@ struct ConstraintSolver
     bool tryDispatchIterableFunction(
         TypeId nextTy, TypeId tableTy, TypeId firstIndexTy, const IterableConstraint& c, NotNull<const Constraint> constraint, bool force);
 
-    std::optional<TypeId> lookupTableProp(TypeId subjectType, const std::string& propName);
+    std::pair<std::vector<TypeId>, std::optional<TypeId>> lookupTableProp(TypeId subjectType, const std::string& propName);
+    std::pair<std::vector<TypeId>, std::optional<TypeId>> lookupTableProp(TypeId subjectType, const std::string& propName, std::unordered_set<TypeId>& seen);
 
     void block(NotNull<const Constraint> target, NotNull<const Constraint> constraint);
     /**
-     * Block a constraint on the resolution of a TypeVar.
+     * Block a constraint on the resolution of a Type.
      * @returns false always.  This is just to allow tryDispatch to return the result of block()
      */
     bool block(TypeId target, NotNull<const Constraint> constraint);
     bool block(TypePackId target, NotNull<const Constraint> constraint);
 
-    // Traverse the type.  If any blocked or pending typevars are found, block
+    /**
+     * For all constraints that are blocked on one constraint, make them block
+     * on a new constraint.
+     * @param source the constraint to copy blocks from.
+     * @param addition the constraint that other constraints should now block on.
+     */
+    void inheritBlocks(NotNull<const Constraint> source, NotNull<const Constraint> addition);
+
+    // Traverse the type.  If any blocked or pending types are found, block
     // the constraint on them.
     //
     // Returns false if a type blocks the constraint.
@@ -183,7 +202,7 @@ struct ConstraintSolver
     /** Pushes a new solver constraint to the solver.
      * @param cv the body of the constraint.
      **/
-    void pushConstraint(NotNull<Scope> scope, const Location& location, ConstraintV cv);
+    NotNull<Constraint> pushConstraint(NotNull<Scope> scope, const Location& location, ConstraintV cv);
 
     /**
      * Attempts to resolve a module from its module information. Returns the

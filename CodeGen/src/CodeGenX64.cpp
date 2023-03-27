@@ -38,7 +38,7 @@ namespace Luau
 {
 namespace CodeGen
 {
-namespace x64
+namespace X64
 {
 
 bool initEntryFunction(NativeState& data)
@@ -143,6 +143,24 @@ bool initEntryFunction(NativeState& data)
     return true;
 }
 
-} // namespace x64
+void assembleHelpers(X64::AssemblyBuilderX64& build, ModuleHelpers& helpers)
+{
+    if (build.logText)
+        build.logAppend("; exitContinueVm\n");
+    helpers.exitContinueVm = build.setLabel();
+    emitExit(build, /* continueInVm */ true);
+
+    if (build.logText)
+        build.logAppend("; exitNoContinueVm\n");
+    helpers.exitNoContinueVm = build.setLabel();
+    emitExit(build, /* continueInVm */ false);
+
+    if (build.logText)
+        build.logAppend("; continueCallInVm\n");
+    helpers.continueCallInVm = build.setLabel();
+    emitContinueCallInVm(build);
+}
+
+} // namespace X64
 } // namespace CodeGen
 } // namespace Luau

@@ -1,7 +1,7 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/BuiltinDefinitions.h"
 #include "Luau/TypeInfer.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 
 #include "Fixture.h"
 
@@ -21,14 +21,14 @@ TEST_CASE_FIXTURE(Fixture, "infer_multi_return")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    const FunctionTypeVar* takeTwoType = get<FunctionTypeVar>(requireType("take_two"));
+    const FunctionType* takeTwoType = get<FunctionType>(requireType("take_two"));
     REQUIRE(takeTwoType != nullptr);
 
     const auto& [returns, tail] = flatten(takeTwoType->retTypes);
 
     CHECK_EQ(2, returns.size());
-    CHECK_EQ(typeChecker.numberType, follow(returns[0]));
-    CHECK_EQ(typeChecker.numberType, follow(returns[1]));
+    CHECK_EQ(builtinTypes->numberType, follow(returns[0]));
+    CHECK_EQ(builtinTypes->numberType, follow(returns[1]));
 
     CHECK(!tail);
 }
@@ -68,15 +68,15 @@ TEST_CASE_FIXTURE(Fixture, "last_element_of_return_statement_can_itself_be_a_pac
     LUAU_REQUIRE_NO_ERRORS(result);
     dumpErrors(result);
 
-    const FunctionTypeVar* takeOneMoreType = get<FunctionTypeVar>(requireType("take_three"));
+    const FunctionType* takeOneMoreType = get<FunctionType>(requireType("take_three"));
     REQUIRE(takeOneMoreType != nullptr);
 
     const auto& [rets, tail] = flatten(takeOneMoreType->retTypes);
 
     REQUIRE_EQ(3, rets.size());
-    CHECK_EQ(typeChecker.numberType, follow(rets[0]));
-    CHECK_EQ(typeChecker.numberType, follow(rets[1]));
-    CHECK_EQ(typeChecker.numberType, follow(rets[2]));
+    CHECK_EQ(builtinTypes->numberType, follow(rets[0]));
+    CHECK_EQ(builtinTypes->numberType, follow(rets[1]));
+    CHECK_EQ(builtinTypes->numberType, follow(rets[2]));
 
     CHECK(!tail);
 }
@@ -101,10 +101,10 @@ TEST_CASE_FIXTURE(Fixture, "return_type_should_be_empty_if_nothing_is_returned")
         function g() return end
     )");
     LUAU_REQUIRE_NO_ERRORS(result);
-    const FunctionTypeVar* fTy = get<FunctionTypeVar>(requireType("f"));
+    const FunctionType* fTy = get<FunctionType>(requireType("f"));
     REQUIRE(fTy != nullptr);
     CHECK_EQ(0, size(fTy->retTypes));
-    const FunctionTypeVar* gTy = get<FunctionTypeVar>(requireType("g"));
+    const FunctionType* gTy = get<FunctionType>(requireType("g"));
     REQUIRE(gTy != nullptr);
     CHECK_EQ(0, size(gTy->retTypes));
 }
@@ -121,15 +121,15 @@ TEST_CASE_FIXTURE(Fixture, "no_return_size_should_be_zero")
     )");
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    const FunctionTypeVar* fTy = get<FunctionTypeVar>(requireType("f"));
+    const FunctionType* fTy = get<FunctionType>(requireType("f"));
     REQUIRE(fTy != nullptr);
     CHECK_EQ(1, size(follow(fTy->retTypes)));
 
-    const FunctionTypeVar* gTy = get<FunctionTypeVar>(requireType("g"));
+    const FunctionType* gTy = get<FunctionType>(requireType("g"));
     REQUIRE(gTy != nullptr);
     CHECK_EQ(0, size(gTy->retTypes));
 
-    const FunctionTypeVar* hTy = get<FunctionTypeVar>(requireType("h"));
+    const FunctionType* hTy = get<FunctionType>(requireType("h"));
     REQUIRE(hTy != nullptr);
     CHECK_EQ(0, size(hTy->retTypes));
 }
@@ -184,28 +184,28 @@ TEST_CASE_FIXTURE(Fixture, "parenthesized_varargs_returns_any")
 
 TEST_CASE_FIXTURE(Fixture, "variadic_packs")
 {
-    TypeArena& arena = typeChecker.globalTypes;
+    TypeArena& arena = frontend.globals.globalTypes;
 
     unfreeze(arena);
 
-    TypePackId listOfNumbers = arena.addTypePack(TypePackVar{VariadicTypePack{typeChecker.numberType}});
-    TypePackId listOfStrings = arena.addTypePack(TypePackVar{VariadicTypePack{typeChecker.stringType}});
+    TypePackId listOfNumbers = arena.addTypePack(TypePackVar{VariadicTypePack{builtinTypes->numberType}});
+    TypePackId listOfStrings = arena.addTypePack(TypePackVar{VariadicTypePack{builtinTypes->stringType}});
 
     // clang-format off
-    addGlobalBinding(frontend, "foo",
+    addGlobalBinding(frontend.globals, "foo",
         arena.addType(
-            FunctionTypeVar{
+            FunctionType{
                 listOfNumbers,
-                arena.addTypePack({typeChecker.numberType})
+                arena.addTypePack({builtinTypes->numberType})
             }
         ),
         "@test"
     );
-    addGlobalBinding(frontend, "bar",
+    addGlobalBinding(frontend.globals, "bar",
         arena.addType(
-            FunctionTypeVar{
-                arena.addTypePack({{typeChecker.numberType}, listOfStrings}),
-                arena.addTypePack({typeChecker.numberType})
+            FunctionType{
+                arena.addTypePack({{builtinTypes->numberType}, listOfStrings}),
+                arena.addTypePack({builtinTypes->numberType})
             }
         ),
         "@test"
@@ -223,9 +223,11 @@ TEST_CASE_FIXTURE(Fixture, "variadic_packs")
 
     LUAU_REQUIRE_ERROR_COUNT(2, result);
 
-    CHECK_EQ(result.errors[0], (TypeError{Location(Position{3, 21}, Position{3, 26}), TypeMismatch{typeChecker.numberType, typeChecker.stringType}}));
+    CHECK_EQ(
+        result.errors[0], (TypeError{Location(Position{3, 21}, Position{3, 26}), TypeMismatch{builtinTypes->numberType, builtinTypes->stringType}}));
 
-    CHECK_EQ(result.errors[1], (TypeError{Location(Position{4, 29}, Position{4, 30}), TypeMismatch{typeChecker.stringType, typeChecker.numberType}}));
+    CHECK_EQ(
+        result.errors[1], (TypeError{Location(Position{4, 29}, Position{4, 30}), TypeMismatch{builtinTypes->stringType, builtinTypes->numberType}}));
 }
 
 TEST_CASE_FIXTURE(Fixture, "variadic_pack_syntax")
@@ -306,7 +308,7 @@ local c: Packed<string, number, boolean>
     CHECK_EQ(toString(*tf), "Packed<T, U...>");
     CHECK_EQ(toString(*tf, {true}), "{| f: (T, U...) -> (T, U...) |}");
 
-    auto ttvA = get<TableTypeVar>(requireType("a"));
+    auto ttvA = get<TableType>(requireType("a"));
     REQUIRE(ttvA);
     CHECK_EQ(toString(requireType("a")), "Packed<number>");
     CHECK_EQ(toString(requireType("a"), {true}), "{| f: (number) -> number |}");
@@ -315,7 +317,7 @@ local c: Packed<string, number, boolean>
     CHECK_EQ(toString(ttvA->instantiatedTypeParams[0], {true}), "number");
     CHECK_EQ(toString(ttvA->instantiatedTypePackParams[0], {true}), "");
 
-    auto ttvB = get<TableTypeVar>(requireType("b"));
+    auto ttvB = get<TableType>(requireType("b"));
     REQUIRE(ttvB);
     CHECK_EQ(toString(requireType("b")), "Packed<string, number>");
     CHECK_EQ(toString(requireType("b"), {true}), "{| f: (string, number) -> (string, number) |}");
@@ -324,7 +326,7 @@ local c: Packed<string, number, boolean>
     CHECK_EQ(toString(ttvB->instantiatedTypeParams[0], {true}), "string");
     CHECK_EQ(toString(ttvB->instantiatedTypePackParams[0], {true}), "number");
 
-    auto ttvC = get<TableTypeVar>(requireType("c"));
+    auto ttvC = get<TableType>(requireType("c"));
     REQUIRE(ttvC);
     CHECK_EQ(toString(requireType("c")), "Packed<string, number, boolean>");
     CHECK_EQ(toString(requireType("c"), {true}), "{| f: (string, number, boolean) -> (string, number, boolean) |}");
@@ -428,8 +430,12 @@ type E = X<(number, ...string)>
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ(toString(*lookupType("D")), "(...number) -> (string, ...number)");
-    CHECK_EQ(toString(*lookupType("E")), "(number, ...string) -> (string, number, ...string)");
+    auto d = lookupType("D");
+    REQUIRE(d);
+    auto e = lookupType("E");
+    REQUIRE(e);
+    CHECK_EQ(toString(*d), "(...number) -> (string, ...number)");
+    CHECK_EQ(toString(*e), "(number, ...string) -> (string, number, ...string)");
 }
 
 TEST_CASE_FIXTURE(Fixture, "type_alias_type_pack_multi")
@@ -887,9 +893,13 @@ TEST_CASE_FIXTURE(Fixture, "unifying_vararg_pack_with_fixed_length_pack_produces
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    REQUIRE(bool(getMainModule()->getModuleScope()->varargPack));
+    ModulePtr mainModule = getMainModule();
+    REQUIRE(mainModule);
+    REQUIRE(mainModule->hasModuleScope());
 
-    TypePackId varargPack = *getMainModule()->getModuleScope()->varargPack;
+    REQUIRE(bool(mainModule->getModuleScope()->varargPack));
+
+    TypePackId varargPack = *mainModule->getModuleScope()->varargPack;
 
     auto iter = begin(varargPack);
     auto endIter = end(varargPack);
@@ -1006,7 +1016,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "type_packs_with_tails_in_vararg_adjustment")
                 end)
                 return result
             end
-        end 
+        end
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
@@ -1031,8 +1041,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "generalize_expectedTypes_with_proper_scope")
 
 TEST_CASE_FIXTURE(Fixture, "fuzz_typepack_iter_follow")
 {
-    ScopedFastFlag luauTxnLogTypePackIterator{"LuauTxnLogTypePackIterator", true};
-
     CheckResult result = check(R"(
 local _
 local _ = _,_(),_(_)
@@ -1043,8 +1051,6 @@ local _ = _,_(),_(_)
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "fuzz_typepack_iter_follow_2")
 {
-    ScopedFastFlag luauTxnLogTypePackIterator{"LuauTxnLogTypePackIterator", true};
-
     CheckResult result = check(R"(
 function test(name, searchTerm)
     local found = string.find(name:lower(), searchTerm:lower())

@@ -261,6 +261,11 @@ assert(math.sign(inf) == 1)
 assert(math.sign(-inf) == -1)
 assert(math.sign(nan) == 0)
 
+assert(math.min(nan, 2) ~= math.min(nan, 2))
+assert(math.min(1, nan) == 1)
+assert(math.max(nan, 2) ~= math.max(nan, 2))
+assert(math.max(1, nan) == 1)
+
 -- clamp
 assert(math.clamp(-1, 0, 1) == 0)
 assert(math.clamp(0.5, 0, 1) == 0.5)
@@ -276,6 +281,8 @@ assert(math.round(-0.4) == 0)
 assert(math.round(-0.5) == -1)
 assert(math.round(-3.5) == -4)
 assert(math.round(math.huge) == math.huge)
+assert(math.round(0.49999999999999994) == 0)
+assert(math.round(-0.49999999999999994) == 0)
 
 -- fmod
 assert(math.fmod(3, 2) == 1)
@@ -338,5 +345,7 @@ assert(math.round("1.8") == 2)
 assert(select('#', math.floor(1.4)) == 1)
 assert(select('#', math.ceil(1.6)) == 1)
 assert(select('#', math.sqrt(9)) == 1)
+assert(select('#', math.deg(9)) == 1)
+assert(select('#', math.rad(9)) == 1)
 
 return('OK')

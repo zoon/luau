@@ -10,7 +10,7 @@
 #include "Luau/ModuleResolver.h"
 #include "Luau/Scope.h"
 #include "Luau/ToString.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 
 #include "IostreamOptional.h"
 #include "ScopedFlags.h"
@@ -66,7 +66,7 @@ struct Fixture
     CheckResult check(const std::string& source);
 
     LintResult lint(const std::string& source, const std::optional<LintOptions>& lintOptions = {});
-    LintResult lintTyped(const std::string& source, const std::optional<LintOptions>& lintOptions = {});
+    LintResult lintModule(const ModuleName& moduleName, const std::optional<LintOptions>& lintOptions = {});
 
     /// Parse with all language extensions enabled
     ParseResult parseEx(const std::string& source, const ParseOptions& parseOptions = {});
@@ -78,7 +78,7 @@ struct Fixture
     ModulePtr getMainModule();
     SourceModule* getMainSourceModule();
 
-    std::optional<PrimitiveTypeVar::Type> getPrimitiveType(TypeId ty);
+    std::optional<PrimitiveType::Type> getPrimitiveType(TypeId ty);
     std::optional<TypeId> getType(const std::string& name);
     TypeId requireType(const std::string& name);
     TypeId requireType(const ModuleName& moduleName, const std::string& name);
@@ -91,9 +91,10 @@ struct Fixture
 
     std::optional<TypeId> lookupType(const std::string& name);
     std::optional<TypeId> lookupImportedType(const std::string& moduleAlias, const std::string& name);
+    TypeId requireTypeAlias(const std::string& name);
 
     ScopedFastFlag sff_DebugLuauFreezeArena;
-    ScopedFastFlag sff_UnknownNever{"LuauUnknownAndNeverType", true};
+    ScopedFastFlag luauLintInTypecheck{"LuauLintInTypecheck", true};
 
     TestFileResolver fileResolver;
     TestConfigResolver configResolver;
@@ -101,8 +102,7 @@ struct Fixture
     std::unique_ptr<SourceModule> sourceModule;
     Frontend frontend;
     InternalErrorReporter ice;
-    TypeChecker& typeChecker;
-    NotNull<SingletonTypes> singletonTypes;
+    NotNull<BuiltinTypes> builtinTypes;
 
     std::string decorateWithTypes(const std::string& code);
 
@@ -151,7 +151,8 @@ std::optional<TypeId> lookupName(ScopePtr scope, const std::string& name); // Wa
 
 std::optional<TypeId> linearSearchForBinding(Scope* scope, const char* name);
 
-void registerHiddenTypes(Fixture& fixture, TypeArena& arena);
+void registerHiddenTypes(Frontend* frontend);
+void createSomeClasses(Frontend* frontend);
 
 } // namespace Luau
 

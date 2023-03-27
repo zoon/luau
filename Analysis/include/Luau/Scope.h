@@ -1,9 +1,10 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
+#include "Luau/Def.h"
 #include "Luau/Location.h"
 #include "Luau/NotNull.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 
 #include <unordered_map>
 #include <optional>
@@ -43,6 +44,8 @@ struct Scope
     std::unordered_map<Name, TypeFun> exportedTypeBindings;
     std::unordered_map<Name, TypeFun> privateTypeBindings;
     std::unordered_map<Name, Location> typeAliasLocations;
+    std::unordered_map<Name, Location> typeAliasNameLocations;
+    std::unordered_map<Name, ModuleName> importedModules; // Mapping from the name in the require statement to the internal moduleName.
     std::unordered_map<Name, std::unordered_map<Name, TypeFun>> importedTypeBindings;
 
     DenseHashSet<Name> builtinTypeNames{""};
@@ -50,7 +53,7 @@ struct Scope
 
     std::optional<TypeId> lookup(Symbol sym) const;
     std::optional<TypeId> lookup(DefId def) const;
-    std::optional<std::pair<TypeId, Scope*>> lookupEx(Symbol sym);
+    std::optional<std::pair<Binding*, Scope*>> lookupEx(Symbol sym);
 
     std::optional<TypeFun> lookupType(const Name& name);
     std::optional<TypeFun> lookupImportedType(const Name& moduleAlias, const Name& name);
@@ -63,6 +66,7 @@ struct Scope
 
     RefinementMap refinements;
     DenseHashMap<const Def*, TypeId> dcrRefinements{nullptr};
+    void inheritRefinements(const ScopePtr& childScope);
 
     // For mutually recursive type aliases, it's important that
     // they use the same types for the same names.

@@ -2,7 +2,7 @@
 #pragma once
 
 #include "Luau/Location.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 #include "Luau/Variant.h"
 
 namespace Luau
@@ -411,8 +411,8 @@ struct InternalErrorReporter
     std::function<void(const char*)> onInternalError;
     std::string moduleName;
 
-    [[noreturn]] void ice(const std::string& message, const Location& location);
-    [[noreturn]] void ice(const std::string& message);
+    [[noreturn]] void ice(const std::string& message, const Location& location) const;
+    [[noreturn]] void ice(const std::string& message) const;
 };
 
 class InternalCompilerError : public std::exception

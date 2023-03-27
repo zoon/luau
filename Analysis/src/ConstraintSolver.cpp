@@ -3,6 +3,7 @@
 #include "Luau/Anyification.h"
 #include "Luau/ApplyTypeFunction.h"
 #include "Luau/Clone.h"
+#include "Luau/Common.h"
 #include "Luau/ConstraintSolver.h"
 #include "Luau/DcrLogger.h"
 #include "Luau/Instantiation.h"
@@ -12,15 +13,30 @@
 #include "Luau/Quantify.h"
 #include "Luau/ToString.h"
 #include "Luau/TypeUtils.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 #include "Luau/Unifier.h"
-#include "Luau/VisitTypeVar.h"
+#include "Luau/VisitType.h"
 
 LUAU_FASTFLAGVARIABLE(DebugLuauLogSolver, false);
-LUAU_FASTFLAGVARIABLE(DebugLuauLogSolverToJson, false);
 
 namespace Luau
 {
+
+size_t HashBlockedConstraintId::operator()(const BlockedConstraintId& bci) const
+{
+    size_t result = 0;
+
+    if (const TypeId* ty = get_if<TypeId>(&bci))
+        result = std::hash<TypeId>()(*ty);
+    else if (const TypePackId* tp = get_if<TypePackId>(&bci))
+        result = std::hash<TypePackId>()(*tp);
+    else if (Constraint const* const* c = get_if<const Constraint*>(&bci))
+        result = std::hash<const Constraint*>()(*c);
+    else
+        LUAU_ASSERT(!"Should be unreachable");
+
+    return result;
+}
 
 [[maybe_unused]] static void dumpBindings(NotNull<Scope> scope, ToStringOptions& opts)
 {
@@ -34,7 +50,7 @@ namespace Luau
         dumpBindings(child, opts);
 }
 
-static std::pair<std::vector<TypeId>, std::vector<TypePackId>> saturateArguments(TypeArena* arena, NotNull<SingletonTypes> singletonTypes,
+static std::pair<std::vector<TypeId>, std::vector<TypePackId>> saturateArguments(TypeArena* arena, NotNull<BuiltinTypes> builtinTypes,
     const TypeFun& fn, const std::vector<TypeId>& rawTypeArguments, const std::vector<TypePackId>& rawPackArguments)
 {
     std::vector<TypeId> saturatedTypeArguments;
@@ -115,7 +131,7 @@ static std::pair<std::vector<TypeId>, std::vector<TypePackId>> saturateArguments
             if (!defaultTy)
                 break;
 
-            TypeId instantiatedDefault = atf.substitute(defaultTy).value_or(singletonTypes->errorRecoveryType());
+            TypeId instantiatedDefault = atf.substitute(defaultTy).value_or(builtinTypes->errorRecoveryType());
             atf.typeArguments[fn.typeParams[i].ty] = instantiatedDefault;
             saturatedTypeArguments.push_back(instantiatedDefault);
         }
@@ -133,7 +149,7 @@ static std::pair<std::vector<TypeId>, std::vector<TypePackId>> saturateArguments
             if (!defaultTp)
                 break;
 
-            TypePackId instantiatedDefault = atf.substitute(defaultTp).value_or(singletonTypes->errorRecoveryTypePack());
+            TypePackId instantiatedDefault = atf.substitute(defaultTp).value_or(builtinTypes->errorRecoveryTypePack());
             atf.typePackArguments[fn.typePackParams[i].tp] = instantiatedDefault;
             saturatedPackArguments.push_back(instantiatedDefault);
         }
@@ -151,12 +167,12 @@ static std::pair<std::vector<TypeId>, std::vector<TypePackId>> saturateArguments
     // even if they're missing, so we use the error type as a filler.
     for (size_t i = saturatedTypeArguments.size(); i < typesRequired; ++i)
     {
-        saturatedTypeArguments.push_back(singletonTypes->errorRecoveryType());
+        saturatedTypeArguments.push_back(builtinTypes->errorRecoveryType());
     }
 
     for (size_t i = saturatedPackArguments.size(); i < packsRequired; ++i)
     {
-        saturatedPackArguments.push_back(singletonTypes->errorRecoveryTypePack());
+        saturatedPackArguments.push_back(builtinTypes->errorRecoveryTypePack());
     }
 
     // At this point, these two conditions should be true. If they aren't we
@@ -206,31 +222,16 @@ void dump(ConstraintSolver* cs, ToStringOptions& opts)
         auto it = cs->blockedConstraints.find(c);
         int blockCount = it == cs->blockedConstraints.end() ? 0 : int(it->second);
         printf("\t%d\t%s\n", blockCount, toString(*c, opts).c_str());
-
-        for (NotNull<Constraint> dep : c->dependencies)
-        {
-            auto unsolvedIter = std::find(begin(cs->unsolvedConstraints), end(cs->unsolvedConstraints), dep);
-            if (unsolvedIter == cs->unsolvedConstraints.end())
-                continue;
-
-            auto it = cs->blockedConstraints.find(dep);
-            int blockCount = it == cs->blockedConstraints.end() ? 0 : int(it->second);
-            printf("\t%d\t\t%s\n", blockCount, toString(*dep, opts).c_str());
-        }
-
-        if (auto fcc = get<FunctionCallConstraint>(*c))
-        {
-            for (NotNull<const Constraint> inner : fcc->innerConstraints)
-                printf("\t ->\t\t%s\n", toString(*inner, opts).c_str());
-        }
     }
 }
 
 ConstraintSolver::ConstraintSolver(NotNull<Normalizer> normalizer, NotNull<Scope> rootScope, std::vector<NotNull<Constraint>> constraints,
-    ModuleName moduleName, NotNull<ModuleResolver> moduleResolver, std::vector<RequireCycle> requireCycles, DcrLogger* logger)
+    ModuleName moduleName, NotNull<TypeReduction> reducer, NotNull<ModuleResolver> moduleResolver, std::vector<RequireCycle> requireCycles,
+    DcrLogger* logger)
     : arena(normalizer->arena)
-    , singletonTypes(normalizer->singletonTypes)
+    , builtinTypes(normalizer->builtinTypes)
     , normalizer(normalizer)
+    , reducer(reducer)
     , constraints(std::move(constraints))
     , rootScope(rootScope)
     , currentModuleName(std::move(moduleName))
@@ -249,9 +250,6 @@ ConstraintSolver::ConstraintSolver(NotNull<Normalizer> normalizer, NotNull<Scope
             block(dep, c);
         }
     }
-
-    if (FFlag::DebugLuauLogSolverToJson)
-        LUAU_ASSERT(logger);
 }
 
 void ConstraintSolver::randomize(unsigned seed)
@@ -287,7 +285,7 @@ void ConstraintSolver::run()
         dumpBindings(rootScope, opts);
     }
 
-    if (FFlag::DebugLuauLogSolverToJson)
+    if (logger)
     {
         logger->captureInitialSolverState(rootScope, unsolvedConstraints);
     }
@@ -308,7 +306,7 @@ void ConstraintSolver::run()
             std::string saveMe = FFlag::DebugLuauLogSolver ? toString(*c, opts) : std::string{};
             StepSnapshot snapshot;
 
-            if (FFlag::DebugLuauLogSolverToJson)
+            if (logger)
             {
                 snapshot = logger->prepareStepSnapshot(rootScope, c, force, unsolvedConstraints);
             }
@@ -322,7 +320,7 @@ void ConstraintSolver::run()
                 unblock(c);
                 unsolvedConstraints.erase(unsolvedConstraints.begin() + i);
 
-                if (FFlag::DebugLuauLogSolverToJson)
+                if (logger)
                 {
                     logger->commitStepSnapshot(snapshot);
                 }
@@ -332,6 +330,27 @@ void ConstraintSolver::run()
                     if (force)
                         printf("Force ");
                     printf("Dispatched\n\t%s\n", saveMe.c_str());
+
+                    if (force)
+                    {
+                        printf("Blocked on:\n");
+
+                        for (const auto& [bci, cv] : blocked)
+                        {
+                            if (end(cv) == std::find(begin(cv), end(cv), c))
+                                continue;
+
+                            if (auto bty = get_if<TypeId>(&bci))
+                                printf("\tType %s\n", toString(*bty, opts).c_str());
+                            else if (auto btp = get_if<TypePackId>(&bci))
+                                printf("\tPack %s\n", toString(*btp, opts).c_str());
+                            else if (auto cc = get_if<const Constraint*>(&bci))
+                                printf("\tCons %s\n", toString(**cc, opts).c_str());
+                            else
+                                LUAU_ASSERT(!"Unreachable??");
+                        }
+                    }
+
                     dump(this, opts);
                 }
             }
@@ -360,7 +379,7 @@ void ConstraintSolver::run()
         dumpBindings(rootScope, opts);
     }
 
-    if (FFlag::DebugLuauLogSolverToJson)
+    if (logger)
     {
         logger->captureFinalSolverState(rootScope, unsolvedConstraints);
     }
@@ -373,12 +392,12 @@ bool ConstraintSolver::isDone()
 
 void ConstraintSolver::finalizeModule()
 {
-    Anyification a{arena, rootScope, singletonTypes, &iceReporter, singletonTypes->anyType, singletonTypes->anyTypePack};
+    Anyification a{arena, rootScope, builtinTypes, &iceReporter, builtinTypes->anyType, builtinTypes->anyTypePack};
     std::optional<TypePackId> returnType = a.substitute(rootScope->returnType);
     if (!returnType)
     {
         reportError(CodeTooComplex{}, Location{});
-        rootScope->returnType = singletonTypes->errorTypePack;
+        rootScope->returnType = builtinTypes->errorTypePack;
     }
     else
         rootScope->returnType = *returnType;
@@ -416,42 +435,67 @@ bool ConstraintSolver::tryDispatch(NotNull<const Constraint> constraint, bool fo
     else if (auto hpc = get<HasPropConstraint>(*constraint))
         success = tryDispatch(*hpc, constraint);
     else if (auto spc = get<SetPropConstraint>(*constraint))
-        success = tryDispatch(*spc, constraint);
+        success = tryDispatch(*spc, constraint, force);
+    else if (auto spc = get<SetIndexerConstraint>(*constraint))
+        success = tryDispatch(*spc, constraint, force);
     else if (auto sottc = get<SingletonOrTopTypeConstraint>(*constraint))
         success = tryDispatch(*sottc, constraint);
+    else if (auto uc = get<UnpackConstraint>(*constraint))
+        success = tryDispatch(*uc, constraint);
     else
         LUAU_ASSERT(false);
 
     if (success)
-    {
         unblock(constraint);
-    }
 
     return success;
 }
 
 bool ConstraintSolver::tryDispatch(const SubtypeConstraint& c, NotNull<const Constraint> constraint, bool force)
 {
-    if (!recursiveBlock(c.subType, constraint))
-        return false;
-    if (!recursiveBlock(c.superType, constraint))
-        return false;
-
     if (isBlocked(c.subType))
         return block(c.subType, constraint);
     else if (isBlocked(c.superType))
         return block(c.superType, constraint);
 
-    unify(c.subType, c.superType, constraint->scope);
+    Unifier u{normalizer, Mode::Strict, constraint->scope, Location{}, Covariant};
+    u.useScopes = true;
+
+    u.tryUnify(c.subType, c.superType);
+
+    if (!u.blockedTypes.empty() || !u.blockedTypePacks.empty())
+    {
+        for (TypeId bt : u.blockedTypes)
+            block(bt, constraint);
+        for (TypePackId btp : u.blockedTypePacks)
+            block(btp, constraint);
+        return false;
+    }
+
+    if (const auto& e = hasUnificationTooComplex(u.errors))
+        reportError(*e);
+
+    if (!u.errors.empty())
+    {
+        TypeId errorType = errorRecoveryType();
+        u.tryUnify(c.subType, errorType);
+        u.tryUnify(c.superType, errorType);
+    }
+
+    const auto [changedTypes, changedPacks] = u.log.getChanges();
+
+    u.log.commit();
+
+    unblock(changedTypes);
+    unblock(changedPacks);
+
+    // unify(c.subType, c.superType, constraint->scope);
 
     return true;
 }
 
 bool ConstraintSolver::tryDispatch(const PackSubtypeConstraint& c, NotNull<const Constraint> constraint, bool force)
 {
-    if (!recursiveBlock(c.subPack, constraint) || !recursiveBlock(c.superPack, constraint))
-        return false;
-
     if (isBlocked(c.subPack))
         return block(c.subPack, constraint);
     else if (isBlocked(c.superPack))
@@ -467,12 +511,19 @@ bool ConstraintSolver::tryDispatch(const GeneralizationConstraint& c, NotNull<co
     if (isBlocked(c.sourceType))
         return block(c.sourceType, constraint);
 
-    TypeId generalized = quantify(arena, c.sourceType, constraint->scope);
-
-    if (isBlocked(c.generalizedType))
-        asMutable(c.generalizedType)->ty.emplace<BoundTypeVar>(generalized);
+    std::optional<TypeId> generalized = quantify(arena, c.sourceType, constraint->scope);
+    if (generalized)
+    {
+        if (isBlocked(c.generalizedType))
+            asMutable(c.generalizedType)->ty.emplace<BoundType>(*generalized);
+        else
+            unify(c.generalizedType, *generalized, constraint->scope);
+    }
     else
-        unify(c.generalizedType, generalized, constraint->scope);
+    {
+        reportError(CodeTooComplex{}, constraint->location);
+        asMutable(c.generalizedType)->ty.emplace<BoundType>(builtinTypes->errorRecoveryType());
+    }
 
     unblock(c.generalizedType);
     unblock(c.sourceType);
@@ -491,7 +542,7 @@ bool ConstraintSolver::tryDispatch(const InstantiationConstraint& c, NotNull<con
     LUAU_ASSERT(instantiated); // TODO FIXME HANDLE THIS
 
     if (isBlocked(c.subType))
-        asMutable(c.subType)->ty.emplace<BoundTypeVar>(*instantiated);
+        asMutable(c.subType)->ty.emplace<BoundType>(*instantiated);
     else
         unify(c.subType, *instantiated, constraint->scope);
 
@@ -507,64 +558,56 @@ bool ConstraintSolver::tryDispatch(const UnaryConstraint& c, NotNull<const Const
     if (isBlocked(operandType))
         return block(operandType, constraint);
 
-    if (get<FreeTypeVar>(operandType))
+    if (get<FreeType>(operandType))
         return block(operandType, constraint);
 
-    LUAU_ASSERT(get<BlockedTypeVar>(c.resultType));
+    LUAU_ASSERT(get<BlockedType>(c.resultType));
 
     switch (c.op)
     {
     case AstExprUnary::Not:
     {
-        asMutable(c.resultType)->ty.emplace<BoundTypeVar>(singletonTypes->booleanType);
+        asMutable(c.resultType)->ty.emplace<BoundType>(builtinTypes->booleanType);
+
+        unblock(c.resultType);
         return true;
     }
     case AstExprUnary::Len:
     {
         // __len must return a number.
-        asMutable(c.resultType)->ty.emplace<BoundTypeVar>(singletonTypes->numberType);
+        asMutable(c.resultType)->ty.emplace<BoundType>(builtinTypes->numberType);
+
+        unblock(c.resultType);
         return true;
     }
     case AstExprUnary::Minus:
     {
-        if (isNumber(operandType) || get<AnyTypeVar>(operandType) || get<ErrorTypeVar>(operandType))
+        if (isNumber(operandType) || get<AnyType>(operandType) || get<ErrorType>(operandType) || get<NeverType>(operandType))
         {
-            asMutable(c.resultType)->ty.emplace<BoundTypeVar>(c.operandType);
+            asMutable(c.resultType)->ty.emplace<BoundType>(c.operandType);
         }
-        else if (std::optional<TypeId> mm = findMetatableEntry(singletonTypes, errors, operandType, "__unm", constraint->location))
+        else if (std::optional<TypeId> mm = findMetatableEntry(builtinTypes, errors, operandType, "__unm", constraint->location))
         {
-            const FunctionTypeVar* ftv = get<FunctionTypeVar>(follow(*mm));
+            TypeId mmTy = follow(*mm);
 
-            if (!ftv)
-            {
-                if (std::optional<TypeId> callMm = findMetatableEntry(singletonTypes, errors, follow(*mm), "__call", constraint->location))
-                {
-                    ftv = get<FunctionTypeVar>(follow(*callMm));
-                }
-            }
+            if (get<FreeType>(mmTy) && !force)
+                return block(mmTy, constraint);
 
-            if (!ftv)
-            {
-                asMutable(c.resultType)->ty.emplace<BoundTypeVar>(singletonTypes->errorRecoveryType());
-                return true;
-            }
+            TypePackId argPack = arena->addTypePack(TypePack{{operandType}, {}});
+            TypePackId retPack = arena->addTypePack(BlockedTypePack{});
 
-            TypePackId argsPack = arena->addTypePack({operandType});
-            unify(ftv->argTypes, argsPack, constraint->scope);
+            asMutable(c.resultType)->ty.emplace<FreeType>(constraint->scope);
 
-            TypeId result = singletonTypes->errorRecoveryType();
-            if (ftv)
-            {
-                result = first(ftv->retTypes).value_or(singletonTypes->errorRecoveryType());
-            }
+            pushConstraint(constraint->scope, constraint->location, PackSubtypeConstraint{retPack, arena->addTypePack(TypePack{{c.resultType}})});
 
-            asMutable(c.resultType)->ty.emplace<BoundTypeVar>(result);
+            pushConstraint(constraint->scope, constraint->location, FunctionCallConstraint{mmTy, argPack, retPack, nullptr});
         }
         else
         {
-            asMutable(c.resultType)->ty.emplace<BoundTypeVar>(singletonTypes->errorRecoveryType());
+            asMutable(c.resultType)->ty.emplace<BoundType>(builtinTypes->errorRecoveryType());
         }
 
+        unblock(c.resultType);
         return true;
     }
     }
@@ -598,14 +641,14 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
     if (!force)
     {
         // Logical expressions may proceed if the LHS is free.
-        if (get<FreeTypeVar>(leftType) && !isLogical)
+        if (get<FreeType>(leftType) && !isLogical)
             return block(leftType, constraint);
     }
 
     // Logical expressions may proceed if the LHS is free.
-    if (isBlocked(leftType) || (get<FreeTypeVar>(leftType) && !isLogical))
+    if (isBlocked(leftType) || (get<FreeType>(leftType) && !isLogical))
     {
-        asMutable(resultType)->ty.emplace<BoundTypeVar>(errorRecoveryType());
+        asMutable(resultType)->ty.emplace<BoundType>(errorRecoveryType());
         unblock(resultType);
         return true;
     }
@@ -615,10 +658,10 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
     {
         // Metatables are not the same. The metamethod will not be invoked.
         if ((c.op == AstExprBinary::Op::CompareEq || c.op == AstExprBinary::Op::CompareNe) &&
-            getMetatable(leftType, singletonTypes) != getMetatable(rightType, singletonTypes))
+            getMetatable(leftType, builtinTypes) != getMetatable(rightType, builtinTypes))
         {
             // TODO: Boolean singleton false? The result is _always_ boolean false.
-            asMutable(resultType)->ty.emplace<BoundTypeVar>(singletonTypes->booleanType);
+            asMutable(resultType)->ty.emplace<BoundType>(builtinTypes->booleanType);
             unblock(resultType);
             return true;
         }
@@ -627,9 +670,9 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
 
         // The LHS metatable takes priority over the RHS metatable, where
         // present.
-        if (std::optional<TypeId> leftMm = findMetatableEntry(singletonTypes, errors, leftType, it->second, constraint->location))
+        if (std::optional<TypeId> leftMm = findMetatableEntry(builtinTypes, errors, leftType, it->second, constraint->location))
             mm = leftMm;
-        else if (std::optional<TypeId> rightMm = findMetatableEntry(singletonTypes, errors, rightType, it->second, constraint->location))
+        else if (std::optional<TypeId> rightMm = findMetatableEntry(builtinTypes, errors, rightType, it->second, constraint->location))
             mm = rightMm;
 
         if (mm)
@@ -644,7 +687,7 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
 
             // TODO: Is a table with __call legal here?
             // TODO: Overloads
-            if (const FunctionTypeVar* ftv = get<FunctionTypeVar>(follow(*instantiatedMm)))
+            if (const FunctionType* ftv = get<FunctionType>(follow(*instantiatedMm)))
             {
                 TypePackId inferredArgs;
                 // For >= and > we invoke __lt and __le respectively with
@@ -672,17 +715,17 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
                 case AstExprBinary::Op::CompareGt:
                 case AstExprBinary::Op::CompareLe:
                 case AstExprBinary::Op::CompareLt:
-                    mmResult = singletonTypes->booleanType;
+                    mmResult = builtinTypes->booleanType;
                     break;
                 default:
                     mmResult = first(ftv->retTypes).value_or(errorRecoveryType());
                 }
 
-                asMutable(resultType)->ty.emplace<BoundTypeVar>(mmResult);
+                asMutable(resultType)->ty.emplace<BoundType>(mmResult);
                 unblock(resultType);
 
-                (*c.astOriginalCallTypes)[c.expr] = *mm;
-                (*c.astOverloadResolvedTypes)[c.expr] = *instantiatedMm;
+                (*c.astOriginalCallTypes)[c.astFragment] = *mm;
+                (*c.astOverloadResolvedTypes)[c.astFragment] = *instantiatedMm;
                 return true;
             }
         }
@@ -691,8 +734,8 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
     }
 
     // If any is present, the expression must evaluate to any as well.
-    bool leftAny = get<AnyTypeVar>(leftType) || get<ErrorTypeVar>(leftType);
-    bool rightAny = get<AnyTypeVar>(rightType) || get<ErrorTypeVar>(rightType);
+    bool leftAny = get<AnyType>(leftType) || get<ErrorType>(leftType);
+    bool rightAny = get<AnyType>(rightType) || get<ErrorType>(rightType);
     bool anyPresent = leftAny || rightAny;
 
     switch (c.op)
@@ -708,7 +751,7 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
         if (isNumber(leftType))
         {
             unify(leftType, rightType, constraint->scope);
-            asMutable(resultType)->ty.emplace<BoundTypeVar>(anyPresent ? singletonTypes->anyType : leftType);
+            asMutable(resultType)->ty.emplace<BoundType>(anyPresent ? builtinTypes->anyType : leftType);
             unblock(resultType);
             return true;
         }
@@ -720,7 +763,7 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
         if (isString(leftType))
         {
             unify(leftType, rightType, constraint->scope);
-            asMutable(resultType)->ty.emplace<BoundTypeVar>(anyPresent ? singletonTypes->anyType : leftType);
+            asMutable(resultType)->ty.emplace<BoundType>(anyPresent ? builtinTypes->anyType : leftType);
             unblock(resultType);
             return true;
         }
@@ -734,7 +777,7 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
     case AstExprBinary::Op::CompareLt:
         if ((isNumber(leftType) && isNumber(rightType)) || (isString(leftType) && isString(rightType)))
         {
-            asMutable(resultType)->ty.emplace<BoundTypeVar>(singletonTypes->booleanType);
+            asMutable(resultType)->ty.emplace<BoundType>(builtinTypes->booleanType);
             unblock(resultType);
             return true;
         }
@@ -744,16 +787,16 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
     // on their parameters.
     case AstExprBinary::Op::CompareEq:
     case AstExprBinary::Op::CompareNe:
-        asMutable(resultType)->ty.emplace<BoundTypeVar>(singletonTypes->booleanType);
+        asMutable(resultType)->ty.emplace<BoundType>(builtinTypes->booleanType);
         unblock(resultType);
         return true;
     // And evalutes to a boolean if the LHS is falsey, and the RHS type if LHS is
     // truthy.
     case AstExprBinary::Op::And:
     {
-        TypeId leftFilteredTy = arena->addType(IntersectionTypeVar{{singletonTypes->falsyType, leftType}});
+        TypeId leftFilteredTy = arena->addType(IntersectionType{{builtinTypes->falsyType, leftType}});
 
-        asMutable(resultType)->ty.emplace<BoundTypeVar>(arena->addType(UnionTypeVar{{leftFilteredTy, rightType}}));
+        asMutable(resultType)->ty.emplace<BoundType>(arena->addType(UnionType{{leftFilteredTy, rightType}}));
         unblock(resultType);
         return true;
     }
@@ -761,9 +804,9 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
     // LHS is falsey.
     case AstExprBinary::Op::Or:
     {
-        TypeId leftFilteredTy = arena->addType(IntersectionTypeVar{{singletonTypes->truthyType, leftType}});
+        TypeId leftFilteredTy = arena->addType(IntersectionType{{builtinTypes->truthyType, leftType}});
 
-        asMutable(resultType)->ty.emplace<BoundTypeVar>(arena->addType(UnionTypeVar{{leftFilteredTy, rightType}}));
+        asMutable(resultType)->ty.emplace<BoundType>(arena->addType(UnionType{{leftFilteredTy, rightType}}));
         unblock(resultType);
         return true;
     }
@@ -775,7 +818,7 @@ bool ConstraintSolver::tryDispatch(const BinaryConstraint& c, NotNull<const Cons
     // We failed to either evaluate a metamethod or invoke primitive behavior.
     unify(leftType, errorRecoveryType(), constraint->scope);
     unify(rightType, errorRecoveryType(), constraint->scope);
-    asMutable(resultType)->ty.emplace<BoundTypeVar>(errorRecoveryType());
+    asMutable(resultType)->ty.emplace<BoundType>(errorRecoveryType());
     unblock(resultType);
 
     return true;
@@ -820,7 +863,7 @@ bool ConstraintSolver::tryDispatch(const IterableConstraint& c, NotNull<const Co
     };
 
     auto [iteratorTypes, iteratorTail] = flatten(c.iterator);
-    if (iteratorTail)
+    if (iteratorTail && isBlocked(*iteratorTail))
         return block_(*iteratorTail);
 
     {
@@ -840,7 +883,7 @@ bool ConstraintSolver::tryDispatch(const IterableConstraint& c, NotNull<const Co
 
     if (0 == iteratorTypes.size())
     {
-        Anyification anyify{arena, constraint->scope, singletonTypes, &iceReporter, errorRecoveryType(), errorRecoveryTypePack()};
+        Anyification anyify{arena, constraint->scope, builtinTypes, &iceReporter, errorRecoveryType(), errorRecoveryTypePack()};
         std::optional<TypePackId> anyified = anyify.substitute(c.variables);
         LUAU_ASSERT(anyified);
         unify(*anyified, c.variables, constraint->scope);
@@ -849,16 +892,16 @@ bool ConstraintSolver::tryDispatch(const IterableConstraint& c, NotNull<const Co
     }
 
     TypeId nextTy = follow(iteratorTypes[0]);
-    if (get<FreeTypeVar>(nextTy))
+    if (get<FreeType>(nextTy))
         return block_(nextTy);
 
-    if (get<FunctionTypeVar>(nextTy))
+    if (get<FunctionType>(nextTy))
     {
-        TypeId tableTy = singletonTypes->nilType;
+        TypeId tableTy = builtinTypes->nilType;
         if (iteratorTypes.size() >= 2)
             tableTy = iteratorTypes[1];
 
-        TypeId firstIndexTy = singletonTypes->nilType;
+        TypeId firstIndexTy = builtinTypes->nilType;
         if (iteratorTypes.size() >= 3)
             firstIndexTy = iteratorTypes[2];
 
@@ -881,11 +924,20 @@ bool ConstraintSolver::tryDispatch(const NameConstraint& c, NotNull<const Constr
     if (target->persistent || target->owningArena != arena)
         return true;
 
-    if (TableTypeVar* ttv = getMutable<TableTypeVar>(target))
-        ttv->name = c.name;
-    else if (MetatableTypeVar* mtv = getMutable<MetatableTypeVar>(target))
+    if (TableType* ttv = getMutable<TableType>(target))
+    {
+        if (c.synthetic && !ttv->name)
+            ttv->syntheticName = c.name;
+        else
+        {
+            ttv->name = c.name;
+            ttv->instantiatedTypeParams = c.typeParameters;
+            ttv->instantiatedTypePackParams = c.typePackParameters;
+        }
+    }
+    else if (MetatableType* mtv = getMutable<MetatableType>(target))
         mtv->syntheticName = c.name;
-    else if (get<IntersectionTypeVar>(target) || get<UnionTypeVar>(target))
+    else if (get<IntersectionType>(target) || get<UnionType>(target))
     {
         // nothing (yet)
     }
@@ -895,7 +947,7 @@ bool ConstraintSolver::tryDispatch(const NameConstraint& c, NotNull<const Constr
     return true;
 }
 
-struct InfiniteTypeFinder : TypeVarOnceVisitor
+struct InfiniteTypeFinder : TypeOnceVisitor
 {
     ConstraintSolver* solver;
     const InstantiationSignature& signature;
@@ -909,7 +961,7 @@ struct InfiniteTypeFinder : TypeVarOnceVisitor
     {
     }
 
-    bool visit(TypeId ty, const PendingExpansionTypeVar& petv) override
+    bool visit(TypeId ty, const PendingExpansionType& petv) override
     {
         std::optional<TypeFun> tf =
             (petv.prefix) ? scope->lookupImportedType(petv.prefix->value, petv.name.value) : scope->lookupType(petv.name.value);
@@ -917,7 +969,7 @@ struct InfiniteTypeFinder : TypeVarOnceVisitor
         if (!tf.has_value())
             return true;
 
-        auto [typeArguments, packArguments] = saturateArguments(solver->arena, solver->singletonTypes, *tf, petv.typeArguments, petv.packArguments);
+        auto [typeArguments, packArguments] = saturateArguments(solver->arena, solver->builtinTypes, *tf, petv.typeArguments, petv.packArguments);
 
         if (follow(tf->type) == follow(signature.fn.type) && (signature.arguments != typeArguments || signature.packArguments != packArguments))
         {
@@ -929,22 +981,20 @@ struct InfiniteTypeFinder : TypeVarOnceVisitor
     }
 };
 
-struct InstantiationQueuer : TypeVarOnceVisitor
+struct InstantiationQueuer : TypeOnceVisitor
 {
     ConstraintSolver* solver;
-    const InstantiationSignature& signature;
     NotNull<Scope> scope;
     Location location;
 
-    explicit InstantiationQueuer(NotNull<Scope> scope, const Location& location, ConstraintSolver* solver, const InstantiationSignature& signature)
+    explicit InstantiationQueuer(NotNull<Scope> scope, const Location& location, ConstraintSolver* solver)
         : solver(solver)
-        , signature(signature)
         , scope(scope)
         , location(location)
     {
     }
 
-    bool visit(TypeId ty, const PendingExpansionTypeVar& petv) override
+    bool visit(TypeId ty, const PendingExpansionType& petv) override
     {
         solver->pushConstraint(scope, location, TypeAliasExpansionConstraint{ty});
         return false;
@@ -953,7 +1003,7 @@ struct InstantiationQueuer : TypeVarOnceVisitor
 
 bool ConstraintSolver::tryDispatch(const TypeAliasExpansionConstraint& c, NotNull<const Constraint> constraint)
 {
-    const PendingExpansionTypeVar* petv = get<PendingExpansionTypeVar>(follow(c.target));
+    const PendingExpansionType* petv = get<PendingExpansionType>(follow(c.target));
     if (!petv)
     {
         unblock(c.target);
@@ -961,7 +1011,7 @@ bool ConstraintSolver::tryDispatch(const TypeAliasExpansionConstraint& c, NotNul
     }
 
     auto bindResult = [this, &c](TypeId result) {
-        asMutable(c.target)->ty.emplace<BoundTypeVar>(result);
+        asMutable(c.target)->ty.emplace<BoundType>(result);
         unblock(c.target);
     };
 
@@ -983,7 +1033,7 @@ bool ConstraintSolver::tryDispatch(const TypeAliasExpansionConstraint& c, NotNul
         return true;
     }
 
-    auto [typeArguments, packArguments] = saturateArguments(arena, singletonTypes, *tf, petv->typeArguments, petv->packArguments);
+    auto [typeArguments, packArguments] = saturateArguments(arena, builtinTypes, *tf, petv->typeArguments, petv->packArguments);
 
     bool sameTypes = std::equal(typeArguments.begin(), typeArguments.end(), tf->typeParams.begin(), tf->typeParams.end(), [](auto&& itp, auto&& p) {
         return itp == p.ty;
@@ -1031,6 +1081,7 @@ bool ConstraintSolver::tryDispatch(const TypeAliasExpansionConstraint& c, NotNul
     {
         // TODO (CLI-56761): Report an error.
         bindResult(errorRecoveryType());
+        reportError(GenericError{"Recursive type being used with different parameters"}, constraint->location);
         return true;
     }
 
@@ -1060,14 +1111,23 @@ bool ConstraintSolver::tryDispatch(const TypeAliasExpansionConstraint& c, NotNul
     TypeId instantiated = *maybeInstantiated;
     TypeId target = follow(instantiated);
 
+    // The application is not recursive, so we need to queue up application of
+    // any child type function instantiations within the result in order for it
+    // to be complete.
+    InstantiationQueuer queuer{constraint->scope, constraint->location, this};
+    queuer.traverse(target);
+
     if (target->persistent)
+    {
+        bindResult(target);
         return true;
+    }
 
     // Type function application will happily give us the exact same type if
     // there are e.g. generic saturatedTypeArguments that go unused.
     bool needsClone = follow(tf->type) == target;
     // Only tables have the properties we're trying to set.
-    TableTypeVar* ttv = getMutableTableType(target);
+    TableType* ttv = getMutableTableType(target);
 
     if (ttv)
     {
@@ -1078,17 +1138,17 @@ bool ConstraintSolver::tryDispatch(const TypeAliasExpansionConstraint& c, NotNul
             // explicitly clone that table as well. If we don't, we will
             // mutate another module's type surface and cause a
             // use-after-free.
-            if (get<MetatableTypeVar>(target))
+            if (get<MetatableType>(target))
             {
                 instantiated = applyTypeFunction.clone(target);
-                MetatableTypeVar* mtv = getMutable<MetatableTypeVar>(instantiated);
+                MetatableType* mtv = getMutable<MetatableType>(instantiated);
                 mtv->table = applyTypeFunction.clone(mtv->table);
-                ttv = getMutable<TableTypeVar>(mtv->table);
+                ttv = getMutable<TableType>(mtv->table);
             }
-            else if (get<TableTypeVar>(target))
+            else if (get<TableType>(target))
             {
                 instantiated = applyTypeFunction.clone(target);
-                ttv = getMutable<TableTypeVar>(instantiated);
+                ttv = getMutable<TableType>(instantiated);
             }
 
             target = follow(instantiated);
@@ -1101,12 +1161,6 @@ bool ConstraintSolver::tryDispatch(const TypeAliasExpansionConstraint& c, NotNul
 
     bindResult(target);
 
-    // The application is not recursive, so we need to queue up application of
-    // any child type function instantiations within the result in order for it
-    // to be complete.
-    InstantiationQueuer queuer{constraint->scope, constraint->location, this, signature};
-    queuer.traverse(target);
-
     instantiatedAliases[signature] = target;
 
     return true;
@@ -1115,99 +1169,152 @@ bool ConstraintSolver::tryDispatch(const TypeAliasExpansionConstraint& c, NotNul
 bool ConstraintSolver::tryDispatch(const FunctionCallConstraint& c, NotNull<const Constraint> constraint)
 {
     TypeId fn = follow(c.fn);
+    TypePackId argsPack = follow(c.argsPack);
     TypePackId result = follow(c.result);
 
-    if (isBlocked(c.fn))
+    if (isBlocked(fn))
     {
         return block(c.fn, constraint);
     }
 
+    auto collapse = [](const auto* t) -> std::optional<TypeId> {
+        auto it = begin(t);
+        auto endIt = end(t);
+
+        LUAU_ASSERT(it != endIt);
+        TypeId fst = follow(*it);
+        while (it != endIt)
+        {
+            if (follow(*it) != fst)
+                return std::nullopt;
+            ++it;
+        }
+
+        return fst;
+    };
+
+    // Sometimes the `fn` type is a union/intersection, but whose constituents are all the same pointer.
+    if (auto ut = get<UnionType>(fn))
+        fn = collapse(ut).value_or(fn);
+    else if (auto it = get<IntersectionType>(fn))
+        fn = collapse(it).value_or(fn);
+
     // We don't support magic __call metamethods.
-    if (std::optional<TypeId> callMm = findMetatableEntry(singletonTypes, errors, fn, "__call", constraint->location))
+    if (std::optional<TypeId> callMm = findMetatableEntry(builtinTypes, errors, fn, "__call", constraint->location))
     {
         std::vector<TypeId> args{fn};
 
         for (TypeId arg : c.argsPack)
             args.push_back(arg);
 
-        TypeId instantiatedType = arena->addType(BlockedTypeVar{});
-        TypeId inferredFnType =
-            arena->addType(FunctionTypeVar(TypeLevel{}, constraint->scope.get(), arena->addTypePack(TypePack{args, {}}), c.result));
-
-        // Alter the inner constraints.
-        LUAU_ASSERT(c.innerConstraints.size() == 2);
-
-        // Anything that is blocked on this constraint must also be blocked on our inner constraints
-        auto blockedIt = blocked.find(constraint.get());
-        if (blockedIt != blocked.end())
-        {
-            for (const auto& ic : c.innerConstraints)
-            {
-                for (const auto& blockedConstraint : blockedIt->second)
-                    block(ic, blockedConstraint);
-            }
-        }
-
-        asMutable(*c.innerConstraints.at(0)).c = InstantiationConstraint{instantiatedType, *callMm};
-        asMutable(*c.innerConstraints.at(1)).c = SubtypeConstraint{inferredFnType, instantiatedType};
-
-        unsolvedConstraints.insert(end(unsolvedConstraints), begin(c.innerConstraints), end(c.innerConstraints));
-
+        argsPack = arena->addTypePack(TypePack{args, {}});
+        fn = *callMm;
         asMutable(c.result)->ty.emplace<FreeTypePack>(constraint->scope);
-        unblock(c.result);
-        return true;
-    }
-
-    const FunctionTypeVar* ftv = get<FunctionTypeVar>(fn);
-    bool usedMagic = false;
-
-    if (ftv && ftv->dcrMagicFunction != nullptr)
-    {
-        usedMagic = ftv->dcrMagicFunction(MagicFunctionCallContext{NotNull(this), c.callSite, c.argsPack, result});
-    }
-
-    if (usedMagic)
-    {
-        // There are constraints that are blocked on these constraints.  If we
-        // are never going to even examine them, then we should not block
-        // anything else on them.
-        //
-        // TODO CLI-58842
-#if 0
-        for (auto& c: c.innerConstraints)
-            unblock(c);
-#endif
     }
     else
     {
-        // Anything that is blocked on this constraint must also be blocked on our inner constraints
-        auto blockedIt = blocked.find(constraint.get());
-        if (blockedIt != blocked.end())
+        const FunctionType* ftv = get<FunctionType>(fn);
+        bool usedMagic = false;
+
+        if (ftv)
         {
-            for (const auto& ic : c.innerConstraints)
-            {
-                for (const auto& blockedConstraint : blockedIt->second)
-                    block(ic, blockedConstraint);
-            }
+            if (ftv->dcrMagicFunction)
+                usedMagic = ftv->dcrMagicFunction(MagicFunctionCallContext{NotNull(this), c.callSite, c.argsPack, result});
+
+            if (ftv->dcrMagicRefinement)
+                ftv->dcrMagicRefinement(MagicRefinementContext{constraint->scope, c.callSite, c.discriminantTypes});
         }
 
-        unsolvedConstraints.insert(end(unsolvedConstraints), begin(c.innerConstraints), end(c.innerConstraints));
-        asMutable(c.result)->ty.emplace<FreeTypePack>(constraint->scope);
+        if (!usedMagic)
+            asMutable(c.result)->ty.emplace<FreeTypePack>(constraint->scope);
     }
 
-    unblock(c.result);
+    for (std::optional<TypeId> ty : c.discriminantTypes)
+    {
+        if (!ty || !isBlocked(*ty))
+            continue;
 
+        // We use `any` here because the discriminant type may be pointed at by both branches,
+        // where the discriminant type is not negated, and the other where it is negated, i.e.
+        // `unknown ~ unknown` and `~unknown ~ never`, so `T & unknown ~ T` and `T & ~unknown ~ never`
+        // v.s.
+        // `any ~ any` and `~any ~ any`, so `T & any ~ T` and `T & ~any ~ T`
+        //
+        // In practice, users cannot negate `any`, so this is an implementation detail we can always change.
+        *asMutable(follow(*ty)) = BoundType{builtinTypes->anyType};
+    }
+
+    TypeId inferredTy = arena->addType(FunctionType{TypeLevel{}, constraint->scope.get(), argsPack, c.result});
+
+    std::vector<TypeId> overloads = flattenIntersection(fn);
+
+    Instantiation inst(TxnLog::empty(), arena, TypeLevel{}, constraint->scope);
+
+    for (TypeId overload : overloads)
+    {
+        overload = follow(overload);
+
+        std::optional<TypeId> instantiated = inst.substitute(overload);
+        LUAU_ASSERT(instantiated); // TODO FIXME HANDLE THIS
+
+        Unifier u{normalizer, Mode::Strict, constraint->scope, Location{}, Covariant};
+        u.useScopes = true;
+
+        u.tryUnify(*instantiated, inferredTy, /* isFunctionCall */ true);
+
+        if (!u.blockedTypes.empty() || !u.blockedTypePacks.empty())
+        {
+            for (TypeId bt : u.blockedTypes)
+                block(bt, constraint);
+            for (TypePackId btp : u.blockedTypePacks)
+                block(btp, constraint);
+            return false;
+        }
+
+        if (const auto& e = hasUnificationTooComplex(u.errors))
+            reportError(*e);
+
+        if (u.errors.empty())
+        {
+            // We found a matching overload.
+            const auto [changedTypes, changedPacks] = u.log.getChanges();
+            u.log.commit();
+            unblock(changedTypes);
+            unblock(changedPacks);
+
+            unblock(c.result);
+            return true;
+        }
+    }
+
+    // We found no matching overloads.
+    Unifier u{normalizer, Mode::Strict, constraint->scope, Location{}, Covariant};
+    u.useScopes = true;
+
+    u.tryUnify(inferredTy, builtinTypes->anyType);
+    u.tryUnify(fn, builtinTypes->anyType);
+
+    LUAU_ASSERT(u.errors.empty()); // unifying with any should never fail
+
+    const auto [changedTypes, changedPacks] = u.log.getChanges();
+    u.log.commit();
+
+    unblock(changedTypes);
+    unblock(changedPacks);
+
+    unblock(c.result);
     return true;
 }
 
 bool ConstraintSolver::tryDispatch(const PrimitiveTypeConstraint& c, NotNull<const Constraint> constraint)
 {
     TypeId expectedType = follow(c.expectedType);
-    if (isBlocked(expectedType) || get<PendingExpansionTypeVar>(expectedType))
+    if (isBlocked(expectedType) || get<PendingExpansionType>(expectedType))
         return block(expectedType, constraint);
 
     TypeId bindTo = maybeSingleton(expectedType) ? c.singletonType : c.multitonType;
-    asMutable(c.resultType)->ty.emplace<BoundTypeVar>(bindTo);
+    asMutable(c.resultType)->ty.emplace<BoundType>(bindTo);
+    unblock(c.resultType);
 
     return true;
 }
@@ -1216,58 +1323,53 @@ bool ConstraintSolver::tryDispatch(const HasPropConstraint& c, NotNull<const Con
 {
     TypeId subjectType = follow(c.subjectType);
 
-    if (isBlocked(subjectType) || get<PendingExpansionTypeVar>(subjectType))
+    if (isBlocked(subjectType) || get<PendingExpansionType>(subjectType))
         return block(subjectType, constraint);
 
-    if (get<FreeTypeVar>(subjectType))
+    if (get<FreeType>(subjectType))
     {
-        TableTypeVar& ttv = asMutable(subjectType)->ty.emplace<TableTypeVar>(TableState::Free, TypeLevel{}, constraint->scope);
+        TableType& ttv = asMutable(subjectType)->ty.emplace<TableType>(TableState::Free, TypeLevel{}, constraint->scope);
         ttv.props[c.prop] = Property{c.resultType};
-        asMutable(c.resultType)->ty.emplace<FreeTypeVar>(constraint->scope);
+        asMutable(c.resultType)->ty.emplace<FreeType>(constraint->scope);
         unblock(c.resultType);
         return true;
     }
 
-    std::optional<TypeId> resultType = lookupTableProp(subjectType, c.prop);
-    if (!resultType)
-    {
-        asMutable(c.resultType)->ty.emplace<BoundTypeVar>(singletonTypes->errorRecoveryType());
-        unblock(c.resultType);
-        return true;
-    }
+    subjectType = reducer->reduce(subjectType).value_or(subjectType);
 
-    if (isBlocked(*resultType))
+    auto [blocked, result] = lookupTableProp(subjectType, c.prop);
+    if (!blocked.empty())
     {
-        block(*resultType, constraint);
+        for (TypeId blocked : blocked)
+            block(blocked, constraint);
+
         return false;
     }
 
-    asMutable(c.resultType)->ty.emplace<BoundTypeVar>(*resultType);
+    asMutable(c.resultType)->ty.emplace<BoundType>(result.value_or(builtinTypes->anyType));
+    unblock(c.resultType);
     return true;
 }
 
 static bool isUnsealedTable(TypeId ty)
 {
     ty = follow(ty);
-    const TableTypeVar* ttv = get<TableTypeVar>(ty);
+    const TableType* ttv = get<TableType>(ty);
     return ttv && ttv->state == TableState::Unsealed;
 }
 
 /**
- * Create a shallow copy of `ty` and its properties along `path`.  Insert a new
- * property (the last segment of `path`) into the tail table with the value `t`.
+ * Given a path into a set of nested unsealed tables `ty`, insert a new property `replaceTy` as the leaf-most property.
  *
- * On success, returns the new outermost table type.  If the root table or any
- * of its subkeys are not unsealed tables, the function fails and returns
- * std::nullopt.
+ * Fails and does nothing if every table along the way is not unsealed.
  *
- * TODO: Prove that we completely give up in the face of indexers and
- * metatables.
+ * Mutates the innermost table type in-place.
  */
-static std::optional<TypeId> updateTheTableType(NotNull<TypeArena> arena, TypeId ty, const std::vector<std::string>& path, TypeId replaceTy)
+static void updateTheTableType(
+    NotNull<BuiltinTypes> builtinTypes, NotNull<TypeArena> arena, TypeId ty, const std::vector<std::string>& path, TypeId replaceTy)
 {
     if (path.empty())
-        return std::nullopt;
+        return;
 
     // First walk the path and ensure that it's unsealed tables all the way
     // to the end.
@@ -1276,98 +1378,104 @@ static std::optional<TypeId> updateTheTableType(NotNull<TypeArena> arena, TypeId
         for (size_t i = 0; i < path.size() - 1; ++i)
         {
             if (!isUnsealedTable(t))
-                return std::nullopt;
+                return;
 
-            const TableTypeVar* tbl = get<TableTypeVar>(t);
+            const TableType* tbl = get<TableType>(t);
             auto it = tbl->props.find(path[i]);
             if (it == tbl->props.end())
-                return std::nullopt;
+                return;
 
-            t = it->second.type;
+            t = follow(it->second.type);
         }
 
         // The last path segment should not be a property of the table at all.
         // We are not changing property types.  We are only admitting this one
         // new property to be appended.
         if (!isUnsealedTable(t))
-            return std::nullopt;
-        const TableTypeVar* tbl = get<TableTypeVar>(t);
+            return;
+        const TableType* tbl = get<TableType>(t);
         if (0 != tbl->props.count(path.back()))
-            return std::nullopt;
+            return;
     }
 
-    const TypeId res = shallowClone(ty, arena);
-    TypeId t = res;
+    TypeId t = ty;
+    ErrorVec dummy;
 
     for (size_t i = 0; i < path.size() - 1; ++i)
     {
-        const std::string segment = path[i];
+        auto propTy = findTablePropertyRespectingMeta(builtinTypes, dummy, t, path[i], Location{});
+        dummy.clear();
 
-        TableTypeVar* ttv = getMutable<TableTypeVar>(t);
-        LUAU_ASSERT(ttv);
+        if (!propTy)
+            return;
 
-        auto propIt = ttv->props.find(segment);
-        if (propIt != ttv->props.end())
-        {
-            LUAU_ASSERT(isUnsealedTable(propIt->second.type));
-            t = shallowClone(follow(propIt->second.type), arena);
-            ttv->props[segment].type = t;
-        }
-        else
-            return std::nullopt;
+        t = *propTy;
     }
 
-    TableTypeVar* ttv = getMutable<TableTypeVar>(t);
-    LUAU_ASSERT(ttv);
+    const std::string& lastSegment = path.back();
 
-    const std::string lastSegment = path.back();
-    LUAU_ASSERT(0 == ttv->props.count(lastSegment));
-    ttv->props[lastSegment] = Property{replaceTy};
-    return res;
+    t = follow(t);
+    TableType* tt = getMutable<TableType>(t);
+    if (auto mt = get<MetatableType>(t))
+        tt = getMutable<TableType>(mt->table);
+
+    if (!tt)
+        return;
+
+    tt->props[lastSegment].type = replaceTy;
 }
 
-bool ConstraintSolver::tryDispatch(const SetPropConstraint& c, NotNull<const Constraint> constraint)
+bool ConstraintSolver::tryDispatch(const SetPropConstraint& c, NotNull<const Constraint> constraint, bool force)
 {
     TypeId subjectType = follow(c.subjectType);
 
     if (isBlocked(subjectType))
         return block(subjectType, constraint);
 
+    if (!force && get<FreeType>(subjectType))
+        return block(subjectType, constraint);
+
     std::optional<TypeId> existingPropType = subjectType;
     for (const std::string& segment : c.path)
     {
-        ErrorVec e;
-        std::optional<TypeId> propTy = lookupTableProp(*existingPropType, segment);
-        if (!propTy)
-        {
-            existingPropType = std::nullopt;
+        if (!existingPropType)
             break;
+
+        auto [blocked, result] = lookupTableProp(*existingPropType, segment);
+        if (!blocked.empty())
+        {
+            for (TypeId blocked : blocked)
+                block(blocked, constraint);
+            return false;
         }
-        else if (isBlocked(*propTy))
-            return block(*propTy, constraint);
-        else
-            existingPropType = follow(*propTy);
+
+        existingPropType = result;
     }
 
     auto bind = [](TypeId a, TypeId b) {
-        asMutable(a)->ty.emplace<BoundTypeVar>(b);
+        asMutable(a)->ty.emplace<BoundType>(b);
     };
 
     if (existingPropType)
     {
-        unify(c.propType, *existingPropType, constraint->scope);
+        if (!isBlocked(c.propType))
+            unify(c.propType, *existingPropType, constraint->scope);
         bind(c.resultType, c.subjectType);
+        unblock(c.resultType);
         return true;
     }
 
-    if (get<FreeTypeVar>(subjectType))
+    if (auto mt = get<MetatableType>(subjectType))
+        subjectType = follow(mt->table);
+
+    if (get<FreeType>(subjectType))
     {
         TypeId ty = arena->freshType(constraint->scope);
 
         // Mint a chain of free tables per c.path
         for (auto it = rbegin(c.path); it != rend(c.path); ++it)
         {
-            TableTypeVar t{TableState::Free, TypeLevel{}, constraint->scope};
+            TableType t{TableState::Free, TypeLevel{}, constraint->scope};
             t.props[*it] = {ty};
 
             ty = arena->addType(std::move(t));
@@ -1376,36 +1484,98 @@ bool ConstraintSolver::tryDispatch(const SetPropConstraint& c, NotNull<const Con
         LUAU_ASSERT(ty);
 
         bind(subjectType, ty);
-        bind(c.resultType, ty);
+        if (follow(c.resultType) != follow(ty))
+            bind(c.resultType, ty);
+        unblock(subjectType);
+        unblock(c.resultType);
         return true;
     }
-    else if (auto ttv = getMutable<TableTypeVar>(subjectType))
+    else if (auto ttv = getMutable<TableType>(subjectType))
     {
         if (ttv->state == TableState::Free)
         {
+            LUAU_ASSERT(!subjectType->persistent);
+
             ttv->props[c.path[0]] = Property{c.propType};
             bind(c.resultType, c.subjectType);
+            unblock(c.resultType);
             return true;
         }
         else if (ttv->state == TableState::Unsealed)
         {
-            std::optional<TypeId> augmented = updateTheTableType(NotNull{arena}, subjectType, c.path, c.propType);
-            bind(c.resultType, augmented.value_or(subjectType));
+            LUAU_ASSERT(!subjectType->persistent);
+
+            updateTheTableType(builtinTypes, NotNull{arena}, subjectType, c.path, c.propType);
+            bind(c.resultType, c.subjectType);
+            unblock(subjectType);
+            unblock(c.resultType);
             return true;
         }
         else
         {
             bind(c.resultType, subjectType);
+            unblock(c.resultType);
             return true;
         }
     }
-    else if (get<AnyTypeVar>(subjectType) || get<ErrorTypeVar>(subjectType))
+    else
     {
+        // Other kinds of types don't change shape when properties are assigned
+        // to them. (if they allow properties at all!)
         bind(c.resultType, subjectType);
+        unblock(c.resultType);
         return true;
     }
+}
 
-    LUAU_ASSERT(0);
+bool ConstraintSolver::tryDispatch(const SetIndexerConstraint& c, NotNull<const Constraint> constraint, bool force)
+{
+    TypeId subjectType = follow(c.subjectType);
+    if (isBlocked(subjectType))
+        return block(subjectType, constraint);
+
+    if (auto ft = get<FreeType>(subjectType))
+    {
+        Scope* scope = ft->scope;
+        TableType* tt = &asMutable(subjectType)->ty.emplace<TableType>(TableState::Free, TypeLevel{}, scope);
+        tt->indexer = TableIndexer{c.indexType, c.propType};
+
+        asMutable(c.resultType)->ty.emplace<BoundType>(subjectType);
+        asMutable(c.propType)->ty.emplace<FreeType>(scope);
+        unblock(c.propType);
+        unblock(c.resultType);
+
+        return true;
+    }
+    else if (auto tt = get<TableType>(subjectType))
+    {
+        if (tt->indexer)
+        {
+            // TODO This probably has to be invariant.
+            unify(c.indexType, tt->indexer->indexType, constraint->scope);
+            asMutable(c.propType)->ty.emplace<BoundType>(tt->indexer->indexResultType);
+            asMutable(c.resultType)->ty.emplace<BoundType>(subjectType);
+            unblock(c.propType);
+            unblock(c.resultType);
+            return true;
+        }
+        else if (tt->state == TableState::Free || tt->state == TableState::Unsealed)
+        {
+            auto mtt = getMutable<TableType>(subjectType);
+            mtt->indexer = TableIndexer{c.indexType, c.propType};
+            asMutable(c.propType)->ty.emplace<FreeType>(tt->scope);
+            asMutable(c.resultType)->ty.emplace<BoundType>(subjectType);
+            unblock(c.propType);
+            unblock(c.resultType);
+            return true;
+        }
+        // Do not augment sealed or generic tables that lack indexers
+    }
+
+    asMutable(c.propType)->ty.emplace<BoundType>(builtinTypes->errorRecoveryType());
+    asMutable(c.resultType)->ty.emplace<BoundType>(builtinTypes->errorRecoveryType());
+    unblock(c.propType);
+    unblock(c.resultType);
     return true;
 }
 
@@ -1417,12 +1587,75 @@ bool ConstraintSolver::tryDispatch(const SingletonOrTopTypeConstraint& c, NotNul
     TypeId followed = follow(c.discriminantType);
 
     // `nil` is a singleton type too! There's only one value of type `nil`.
-    if (c.negated && (get<SingletonTypeVar>(followed) || isNil(followed)))
-        *asMutable(c.resultType) = NegationTypeVar{c.discriminantType};
-    else if (!c.negated && get<SingletonTypeVar>(followed))
-        *asMutable(c.resultType) = BoundTypeVar{c.discriminantType};
+    if (c.negated && (get<SingletonType>(followed) || isNil(followed)))
+        *asMutable(c.resultType) = NegationType{c.discriminantType};
+    else if (!c.negated && get<SingletonType>(followed))
+        *asMutable(c.resultType) = BoundType{c.discriminantType};
     else
-        *asMutable(c.resultType) = BoundTypeVar{singletonTypes->unknownType};
+        *asMutable(c.resultType) = BoundType{builtinTypes->unknownType};
+
+    return true;
+}
+
+bool ConstraintSolver::tryDispatch(const UnpackConstraint& c, NotNull<const Constraint> constraint)
+{
+    TypePackId sourcePack = follow(c.sourcePack);
+    TypePackId resultPack = follow(c.resultPack);
+
+    if (isBlocked(sourcePack))
+        return block(sourcePack, constraint);
+
+    if (isBlocked(resultPack))
+    {
+        asMutable(resultPack)->ty.emplace<BoundTypePack>(sourcePack);
+        unblock(resultPack);
+        return true;
+    }
+
+    TypePack srcPack = extendTypePack(*arena, builtinTypes, sourcePack, size(resultPack));
+
+    auto destIter = begin(resultPack);
+    auto destEnd = end(resultPack);
+
+    size_t i = 0;
+    while (destIter != destEnd)
+    {
+        if (i >= srcPack.head.size())
+            break;
+        TypeId srcTy = follow(srcPack.head[i]);
+
+        if (isBlocked(*destIter))
+        {
+            if (follow(srcTy) == *destIter)
+            {
+                // Cyclic type dependency. (????)
+                asMutable(*destIter)->ty.emplace<FreeType>(constraint->scope);
+            }
+            else
+                asMutable(*destIter)->ty.emplace<BoundType>(srcTy);
+            unblock(*destIter);
+        }
+        else
+            unify(*destIter, srcTy, constraint->scope);
+
+        ++destIter;
+        ++i;
+    }
+
+    // We know that resultPack does not have a tail, but we don't know if
+    // sourcePack is long enough to fill every value.  Replace every remaining
+    // result TypeId with the error recovery type.
+
+    while (destIter != destEnd)
+    {
+        if (isBlocked(*destIter))
+        {
+            asMutable(*destIter)->ty.emplace<BoundType>(builtinTypes->errorRecoveryType());
+            unblock(*destIter);
+        }
+
+        ++destIter;
+    }
 
     return true;
 }
@@ -1445,11 +1678,11 @@ bool ConstraintSolver::tryDispatchIterableTable(TypeId iteratorTy, const Iterabl
     // We may have to block here if we don't know what the iteratee type is,
     // if it's a free table, if we don't know it has a metatable, and so on.
     iteratorTy = follow(iteratorTy);
-    if (get<FreeTypeVar>(iteratorTy))
+    if (get<FreeType>(iteratorTy))
         return block_(iteratorTy);
 
     auto anyify = [&](auto ty) {
-        Anyification anyify{arena, constraint->scope, singletonTypes, &iceReporter, singletonTypes->anyType, singletonTypes->anyTypePack};
+        Anyification anyify{arena, constraint->scope, builtinTypes, &iceReporter, builtinTypes->anyType, builtinTypes->anyTypePack};
         std::optional anyified = anyify.substitute(ty);
         if (!anyified)
             reportError(CodeTooComplex{}, constraint->location);
@@ -1458,7 +1691,7 @@ bool ConstraintSolver::tryDispatchIterableTable(TypeId iteratorTy, const Iterabl
     };
 
     auto errorify = [&](auto ty) {
-        Anyification anyify{arena, constraint->scope, singletonTypes, &iceReporter, errorRecoveryType(), errorRecoveryTypePack()};
+        Anyification anyify{arena, constraint->scope, builtinTypes, &iceReporter, errorRecoveryType(), errorRecoveryTypePack()};
         std::optional errorified = anyify.substitute(ty);
         if (!errorified)
             reportError(CodeTooComplex{}, constraint->location);
@@ -1466,13 +1699,13 @@ bool ConstraintSolver::tryDispatchIterableTable(TypeId iteratorTy, const Iterabl
             unify(*errorified, ty, constraint->scope);
     };
 
-    if (get<AnyTypeVar>(iteratorTy))
+    if (get<AnyType>(iteratorTy))
     {
         anyify(c.variables);
         return true;
     }
 
-    if (get<ErrorTypeVar>(iteratorTy))
+    if (get<ErrorType>(iteratorTy))
     {
         errorify(c.variables);
         return true;
@@ -1481,7 +1714,7 @@ bool ConstraintSolver::tryDispatchIterableTable(TypeId iteratorTy, const Iterabl
     // Irksome: I don't think we have any way to guarantee that this table
     // type never has a metatable.
 
-    if (auto iteratorTable = get<TableTypeVar>(iteratorTy))
+    if (auto iteratorTable = get<TableType>(iteratorTy))
     {
         if (iteratorTable->state == TableState::Free)
             return block_(iteratorTy);
@@ -1494,7 +1727,7 @@ bool ConstraintSolver::tryDispatchIterableTable(TypeId iteratorTy, const Iterabl
         else
             errorify(c.variables);
     }
-    else if (std::optional<TypeId> iterFn = findMetatableEntry(singletonTypes, errors, iteratorTy, "__iter", Location{}))
+    else if (std::optional<TypeId> iterFn = findMetatableEntry(builtinTypes, errors, iteratorTy, "__iter", Location{}))
     {
         if (isBlocked(*iterFn))
         {
@@ -1505,12 +1738,12 @@ bool ConstraintSolver::tryDispatchIterableTable(TypeId iteratorTy, const Iterabl
 
         if (std::optional<TypeId> instantiatedIterFn = instantiation.substitute(*iterFn))
         {
-            if (auto iterFtv = get<FunctionTypeVar>(*instantiatedIterFn))
+            if (auto iterFtv = get<FunctionType>(*instantiatedIterFn))
             {
                 TypePackId expectedIterArgs = arena->addTypePack({iteratorTy});
                 unify(iterFtv->argTypes, expectedIterArgs, constraint->scope);
 
-                TypePack iterRets = extendTypePack(*arena, singletonTypes, iterFtv->retTypes, 2);
+                TypePack iterRets = extendTypePack(*arena, builtinTypes, iterFtv->retTypes, 2);
 
                 if (iterRets.head.size() < 1)
                 {
@@ -1527,11 +1760,11 @@ bool ConstraintSolver::tryDispatchIterableTable(TypeId iteratorTy, const Iterabl
                     const TypeId firstIndex = arena->freshType(constraint->scope);
 
                     // nextTy : (iteratorTy, indexTy?) -> (indexTy, valueTailTy...)
-                    const TypePackId nextArgPack = arena->addTypePack({table, arena->addType(UnionTypeVar{{firstIndex, singletonTypes->nilType}})});
+                    const TypePackId nextArgPack = arena->addTypePack({table, arena->addType(UnionType{{firstIndex, builtinTypes->nilType}})});
                     const TypePackId valueTailTy = arena->addTypePack(FreeTypePack{constraint->scope});
                     const TypePackId nextRetPack = arena->addTypePack(TypePack{{firstIndex}, valueTailTy});
 
-                    const TypeId expectedNextTy = arena->addType(FunctionTypeVar{nextArgPack, nextRetPack});
+                    const TypeId expectedNextTy = arena->addType(FunctionType{nextArgPack, nextRetPack});
                     unify(*instantiatedNextFn, expectedNextTy, constraint->scope);
 
                     pushConstraint(constraint->scope, constraint->location, PackSubtypeConstraint{c.variables, nextRetPack});
@@ -1551,10 +1784,10 @@ bool ConstraintSolver::tryDispatchIterableTable(TypeId iteratorTy, const Iterabl
             reportError(UnificationTooComplex{}, constraint->location);
         }
     }
-    else if (auto iteratorMetatable = get<MetatableTypeVar>(iteratorTy))
+    else if (auto iteratorMetatable = get<MetatableType>(iteratorTy))
     {
         TypeId metaTy = follow(iteratorMetatable->metatable);
-        if (get<FreeTypeVar>(metaTy))
+        if (get<FreeType>(metaTy))
             return block_(metaTy);
 
         LUAU_ASSERT(false);
@@ -1571,7 +1804,7 @@ bool ConstraintSolver::tryDispatchIterableFunction(
     // We need to know whether or not this type is nil or not.
     // If we don't know, block and reschedule ourselves.
     firstIndexTy = follow(firstIndexTy);
-    if (get<FreeTypeVar>(firstIndexTy))
+    if (get<FreeType>(firstIndexTy))
     {
         if (force)
             LUAU_ASSERT(false);
@@ -1580,82 +1813,195 @@ bool ConstraintSolver::tryDispatchIterableFunction(
         return false;
     }
 
-    const TypeId firstIndex = isNil(firstIndexTy) ? arena->freshType(constraint->scope) // FIXME: Surely this should be a union (free | nil)
-                                                  : firstIndexTy;
+    TypeId firstIndex;
+    TypeId retIndex;
+    if (isNil(firstIndexTy) || isOptional(firstIndexTy))
+    {
+        firstIndex = arena->addType(UnionType{{arena->freshType(constraint->scope), builtinTypes->nilType}});
+        retIndex = firstIndex;
+    }
+    else
+    {
+        firstIndex = firstIndexTy;
+        retIndex = arena->addType(UnionType{{firstIndexTy, builtinTypes->nilType}});
+    }
 
-    // nextTy : (tableTy, indexTy?) -> (indexTy, valueTailTy...)
-    const TypePackId nextArgPack = arena->addTypePack({tableTy, arena->addType(UnionTypeVar{{firstIndex, singletonTypes->nilType}})});
+    // nextTy : (tableTy, indexTy?) -> (indexTy?, valueTailTy...)
+    const TypePackId nextArgPack = arena->addTypePack({tableTy, firstIndex});
     const TypePackId valueTailTy = arena->addTypePack(FreeTypePack{constraint->scope});
-    const TypePackId nextRetPack = arena->addTypePack(TypePack{{firstIndex}, valueTailTy});
+    const TypePackId nextRetPack = arena->addTypePack(TypePack{{retIndex}, valueTailTy});
 
-    const TypeId expectedNextTy = arena->addType(FunctionTypeVar{TypeLevel{}, constraint->scope, nextArgPack, nextRetPack});
+    const TypeId expectedNextTy = arena->addType(FunctionType{TypeLevel{}, constraint->scope, nextArgPack, nextRetPack});
     unify(nextTy, expectedNextTy, constraint->scope);
 
-    pushConstraint(constraint->scope, constraint->location, PackSubtypeConstraint{c.variables, nextRetPack});
+    auto it = begin(nextRetPack);
+    std::vector<TypeId> modifiedNextRetHead;
+
+    // The first value is never nil in the context of the loop, even if it's nil
+    // in the next function's return type, because the loop will not advance if
+    // it's nil.
+    if (it != end(nextRetPack))
+    {
+        TypeId firstRet = *it;
+        TypeId modifiedFirstRet = stripNil(builtinTypes, *arena, firstRet);
+        modifiedNextRetHead.push_back(modifiedFirstRet);
+        ++it;
+    }
+
+    for (; it != end(nextRetPack); ++it)
+        modifiedNextRetHead.push_back(*it);
+
+    TypePackId modifiedNextRetPack = arena->addTypePack(std::move(modifiedNextRetHead), it.tail());
+    auto psc = pushConstraint(constraint->scope, constraint->location, PackSubtypeConstraint{c.variables, modifiedNextRetPack});
+    inheritBlocks(constraint, psc);
 
     return true;
 }
 
-std::optional<TypeId> ConstraintSolver::lookupTableProp(TypeId subjectType, const std::string& propName)
+std::pair<std::vector<TypeId>, std::optional<TypeId>> ConstraintSolver::lookupTableProp(TypeId subjectType, const std::string& propName)
 {
-    auto collectParts = [&](auto&& unionOrIntersection) -> std::pair<std::optional<TypeId>, std::vector<TypeId>> {
-        std::optional<TypeId> blocked;
+    std::unordered_set<TypeId> seen;
+    return lookupTableProp(subjectType, propName, seen);
+}
 
-        std::vector<TypeId> parts;
-        for (TypeId expectedPart : unionOrIntersection)
-        {
-            expectedPart = follow(expectedPart);
-            if (isBlocked(expectedPart) || get<PendingExpansionTypeVar>(expectedPart))
-                blocked = expectedPart;
-            else if (const TableTypeVar* ttv = get<TableTypeVar>(follow(expectedPart)))
-            {
-                if (auto prop = ttv->props.find(propName); prop != ttv->props.end())
-                    parts.push_back(prop->second.type);
-                else if (ttv->indexer && maybeString(ttv->indexer->indexType))
-                    parts.push_back(ttv->indexer->indexResultType);
-            }
-        }
+std::pair<std::vector<TypeId>, std::optional<TypeId>> ConstraintSolver::lookupTableProp(TypeId subjectType, const std::string& propName, std::unordered_set<TypeId>& seen)
+{
+    if (!seen.insert(subjectType).second)
+        return {};
 
-        return {blocked, parts};
-    };
+    subjectType = follow(subjectType);
 
-    std::optional<TypeId> resultType;
-
-    if (auto ttv = get<TableTypeVar>(subjectType))
+    if (isBlocked(subjectType))
+        return {{subjectType}, std::nullopt};
+    else if (get<AnyType>(subjectType) || get<NeverType>(subjectType))
+    {
+        return {{}, subjectType};
+    }
+    else if (auto ttv = getMutable<TableType>(subjectType))
     {
         if (auto prop = ttv->props.find(propName); prop != ttv->props.end())
-            resultType = prop->second.type;
+            return {{}, prop->second.type};
         else if (ttv->indexer && maybeString(ttv->indexer->indexType))
-            resultType = ttv->indexer->indexResultType;
+            return {{}, ttv->indexer->indexResultType};
+        else if (ttv->state == TableState::Free)
+        {
+            TypeId result = arena->freshType(ttv->scope);
+            ttv->props[propName] = Property{result};
+            return {{}, result};
+        }
     }
-    else if (auto utv = get<UnionTypeVar>(subjectType))
+    else if (auto mt = get<MetatableType>(subjectType))
     {
-        auto [blocked, parts] = collectParts(utv);
+        auto [blocked, result] = lookupTableProp(mt->table, propName, seen);
+        if (!blocked.empty() || result)
+            return {blocked, result};
 
-        if (blocked)
-            resultType = *blocked;
-        else if (parts.size() == 1)
-            resultType = parts[0];
-        else if (parts.size() > 1)
-            resultType = arena->addType(UnionTypeVar{std::move(parts)});
-        else
-            LUAU_ASSERT(false); // parts.size() == 0
+        TypeId mtt = follow(mt->metatable);
+
+        if (get<BlockedType>(mtt))
+            return {{mtt}, std::nullopt};
+        else if (auto metatable = get<TableType>(mtt))
+        {
+            auto indexProp = metatable->props.find("__index");
+            if (indexProp == metatable->props.end())
+                return {{}, result};
+
+            // TODO: __index can be an overloaded function.
+
+            TypeId indexType = follow(indexProp->second.type);
+
+            if (auto ft = get<FunctionType>(indexType))
+            {
+                TypePack rets = extendTypePack(*arena, builtinTypes, ft->retTypes, 1);
+                if (1 == rets.head.size())
+                    return {{}, rets.head[0]};
+                else
+                {
+                    // This should probably be an error: We need the first result of the MT.__index method,
+                    // but it returns 0 values.  See CLI-68672
+                    return {{}, builtinTypes->nilType};
+                }
+            }
+            else
+                return lookupTableProp(indexType, propName, seen);
+        }
     }
-    else if (auto itv = get<IntersectionTypeVar>(subjectType))
+    else if (auto ct = get<ClassType>(subjectType))
     {
-        auto [blocked, parts] = collectParts(itv);
+        if (auto p = lookupClassProp(ct, propName))
+            return {{}, p->type};
+    }
+    else if (auto pt = get<PrimitiveType>(subjectType); pt && pt->metatable)
+    {
+        const TableType* metatable = get<TableType>(follow(*pt->metatable));
+        LUAU_ASSERT(metatable);
 
-        if (blocked)
-            resultType = *blocked;
-        else if (parts.size() == 1)
-            resultType = parts[0];
-        else if (parts.size() > 1)
-            resultType = arena->addType(IntersectionTypeVar{std::move(parts)});
+        auto indexProp = metatable->props.find("__index");
+        if (indexProp == metatable->props.end())
+            return {{}, std::nullopt};
+
+        return lookupTableProp(indexProp->second.type, propName, seen);
+    }
+    else if (auto ft = get<FreeType>(subjectType))
+    {
+        Scope* scope = ft->scope;
+
+        TableType* tt = &asMutable(subjectType)->ty.emplace<TableType>();
+        tt->state = TableState::Free;
+        tt->scope = scope;
+        TypeId propType = arena->freshType(scope);
+        tt->props[propName] = Property{propType};
+
+        return {{}, propType};
+    }
+    else if (auto utv = get<UnionType>(subjectType))
+    {
+        std::vector<TypeId> blocked;
+        std::vector<TypeId> options;
+
+        for (TypeId ty : utv)
+        {
+            auto [innerBlocked, innerResult] = lookupTableProp(ty, propName, seen);
+            blocked.insert(blocked.end(), innerBlocked.begin(), innerBlocked.end());
+            if (innerResult)
+                options.push_back(*innerResult);
+        }
+
+        if (!blocked.empty())
+            return {blocked, std::nullopt};
+
+        if (options.empty())
+            return {{}, std::nullopt};
+        else if (options.size() == 1)
+            return {{}, options[0]};
         else
-            LUAU_ASSERT(false); // parts.size() == 0
+            return {{}, arena->addType(UnionType{std::move(options)})};
+    }
+    else if (auto itv = get<IntersectionType>(subjectType))
+    {
+        std::vector<TypeId> blocked;
+        std::vector<TypeId> options;
+
+        for (TypeId ty : itv)
+        {
+            auto [innerBlocked, innerResult] = lookupTableProp(ty, propName, seen);
+            blocked.insert(blocked.end(), innerBlocked.begin(), innerBlocked.end());
+            if (innerResult)
+                options.push_back(*innerResult);
+        }
+
+        if (!blocked.empty())
+            return {blocked, std::nullopt};
+
+        if (options.empty())
+            return {{}, std::nullopt};
+        else if (options.size() == 1)
+            return {{}, options[0]};
+        else
+            return {{}, arena->addType(IntersectionType{std::move(options)})};
     }
 
-    return resultType;
+    return {{}, std::nullopt};
 }
 
 void ConstraintSolver::block_(BlockedConstraintId target, NotNull<const Constraint> constraint)
@@ -1668,30 +2014,30 @@ void ConstraintSolver::block_(BlockedConstraintId target, NotNull<const Constrai
 
 void ConstraintSolver::block(NotNull<const Constraint> target, NotNull<const Constraint> constraint)
 {
-    if (FFlag::DebugLuauLogSolverToJson)
+    if (logger)
         logger->pushBlock(constraint, target);
 
     if (FFlag::DebugLuauLogSolver)
         printf("block Constraint %s on\t%s\n", toString(*target, opts).c_str(), toString(*constraint, opts).c_str());
 
-    block_(target, constraint);
+    block_(target.get(), constraint);
 }
 
 bool ConstraintSolver::block(TypeId target, NotNull<const Constraint> constraint)
 {
-    if (FFlag::DebugLuauLogSolverToJson)
+    if (logger)
         logger->pushBlock(constraint, target);
 
     if (FFlag::DebugLuauLogSolver)
         printf("block TypeId %s on\t%s\n", toString(target, opts).c_str(), toString(*constraint, opts).c_str());
 
-    block_(target, constraint);
+    block_(follow(target), constraint);
     return false;
 }
 
 bool ConstraintSolver::block(TypePackId target, NotNull<const Constraint> constraint)
 {
-    if (FFlag::DebugLuauLogSolverToJson)
+    if (logger)
         logger->pushBlock(constraint, target);
 
     if (FFlag::DebugLuauLogSolver)
@@ -1701,7 +2047,21 @@ bool ConstraintSolver::block(TypePackId target, NotNull<const Constraint> constr
     return false;
 }
 
-struct Blocker : TypeVarOnceVisitor
+void ConstraintSolver::inheritBlocks(NotNull<const Constraint> source, NotNull<const Constraint> addition)
+{
+    // Anything that is blocked on this constraint must also be blocked on our
+    // synthesized constraints.
+    auto blockedIt = blocked.find(source.get());
+    if (blockedIt != blocked.end())
+    {
+        for (const auto& blockedConstraint : blockedIt->second)
+        {
+            block(addition, blockedConstraint);
+        }
+    }
+}
+
+struct Blocker : TypeOnceVisitor
 {
     NotNull<ConstraintSolver> solver;
     NotNull<const Constraint> constraint;
@@ -1714,14 +2074,14 @@ struct Blocker : TypeVarOnceVisitor
     {
     }
 
-    bool visit(TypeId ty, const BlockedTypeVar&)
+    bool visit(TypeId ty, const BlockedType&)
     {
         blocked = true;
         solver->block(ty, constraint);
         return false;
     }
 
-    bool visit(TypeId ty, const PendingExpansionTypeVar&)
+    bool visit(TypeId ty, const PendingExpansionType&)
     {
         blocked = true;
         solver->block(ty, constraint);
@@ -1769,23 +2129,26 @@ void ConstraintSolver::unblock_(BlockedConstraintId progressed)
 
 void ConstraintSolver::unblock(NotNull<const Constraint> progressed)
 {
-    if (FFlag::DebugLuauLogSolverToJson)
+    if (logger)
         logger->popBlock(progressed);
 
-    return unblock_(progressed);
+    return unblock_(progressed.get());
 }
 
 void ConstraintSolver::unblock(TypeId progressed)
 {
-    if (FFlag::DebugLuauLogSolverToJson)
+    if (logger)
         logger->popBlock(progressed);
 
-    return unblock_(progressed);
+    unblock_(progressed);
+
+    if (auto bt = get<BoundType>(progressed))
+        unblock(bt->boundTo);
 }
 
 void ConstraintSolver::unblock(TypePackId progressed)
 {
-    if (FFlag::DebugLuauLogSolverToJson)
+    if (logger)
         logger->popBlock(progressed);
 
     return unblock_(progressed);
@@ -1805,7 +2168,7 @@ void ConstraintSolver::unblock(const std::vector<TypePackId>& packs)
 
 bool ConstraintSolver::isBlocked(TypeId ty)
 {
-    return nullptr != get<BlockedTypeVar>(follow(ty)) || nullptr != get<PendingExpansionTypeVar>(follow(ty));
+    return nullptr != get<BlockedType>(follow(ty)) || nullptr != get<PendingExpansionType>(follow(ty));
 }
 
 bool ConstraintSolver::isBlocked(TypePackId tp)
@@ -1857,12 +2220,14 @@ void ConstraintSolver::unify(TypePackId subPack, TypePackId superPack, NotNull<S
     unblock(changedPacks);
 }
 
-void ConstraintSolver::pushConstraint(NotNull<Scope> scope, const Location& location, ConstraintV cv)
+NotNull<Constraint> ConstraintSolver::pushConstraint(NotNull<Scope> scope, const Location& location, ConstraintV cv)
 {
     std::unique_ptr<Constraint> c = std::make_unique<Constraint>(scope, location, std::move(cv));
     NotNull<Constraint> borrow = NotNull(c.get());
     solverConstraints.push_back(std::move(c));
     unsolvedConstraints.push_back(borrow);
+
+    return borrow;
 }
 
 TypeId ConstraintSolver::resolveModule(const ModuleInfo& info, const Location& location)
@@ -1878,7 +2243,7 @@ TypeId ConstraintSolver::resolveModule(const ModuleInfo& info, const Location& l
     for (const auto& [location, path] : requireCycles)
     {
         if (!path.empty() && path.front() == humanReadableName)
-            return singletonTypes->anyType;
+            return builtinTypes->anyType;
     }
 
     ModulePtr module = moduleResolver->getModule(info.name);
@@ -1896,7 +2261,7 @@ TypeId ConstraintSolver::resolveModule(const ModuleInfo& info, const Location& l
         return errorRecoveryType();
     }
 
-    TypePackId modulePack = module->getModuleScope()->returnType;
+    TypePackId modulePack = module->returnType;
     if (get<Unifiable::Error>(modulePack))
         return errorRecoveryType();
 
@@ -1924,12 +2289,12 @@ void ConstraintSolver::reportError(TypeError e)
 
 TypeId ConstraintSolver::errorRecoveryType() const
 {
-    return singletonTypes->errorRecoveryType();
+    return builtinTypes->errorRecoveryType();
 }
 
 TypePackId ConstraintSolver::errorRecoveryTypePack() const
 {
-    return singletonTypes->errorRecoveryTypePack();
+    return builtinTypes->errorRecoveryTypePack();
 }
 
 TypeId ConstraintSolver::unionOfTypes(TypeId a, TypeId b, NotNull<Scope> scope, bool unifyFreeTypes)
@@ -1937,7 +2302,7 @@ TypeId ConstraintSolver::unionOfTypes(TypeId a, TypeId b, NotNull<Scope> scope, 
     a = follow(a);
     b = follow(b);
 
-    if (unifyFreeTypes && (get<FreeTypeVar>(a) || get<FreeTypeVar>(b)))
+    if (unifyFreeTypes && (get<FreeType>(a) || get<FreeType>(b)))
     {
         Unifier u{normalizer, Mode::Strict, scope, Location{}, Covariant};
         u.useScopes = true;
@@ -1950,7 +2315,7 @@ TypeId ConstraintSolver::unionOfTypes(TypeId a, TypeId b, NotNull<Scope> scope, 
         }
         else
         {
-            return singletonTypes->errorRecoveryType(singletonTypes->anyType);
+            return builtinTypes->errorRecoveryType(builtinTypes->anyType);
         }
     }
 
@@ -1959,12 +2324,12 @@ TypeId ConstraintSolver::unionOfTypes(TypeId a, TypeId b, NotNull<Scope> scope, 
 
     std::vector<TypeId> types = reduceUnion({a, b});
     if (types.empty())
-        return singletonTypes->neverType;
+        return builtinTypes->neverType;
 
     if (types.size() == 1)
         return types[0];
 
-    return arena->addType(UnionTypeVar{types});
+    return arena->addType(UnionType{types});
 }
 
 } // namespace Luau

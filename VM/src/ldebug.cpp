@@ -174,7 +174,7 @@ int lua_getinfo(lua_State* L, int level, const char* what, lua_Debug* ar)
     CallInfo* ci = NULL;
     if (level < 0)
     {
-        StkId func = L->top + level;
+        const TValue* func = luaA_toobject(L, level);
         api_check(L, ttisfunction(func));
         f = clvalue(func);
     }

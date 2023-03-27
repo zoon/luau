@@ -1,6 +1,6 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/TypeInfer.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 
 #include "Fixture.h"
 
@@ -22,8 +22,8 @@ TEST_CASE_FIXTURE(Fixture, "select_correct_union_fn")
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
-    CHECK_EQ(requireType("b"), typeChecker.stringType);
-    CHECK_EQ(requireType("c"), typeChecker.numberType);
+    CHECK_EQ(requireType("b"), builtinTypes->stringType);
+    CHECK_EQ(requireType("c"), builtinTypes->numberType);
 }
 
 TEST_CASE_FIXTURE(Fixture, "table_combines")
@@ -123,31 +123,49 @@ TEST_CASE_FIXTURE(Fixture, "should_still_pick_an_overload_whose_arguments_are_un
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ(*requireType("a1"), *typeChecker.numberType);
-    CHECK_EQ(*requireType("a2"), *typeChecker.numberType);
+    CHECK_EQ(*requireType("a1"), *builtinTypes->numberType);
+    CHECK_EQ(*requireType("a2"), *builtinTypes->numberType);
 
-    CHECK_EQ(*requireType("b1"), *typeChecker.stringType);
-    CHECK_EQ(*requireType("b2"), *typeChecker.stringType);
+    CHECK_EQ(*requireType("b1"), *builtinTypes->stringType);
+    CHECK_EQ(*requireType("b2"), *builtinTypes->stringType);
 }
 
 TEST_CASE_FIXTURE(Fixture, "propagates_name")
 {
-    const std::string code = R"(
-        type A={a:number}
-        type B={b:string}
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        CheckResult result = check(R"(
+            type A={a:number}
+            type B={b:string}
 
-        local c:A&B
-        local b = c
-    )";
-    const std::string expected = R"(
-        type A={a:number}
-        type B={b:string}
+            local c:A&B
+            local b = c
+        )");
 
-        local c:A&B
-        local b:A&B=c
-    )";
+        LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ(expected, decorateWithTypes(code));
+        CHECK("{| a: number, b: string |}" == toString(requireType("b")));
+    }
+    else
+    {
+        const std::string code = R"(
+            type A={a:number}
+            type B={b:string}
+
+            local c:A&B
+            local b = c
+        )";
+
+        const std::string expected = R"(
+            type A={a:number}
+            type B={b:string}
+
+            local c:A&B
+            local b:A&B=c
+        )";
+
+        CHECK_EQ(expected, decorateWithTypes(code));
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "index_on_an_intersection_type_with_property_guaranteed_to_exist")
@@ -161,17 +179,10 @@ TEST_CASE_FIXTURE(Fixture, "index_on_an_intersection_type_with_property_guarante
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
-
-    const IntersectionTypeVar* r = get<IntersectionTypeVar>(requireType("r"));
-    REQUIRE(r);
-
-    TableTypeVar* a = getMutable<TableTypeVar>(r->parts[0]);
-    REQUIRE(a);
-    CHECK_EQ(typeChecker.numberType, a->props["y"].type);
-
-    TableTypeVar* b = getMutable<TableTypeVar>(r->parts[1]);
-    REQUIRE(b);
-    CHECK_EQ(typeChecker.numberType, b->props["y"].type);
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK("{| y: number |}" == toString(requireType("r")));
+    else
+        CHECK("{| y: number |} & {| y: number |}" == toString(requireType("r")));
 }
 
 TEST_CASE_FIXTURE(Fixture, "index_on_an_intersection_type_works_at_arbitrary_depth")
@@ -207,7 +218,10 @@ TEST_CASE_FIXTURE(Fixture, "index_on_an_intersection_type_with_mixed_types")
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
-    CHECK_EQ("number & string", toString(requireType("r")));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK_EQ("never", toString(requireType("r")));
+    else
+        CHECK_EQ("number & string", toString(requireType("r")));
 }
 
 TEST_CASE_FIXTURE(Fixture, "index_on_an_intersection_type_with_one_part_missing_the_property")
@@ -235,7 +249,7 @@ TEST_CASE_FIXTURE(Fixture, "index_on_an_intersection_type_with_one_property_of_t
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
-    CHECK_EQ(*typeChecker.anyType, *requireType("r"));
+    CHECK_EQ(*builtinTypes->anyType, *requireType("r"));
 }
 
 TEST_CASE_FIXTURE(Fixture, "index_on_an_intersection_type_with_all_parts_missing_the_property")
@@ -313,7 +327,12 @@ TEST_CASE_FIXTURE(Fixture, "table_intersection_write_sealed")
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]), "Cannot add property 'z' to table 'X & Y'");
+    auto e = toString(result.errors[0]);
+    // In DCR, because of type normalization, we print a different error message
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK_EQ("Cannot add property 'z' to table '{| x: number, y: number |}'", e);
+    else
+        CHECK_EQ("Cannot add property 'z' to table 'X & Y'", e);
 }
 
 TEST_CASE_FIXTURE(Fixture, "table_intersection_write_sealed_indirect")
@@ -387,7 +406,10 @@ local a: XYZ = 3
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]), R"(Type 'number' could not be converted into 'X & Y & Z'
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK_EQ(toString(result.errors[0]), R"(Type 'number' could not be converted into '{| x: number, y: number, z: number |}')");
+    else
+        CHECK_EQ(toString(result.errors[0]), R"(Type 'number' could not be converted into 'X & Y & Z'
 caused by:
   Not all intersection parts are compatible. Type 'number' could not be converted into 'X')");
 }
@@ -404,7 +426,11 @@ local b: number = a
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]), R"(Type 'X & Y & Z' could not be converted into 'number'; none of the intersection parts are compatible)");
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK_EQ(toString(result.errors[0]), R"(Type '{| x: number, y: number, z: number |}' could not be converted into 'number')");
+    else
+        CHECK_EQ(
+            toString(result.errors[0]), R"(Type 'X & Y & Z' could not be converted into 'number'; none of the intersection parts are compatible)");
 }
 
 TEST_CASE_FIXTURE(Fixture, "overload_is_not_a_function")
@@ -444,7 +470,11 @@ TEST_CASE_FIXTURE(Fixture, "intersect_bool_and_false")
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]), "Type 'boolean & false' could not be converted into 'true'; none of the intersection parts are compatible");
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK_EQ(toString(result.errors[0]), "Type 'false' could not be converted into 'true'");
+    else
+        CHECK_EQ(
+            toString(result.errors[0]), "Type 'boolean & false' could not be converted into 'true'; none of the intersection parts are compatible");
 }
 
 TEST_CASE_FIXTURE(Fixture, "intersect_false_and_bool_and_false")
@@ -456,18 +486,18 @@ TEST_CASE_FIXTURE(Fixture, "intersect_false_and_bool_and_false")
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    // TODO: odd stringification of `false & (boolean & false)`.)
-    CHECK_EQ(toString(result.errors[0]),
-        "Type 'boolean & false & false' could not be converted into 'true'; none of the intersection parts are compatible");
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK_EQ(toString(result.errors[0]), "Type 'false' could not be converted into 'true'");
+    else
+    {
+        // TODO: odd stringification of `false & (boolean & false)`.)
+        CHECK_EQ(toString(result.errors[0]),
+            "Type 'boolean & false & false' could not be converted into 'true'; none of the intersection parts are compatible");
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "intersect_saturate_overloaded_functions")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x : ((number?) -> number?) & ((string?) -> string?)
         local y : (nil) -> nil = x -- OK
@@ -481,11 +511,6 @@ TEST_CASE_FIXTURE(Fixture, "intersect_saturate_overloaded_functions")
 
 TEST_CASE_FIXTURE(Fixture, "union_saturate_overloaded_functions")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x : ((number) -> number) & ((string) -> string)
         local y : ((number | string) -> (number | string)) = x -- OK
@@ -499,11 +524,6 @@ TEST_CASE_FIXTURE(Fixture, "union_saturate_overloaded_functions")
 
 TEST_CASE_FIXTURE(Fixture, "intersection_of_tables")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x : { p : number?, q : string? } & { p : number?, q : number?, r : number? }
         local y : { p : number?, q : nil, r : number? } = x -- OK
@@ -511,8 +531,21 @@ TEST_CASE_FIXTURE(Fixture, "intersection_of_tables")
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]), "Type '{| p: number?, q: number?, r: number? |} & {| p: number?, q: string? |}' could not be converted into "
-                                         "'{| p: nil |}'; none of the intersection parts are compatible");
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        CHECK_EQ(toString(result.errors[0]),
+            "Type '{| p: number?, q: nil, r: number? |}' could not be converted into '{| p: nil |}'\n"
+            "caused by:\n"
+            "  Property 'p' is not compatible. Type 'number?' could not be converted into 'nil'\n"
+            "caused by:\n"
+            "  Not all union options are compatible. Type 'number' could not be converted into 'nil' in an invariant context");
+    }
+    else
+    {
+        CHECK_EQ(toString(result.errors[0]),
+            "Type '{| p: number?, q: number?, r: number? |} & {| p: number?, q: string? |}' could not be converted into "
+            "'{| p: nil |}'; none of the intersection parts are compatible");
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "intersection_of_tables_with_top_properties")
@@ -523,16 +556,40 @@ TEST_CASE_FIXTURE(Fixture, "intersection_of_tables_with_top_properties")
         local z : { p : string?, q : number? } = x -- Not OK
     )");
 
-    LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]), "Type '{| p: number?, q: any |} & {| p: unknown, q: string? |}' could not be converted into '{| p: string?, "
-                                         "q: number? |}'; none of the intersection parts are compatible");
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        LUAU_REQUIRE_ERROR_COUNT(2, result);
+
+        CHECK_EQ(toString(result.errors[0]),
+            "Type '{| p: number?, q: string? |}' could not be converted into '{| p: string?, q: number? |}'\n"
+            "caused by:\n"
+            "  Property 'p' is not compatible. Type 'number?' could not be converted into 'string?'\n"
+            "caused by:\n"
+            "  Not all union options are compatible. Type 'number' could not be converted into 'string?'\n"
+            "caused by:\n"
+            "  None of the union options are compatible. For example: Type 'number' could not be converted into 'string' in an invariant context");
+
+        CHECK_EQ(toString(result.errors[1]),
+            "Type '{| p: number?, q: string? |}' could not be converted into '{| p: string?, q: number? |}'\n"
+            "caused by:\n"
+            "  Property 'q' is not compatible. Type 'string?' could not be converted into 'number?'\n"
+            "caused by:\n"
+            "  Not all union options are compatible. Type 'string' could not be converted into 'number?'\n"
+            "caused by:\n"
+            "  None of the union options are compatible. For example: Type 'string' could not be converted into 'number' in an invariant context");
+    }
+    else
+    {
+        LUAU_REQUIRE_ERROR_COUNT(1, result);
+        CHECK_EQ(toString(result.errors[0]),
+            "Type '{| p: number?, q: any |} & {| p: unknown, q: string? |}' could not be converted into '{| p: string?, "
+            "q: number? |}'; none of the intersection parts are compatible");
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "intersection_of_tables_with_never_properties")
 {
     ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
         {"LuauUninhabitedSubAnything2", true},
     };
 
@@ -547,11 +604,6 @@ TEST_CASE_FIXTURE(Fixture, "intersection_of_tables_with_never_properties")
 
 TEST_CASE_FIXTURE(Fixture, "overloaded_functions_returning_intersections")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x : ((number?) -> ({ p : number } & { q : number })) & ((string?) -> ({ p : number } & { r : number }))
         local y : (nil) -> { p : number, q : number, r : number} = x -- OK
@@ -559,18 +611,22 @@ TEST_CASE_FIXTURE(Fixture, "overloaded_functions_returning_intersections")
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]),
-        "Type '((number?) -> {| p: number |} & {| q: number |}) & ((string?) -> {| p: number |} & {| r: number |})' could not be converted into "
-        "'(number?) -> {| p: number, q: number, r: number |}'; none of the intersection parts are compatible");
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        CHECK_EQ(toString(result.errors[0]),
+            "Type '((number?) -> {| p: number, q: number |}) & ((string?) -> {| p: number, r: number |})' could not be converted into "
+            "'(number?) -> {| p: number, q: number, r: number |}'; none of the intersection parts are compatible");
+    }
+    else
+    {
+        CHECK_EQ(toString(result.errors[0]),
+            "Type '((number?) -> {| p: number |} & {| q: number |}) & ((string?) -> {| p: number |} & {| r: number |})' could not be converted into "
+            "'(number?) -> {| p: number, q: number, r: number |}'; none of the intersection parts are compatible");
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "overloaded_functions_mentioning_generic")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
       function f<a>()
         local x : ((number?) -> (a | number)) & ((string?) -> (a | string))
@@ -586,11 +642,6 @@ TEST_CASE_FIXTURE(Fixture, "overloaded_functions_mentioning_generic")
 
 TEST_CASE_FIXTURE(Fixture, "overloaded_functions_mentioning_generics")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
       function f<a,b,c>()
         local x : ((a?) -> (a | b)) & ((c?) -> (b | c))
@@ -606,11 +657,6 @@ TEST_CASE_FIXTURE(Fixture, "overloaded_functions_mentioning_generics")
 
 TEST_CASE_FIXTURE(Fixture, "overloaded_functions_mentioning_generic_packs")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
       function f<a...,b...>()
         local x : ((number?, a...) -> (number?, b...)) & ((string?, a...) -> (string?, b...))
@@ -626,11 +672,6 @@ TEST_CASE_FIXTURE(Fixture, "overloaded_functions_mentioning_generic_packs")
 
 TEST_CASE_FIXTURE(Fixture, "overloadeded_functions_with_unknown_result")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
       function f<a...,b...>()
         local x : ((number) -> number) & ((nil) -> unknown)
@@ -646,11 +687,6 @@ TEST_CASE_FIXTURE(Fixture, "overloadeded_functions_with_unknown_result")
 
 TEST_CASE_FIXTURE(Fixture, "overloadeded_functions_with_unknown_arguments")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
       function f<a...,b...>()
         local x : ((number) -> number?) & ((unknown) -> string?)
@@ -666,11 +702,6 @@ TEST_CASE_FIXTURE(Fixture, "overloadeded_functions_with_unknown_arguments")
 
 TEST_CASE_FIXTURE(Fixture, "overloadeded_functions_with_never_result")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
       function f<a...,b...>()
         local x : ((number) -> number) & ((nil) -> never)
@@ -686,11 +717,6 @@ TEST_CASE_FIXTURE(Fixture, "overloadeded_functions_with_never_result")
 
 TEST_CASE_FIXTURE(Fixture, "overloadeded_functions_with_never_arguments")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
       function f<a...,b...>()
         local x : ((number) -> number?) & ((never) -> string?)
@@ -779,11 +805,6 @@ TEST_CASE_FIXTURE(Fixture, "overloadeded_functions_with_weird_typepacks_4")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "intersect_metatables")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local a : string? = nil
         local b : number? = nil
@@ -807,11 +828,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "intersect_metatables")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "intersect_metatable_subtypes")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x = setmetatable({ a = 5 }, { p = 5 });
         local y = setmetatable({ b = "hi" }, { p = 5, q = "hi" });
@@ -833,11 +849,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "intersect_metatable_subtypes")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "intersect_metatables_with_properties")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x = setmetatable({ a = 5 }, { p = 5 });
         local y = setmetatable({ b = "hi" }, { q = "hi" });
@@ -856,11 +867,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "intersect_metatables_with_properties")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "intersect_metatable_with_table")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x = setmetatable({ a = 5 }, { p = 5 });
         local z = setmetatable({ a = 5, b = "hi" }, { p = 5 });
@@ -881,11 +887,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "intersect_metatable_with_table")
 
 TEST_CASE_FIXTURE(Fixture, "CLI-44817")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         type X = {x: number}
         type Y = {y: number}
@@ -922,7 +923,7 @@ TEST_CASE_FIXTURE(Fixture, "less_greedy_unification_with_intersection_types")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ("({| x: number |} & {| x: string |}) -> {| x: number |} & {| x: string |}", toString(requireType("f")));
+    CHECK_EQ("(never) -> never", toString(requireType("f")));
 }
 
 TEST_CASE_FIXTURE(Fixture, "less_greedy_unification_with_intersection_types_2")
@@ -938,7 +939,7 @@ TEST_CASE_FIXTURE(Fixture, "less_greedy_unification_with_intersection_types_2")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ("({| x: number |} & {| x: string |}) -> number & string", toString(requireType("f")));
+    CHECK_EQ("(never) -> never", toString(requireType("f")));
 }
 
 TEST_SUITE_END();

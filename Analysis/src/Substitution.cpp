@@ -9,14 +9,188 @@
 #include <stdexcept>
 
 LUAU_FASTFLAGVARIABLE(LuauSubstitutionFixMissingFields, false)
-LUAU_FASTFLAG(LuauClonePublicInterfaceLess)
+LUAU_FASTFLAG(LuauClonePublicInterfaceLess2)
 LUAU_FASTINTVARIABLE(LuauTarjanChildLimit, 10000)
 LUAU_FASTFLAGVARIABLE(LuauClassTypeVarsInSubstitution, false)
-LUAU_FASTFLAG(LuauUnknownAndNeverType)
 LUAU_FASTFLAGVARIABLE(LuauSubstitutionReentrant, false)
 
 namespace Luau
 {
+
+static TypeId DEPRECATED_shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool alwaysClone)
+{
+    ty = log->follow(ty);
+
+    TypeId result = ty;
+
+    if (auto pty = log->pending(ty))
+        ty = &pty->pending;
+
+    if (const FunctionType* ftv = get<FunctionType>(ty))
+    {
+        FunctionType clone = FunctionType{ftv->level, ftv->scope, ftv->argTypes, ftv->retTypes, ftv->definition, ftv->hasSelf};
+        clone.generics = ftv->generics;
+        clone.genericPacks = ftv->genericPacks;
+        clone.magicFunction = ftv->magicFunction;
+        clone.dcrMagicFunction = ftv->dcrMagicFunction;
+        clone.dcrMagicRefinement = ftv->dcrMagicRefinement;
+        clone.tags = ftv->tags;
+        clone.argNames = ftv->argNames;
+        result = dest.addType(std::move(clone));
+    }
+    else if (const TableType* ttv = get<TableType>(ty))
+    {
+        LUAU_ASSERT(!ttv->boundTo);
+        TableType clone = TableType{ttv->props, ttv->indexer, ttv->level, ttv->scope, ttv->state};
+        clone.definitionModuleName = ttv->definitionModuleName;
+        clone.definitionLocation = ttv->definitionLocation;
+        clone.name = ttv->name;
+        clone.syntheticName = ttv->syntheticName;
+        clone.instantiatedTypeParams = ttv->instantiatedTypeParams;
+        clone.instantiatedTypePackParams = ttv->instantiatedTypePackParams;
+        clone.tags = ttv->tags;
+        result = dest.addType(std::move(clone));
+    }
+    else if (const MetatableType* mtv = get<MetatableType>(ty))
+    {
+        MetatableType clone = MetatableType{mtv->table, mtv->metatable};
+        clone.syntheticName = mtv->syntheticName;
+        result = dest.addType(std::move(clone));
+    }
+    else if (const UnionType* utv = get<UnionType>(ty))
+    {
+        UnionType clone;
+        clone.options = utv->options;
+        result = dest.addType(std::move(clone));
+    }
+    else if (const IntersectionType* itv = get<IntersectionType>(ty))
+    {
+        IntersectionType clone;
+        clone.parts = itv->parts;
+        result = dest.addType(std::move(clone));
+    }
+    else if (const PendingExpansionType* petv = get<PendingExpansionType>(ty))
+    {
+        PendingExpansionType clone{petv->prefix, petv->name, petv->typeArguments, petv->packArguments};
+        result = dest.addType(std::move(clone));
+    }
+    else if (const NegationType* ntv = get<NegationType>(ty))
+    {
+        result = dest.addType(NegationType{ntv->ty});
+    }
+    else
+        return result;
+
+    asMutable(result)->documentationSymbol = ty->documentationSymbol;
+    return result;
+}
+
+static TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool alwaysClone)
+{
+    if (!FFlag::LuauClonePublicInterfaceLess2)
+        return DEPRECATED_shallowClone(ty, dest, log, alwaysClone);
+
+    auto go = [ty, &dest, alwaysClone](auto&& a) {
+        using T = std::decay_t<decltype(a)>;
+
+        if constexpr (std::is_same_v<T, FreeType>)
+            return ty;
+        else if constexpr (std::is_same_v<T, BoundType>)
+        {
+            // This should never happen, but visit() cannot see it.
+            LUAU_ASSERT(!"shallowClone didn't follow its argument!");
+            return dest.addType(BoundType{a.boundTo});
+        }
+        else if constexpr (std::is_same_v<T, GenericType>)
+            return dest.addType(a);
+        else if constexpr (std::is_same_v<T, BlockedType>)
+            return ty;
+        else if constexpr (std::is_same_v<T, PrimitiveType>)
+            return ty;
+        else if constexpr (std::is_same_v<T, PendingExpansionType>)
+            return ty;
+        else if constexpr (std::is_same_v<T, AnyType>)
+            return ty;
+        else if constexpr (std::is_same_v<T, ErrorType>)
+            return ty;
+        else if constexpr (std::is_same_v<T, UnknownType>)
+            return ty;
+        else if constexpr (std::is_same_v<T, NeverType>)
+            return ty;
+        else if constexpr (std::is_same_v<T, LazyType>)
+            return ty;
+        else if constexpr (std::is_same_v<T, SingletonType>)
+            return dest.addType(a);
+        else if constexpr (std::is_same_v<T, FunctionType>)
+        {
+            FunctionType clone = FunctionType{a.level, a.scope, a.argTypes, a.retTypes, a.definition, a.hasSelf};
+            clone.generics = a.generics;
+            clone.genericPacks = a.genericPacks;
+            clone.magicFunction = a.magicFunction;
+            clone.dcrMagicFunction = a.dcrMagicFunction;
+            clone.dcrMagicRefinement = a.dcrMagicRefinement;
+            clone.tags = a.tags;
+            clone.argNames = a.argNames;
+            return dest.addType(std::move(clone));
+        }
+        else if constexpr (std::is_same_v<T, TableType>)
+        {
+            LUAU_ASSERT(!a.boundTo);
+            TableType clone = TableType{a.props, a.indexer, a.level, a.scope, a.state};
+            clone.definitionModuleName = a.definitionModuleName;
+            clone.definitionLocation = a.definitionLocation;
+            clone.name = a.name;
+            clone.syntheticName = a.syntheticName;
+            clone.instantiatedTypeParams = a.instantiatedTypeParams;
+            clone.instantiatedTypePackParams = a.instantiatedTypePackParams;
+            clone.tags = a.tags;
+            return dest.addType(std::move(clone));
+        }
+        else if constexpr (std::is_same_v<T, MetatableType>)
+        {
+            MetatableType clone = MetatableType{a.table, a.metatable};
+            clone.syntheticName = a.syntheticName;
+            return dest.addType(std::move(clone));
+        }
+        else if constexpr (std::is_same_v<T, UnionType>)
+        {
+            UnionType clone;
+            clone.options = a.options;
+            return dest.addType(std::move(clone));
+        }
+        else if constexpr (std::is_same_v<T, IntersectionType>)
+        {
+            IntersectionType clone;
+            clone.parts = a.parts;
+            return dest.addType(std::move(clone));
+        }
+        else if constexpr (std::is_same_v<T, ClassType>)
+        {
+            if (alwaysClone)
+            {
+                ClassType clone{a.name, a.props, a.parent, a.metatable, a.tags, a.userData, a.definitionModuleName};
+                return dest.addType(std::move(clone));
+            }
+            else
+                return ty;
+        }
+        else if constexpr (std::is_same_v<T, NegationType>)
+            return dest.addType(NegationType{a.ty});
+        else
+            static_assert(always_false_v<T>, "Non-exhaustive shallowClone switch");
+    };
+
+    ty = log->follow(ty);
+
+    if (auto pty = log->pending(ty))
+        ty = &pty->pending;
+
+    TypeId resTy = visit(go, ty->ty);
+    if (resTy != ty)
+        asMutable(resTy)->documentationSymbol = ty->documentationSymbol;
+
+    return resTy;
+}
 
 void Tarjan::visitChildren(TypeId ty, int index)
 {
@@ -28,7 +202,7 @@ void Tarjan::visitChildren(TypeId ty, int index)
     if (auto pty = log->pending(ty))
         ty = &pty->pending;
 
-    if (const FunctionTypeVar* ftv = get<FunctionTypeVar>(ty))
+    if (const FunctionType* ftv = get<FunctionType>(ty))
     {
         if (FFlag::LuauSubstitutionFixMissingFields)
         {
@@ -41,7 +215,7 @@ void Tarjan::visitChildren(TypeId ty, int index)
         visitChild(ftv->argTypes);
         visitChild(ftv->retTypes);
     }
-    else if (const TableTypeVar* ttv = get<TableTypeVar>(ty))
+    else if (const TableType* ttv = get<TableType>(ty))
     {
         LUAU_ASSERT(!ttv->boundTo);
         for (const auto& [name, prop] : ttv->props)
@@ -58,22 +232,22 @@ void Tarjan::visitChildren(TypeId ty, int index)
         for (TypePackId itp : ttv->instantiatedTypePackParams)
             visitChild(itp);
     }
-    else if (const MetatableTypeVar* mtv = get<MetatableTypeVar>(ty))
+    else if (const MetatableType* mtv = get<MetatableType>(ty))
     {
         visitChild(mtv->table);
         visitChild(mtv->metatable);
     }
-    else if (const UnionTypeVar* utv = get<UnionTypeVar>(ty))
+    else if (const UnionType* utv = get<UnionType>(ty))
     {
         for (TypeId opt : utv->options)
             visitChild(opt);
     }
-    else if (const IntersectionTypeVar* itv = get<IntersectionTypeVar>(ty))
+    else if (const IntersectionType* itv = get<IntersectionType>(ty))
     {
         for (TypeId part : itv->parts)
             visitChild(part);
     }
-    else if (const PendingExpansionTypeVar* petv = get<PendingExpansionTypeVar>(ty))
+    else if (const PendingExpansionType* petv = get<PendingExpansionType>(ty))
     {
         for (TypeId a : petv->typeArguments)
             visitChild(a);
@@ -81,7 +255,7 @@ void Tarjan::visitChildren(TypeId ty, int index)
         for (TypePackId a : petv->packArguments)
             visitChild(a);
     }
-    else if (const ClassTypeVar* ctv = get<ClassTypeVar>(ty); FFlag::LuauClassTypeVarsInSubstitution && ctv)
+    else if (const ClassType* ctv = get<ClassType>(ty); FFlag::LuauClassTypeVarsInSubstitution && ctv)
     {
         for (auto [name, prop] : ctv->props)
             visitChild(prop.type);
@@ -92,7 +266,7 @@ void Tarjan::visitChildren(TypeId ty, int index)
         if (ctv->metatable)
             visitChild(*ctv->metatable);
     }
-    else if (const NegationTypeVar* ntv = get<NegationTypeVar>(ty))
+    else if (const NegationType* ntv = get<NegationType>(ty))
     {
         visitChild(ntv->ty);
     }
@@ -184,7 +358,7 @@ TarjanResult Tarjan::loop()
         if (currEdge == -1)
         {
             ++childCount;
-            if (childLimit > 0 && (FFlag::LuauUnknownAndNeverType ? childLimit <= childCount : childLimit < childCount))
+            if (childLimit > 0 && childLimit <= childCount)
                 return TarjanResult::TooManyChildren;
 
             stack.push_back(index);
@@ -470,7 +644,7 @@ std::optional<TypePackId> Substitution::substitute(TypePackId tp)
 
 TypeId Substitution::clone(TypeId ty)
 {
-    return shallowClone(ty, *arena, log, /* alwaysClone */ FFlag::LuauClonePublicInterfaceLess);
+    return shallowClone(ty, *arena, log, /* alwaysClone */ FFlag::LuauClonePublicInterfaceLess2);
 }
 
 TypePackId Substitution::clone(TypePackId tp)
@@ -495,7 +669,7 @@ TypePackId Substitution::clone(TypePackId tp)
             clone.hidden = vtp->hidden;
         return addTypePack(std::move(clone));
     }
-    else if (FFlag::LuauClonePublicInterfaceLess)
+    else if (FFlag::LuauClonePublicInterfaceLess2)
     {
         return addTypePack(*tp);
     }
@@ -559,7 +733,7 @@ void Substitution::replaceChildren(TypeId ty)
     if (ty->owningArena != arena)
         return;
 
-    if (FunctionTypeVar* ftv = getMutable<FunctionTypeVar>(ty))
+    if (FunctionType* ftv = getMutable<FunctionType>(ty))
     {
         if (FFlag::LuauSubstitutionFixMissingFields)
         {
@@ -572,7 +746,7 @@ void Substitution::replaceChildren(TypeId ty)
         ftv->argTypes = replace(ftv->argTypes);
         ftv->retTypes = replace(ftv->retTypes);
     }
-    else if (TableTypeVar* ttv = getMutable<TableTypeVar>(ty))
+    else if (TableType* ttv = getMutable<TableType>(ty))
     {
         LUAU_ASSERT(!ttv->boundTo);
         for (auto& [name, prop] : ttv->props)
@@ -589,22 +763,22 @@ void Substitution::replaceChildren(TypeId ty)
         for (TypePackId& itp : ttv->instantiatedTypePackParams)
             itp = replace(itp);
     }
-    else if (MetatableTypeVar* mtv = getMutable<MetatableTypeVar>(ty))
+    else if (MetatableType* mtv = getMutable<MetatableType>(ty))
     {
         mtv->table = replace(mtv->table);
         mtv->metatable = replace(mtv->metatable);
     }
-    else if (UnionTypeVar* utv = getMutable<UnionTypeVar>(ty))
+    else if (UnionType* utv = getMutable<UnionType>(ty))
     {
         for (TypeId& opt : utv->options)
             opt = replace(opt);
     }
-    else if (IntersectionTypeVar* itv = getMutable<IntersectionTypeVar>(ty))
+    else if (IntersectionType* itv = getMutable<IntersectionType>(ty))
     {
         for (TypeId& part : itv->parts)
             part = replace(part);
     }
-    else if (PendingExpansionTypeVar* petv = getMutable<PendingExpansionTypeVar>(ty))
+    else if (PendingExpansionType* petv = getMutable<PendingExpansionType>(ty))
     {
         for (TypeId& a : petv->typeArguments)
             a = replace(a);
@@ -612,7 +786,7 @@ void Substitution::replaceChildren(TypeId ty)
         for (TypePackId& a : petv->packArguments)
             a = replace(a);
     }
-    else if (ClassTypeVar* ctv = getMutable<ClassTypeVar>(ty); FFlag::LuauClassTypeVarsInSubstitution && ctv)
+    else if (ClassType* ctv = getMutable<ClassType>(ty); FFlag::LuauClassTypeVarsInSubstitution && ctv)
     {
         for (auto& [name, prop] : ctv->props)
             prop.type = replace(prop.type);
@@ -623,7 +797,7 @@ void Substitution::replaceChildren(TypeId ty)
         if (ctv->metatable)
             ctv->metatable = replace(*ctv->metatable);
     }
-    else if (NegationTypeVar* ntv = getMutable<NegationTypeVar>(ty))
+    else if (NegationType* ntv = getMutable<NegationType>(ty))
     {
         ntv->ty = replace(ntv->ty);
     }

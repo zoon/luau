@@ -2,10 +2,9 @@
 #pragma once
 
 #include "Luau/Ast.h" // Used for some of the enumerations
-#include "Luau/Def.h"
 #include "Luau/DenseHash.h"
 #include "Luau/NotNull.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 #include "Luau/Variant.h"
 
 #include <string>
@@ -17,8 +16,8 @@ namespace Luau
 
 struct Scope;
 
-struct TypeVar;
-using TypeId = const TypeVar*;
+struct Type;
+using TypeId = const Type*;
 
 struct TypePackVar;
 using TypePackId = const TypePackVar*;
@@ -71,9 +70,9 @@ struct BinaryConstraint
 
     // When we dispatch this constraint, we update the key at this map to record
     // the overload that we selected.
-    AstExpr* expr;
-    DenseHashMap<const AstExpr*, TypeId>* astOriginalCallTypes;
-    DenseHashMap<const AstExpr*, TypeId>* astOverloadResolvedTypes;
+    const AstNode* astFragment;
+    DenseHashMap<const AstNode*, TypeId>* astOriginalCallTypes;
+    DenseHashMap<const AstNode*, TypeId>* astOverloadResolvedTypes;
 };
 
 // iteratee is iterable
@@ -89,22 +88,25 @@ struct NameConstraint
 {
     TypeId namedType;
     std::string name;
+    bool synthetic = false;
+    std::vector<TypeId> typeParameters;
+    std::vector<TypePackId> typePackParameters;
 };
 
 // target ~ inst target
 struct TypeAliasExpansionConstraint
 {
-    // Must be a PendingExpansionTypeVar.
+    // Must be a PendingExpansionType.
     TypeId target;
 };
 
 struct FunctionCallConstraint
 {
-    std::vector<NotNull<const struct Constraint>> innerConstraints;
     TypeId fn;
     TypePackId argsPack;
     TypePackId result;
     class AstExprCall* callSite;
+    std::vector<std::optional<TypeId>> discriminantTypes;
 };
 
 // result ~ prim ExpectedType SomeSingletonType MultitonType
@@ -156,6 +158,20 @@ struct SetPropConstraint
     TypeId propType;
 };
 
+// result ~ setIndexer subjectType indexType propType
+//
+// If the subject is a table or table-like thing that already has an indexer,
+// unify its indexType and propType with those from this constraint.
+//
+// If the table is a free or unsealed table, we augment it with a new indexer.
+struct SetIndexerConstraint
+{
+    TypeId resultType;
+    TypeId subjectType;
+    TypeId indexType;
+    TypeId propType;
+};
+
 // if negation:
 //   result ~ if isSingleton D then ~D else unknown where D = discriminantType
 // if not negation:
@@ -167,9 +183,19 @@ struct SingletonOrTopTypeConstraint
     bool negated;
 };
 
+// resultType ~ unpack sourceTypePack
+//
+// Similar to PackSubtypeConstraint, but with one important difference: If the
+// sourcePack is blocked, this constraint blocks.
+struct UnpackConstraint
+{
+    TypePackId resultPack;
+    TypePackId sourcePack;
+};
+
 using ConstraintV = Variant<SubtypeConstraint, PackSubtypeConstraint, GeneralizationConstraint, InstantiationConstraint, UnaryConstraint,
     BinaryConstraint, IterableConstraint, NameConstraint, TypeAliasExpansionConstraint, FunctionCallConstraint, PrimitiveTypeConstraint,
-    HasPropConstraint, SetPropConstraint, SingletonOrTopTypeConstraint>;
+    HasPropConstraint, SetPropConstraint, SetIndexerConstraint, SingletonOrTopTypeConstraint, UnpackConstraint>;
 
 struct Constraint
 {
@@ -179,7 +205,7 @@ struct Constraint
     Constraint& operator=(const Constraint&) = delete;
 
     NotNull<Scope> scope;
-    Location location; // TODO: Extract this out into only the constraints that needs a location. Not all constraints needs locations.
+    Location location;
     ConstraintV c;
 
     std::vector<NotNull<Constraint>> dependencies;

@@ -2,7 +2,7 @@
 #include "Luau/BuiltinDefinitions.h"
 #include "Luau/Common.h"
 #include "Luau/TypeInfer.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 
 #include "Fixture.h"
 #include "ClassFixture.h"
@@ -398,11 +398,6 @@ local a: ChildClass = i
 
 TEST_CASE_FIXTURE(ClassFixture, "intersections_of_unions_of_classes")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x : (BaseClass | Vector2) & (ChildClass | AnotherChild)
         local y : (ChildClass | AnotherChild)
@@ -415,11 +410,6 @@ TEST_CASE_FIXTURE(ClassFixture, "intersections_of_unions_of_classes")
 
 TEST_CASE_FIXTURE(ClassFixture, "unions_of_intersections_of_classes")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x : (BaseClass & ChildClass) | (BaseClass & AnotherChild) | (BaseClass & Vector2)
         local y : (ChildClass | AnotherChild)
@@ -482,8 +472,6 @@ caused by:
 
 TEST_CASE_FIXTURE(ClassFixture, "callable_classes")
 {
-    ScopedFastFlag luauCallableClasses{"LuauCallableClasses", true};
-
     CheckResult result = check(R"(
         local x : CallableClass
         local y = x("testing")

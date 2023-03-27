@@ -3,7 +3,7 @@
 
 #include <Luau/NotNull.h>
 #include "Luau/TypeArena.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 
 #include <unordered_map>
 
@@ -25,8 +25,5 @@ struct CloneState
 TypePackId clone(TypePackId tp, TypeArena& dest, CloneState& cloneState);
 TypeId clone(TypeId tp, TypeArena& dest, CloneState& cloneState);
 TypeFun clone(const TypeFun& typeFun, TypeArena& dest, CloneState& cloneState);
-
-TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool alwaysClone = false);
-TypeId shallowClone(TypeId ty, NotNull<TypeArena> dest);
 
 } // namespace Luau

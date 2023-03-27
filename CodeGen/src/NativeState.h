@@ -39,7 +39,6 @@ struct NativeProto
     uintptr_t* instTargets = nullptr; // TODO: NativeProto should be variable-size with all target embedded
 
     Proto* proto = nullptr;
-    uint32_t location = 0;
 };
 
 struct NativeContext
@@ -47,12 +46,6 @@ struct NativeContext
     // Gateway (C => native transition) entry & exit, compiled at runtime
     uint8_t* gateEntry = nullptr;
     uint8_t* gateExit = nullptr;
-
-    // Opcode fallbacks, implemented in C
-    NativeFallback fallback[LOP__COUNT] = {};
-
-    // Fast call methods, implemented in C
-    luau_FastFunction luauF_table[256] = {};
 
     // Helper functions, implemented in C
     int (*luaV_lessthan)(lua_State* L, const TValue* l, const TValue* r) = nullptr;
@@ -78,7 +71,29 @@ struct NativeContext
 
     void (*luaF_close)(lua_State* L, StkId level) = nullptr;
 
+    const TValue* (*luaT_gettm)(Table* events, TMS event, TString* ename) = nullptr;
+    const TString* (*luaT_objtypenamestr)(lua_State* L, const TValue* o) = nullptr;
+
+    double (*libm_exp)(double) = nullptr;
     double (*libm_pow)(double, double) = nullptr;
+    double (*libm_fmod)(double, double) = nullptr;
+    double (*libm_asin)(double) = nullptr;
+    double (*libm_sin)(double) = nullptr;
+    double (*libm_sinh)(double) = nullptr;
+    double (*libm_acos)(double) = nullptr;
+    double (*libm_cos)(double) = nullptr;
+    double (*libm_cosh)(double) = nullptr;
+    double (*libm_atan)(double) = nullptr;
+    double (*libm_atan2)(double, double) = nullptr;
+    double (*libm_tan)(double) = nullptr;
+    double (*libm_tanh)(double) = nullptr;
+    double (*libm_log)(double) = nullptr;
+    double (*libm_log2)(double) = nullptr;
+    double (*libm_log10)(double) = nullptr;
+    double (*libm_ldexp)(double, int) = nullptr;
+    double (*libm_round)(double) = nullptr;
+    double (*libm_frexp)(double, int*) = nullptr;
+    double (*libm_modf)(double, double*) = nullptr;
 
     // Helper functions
     bool (*forgLoopNodeIter)(lua_State* L, Table* h, int index, TValue* ra) = nullptr;
@@ -86,6 +101,13 @@ struct NativeContext
     void (*forgPrepXnextFallback)(lua_State* L, TValue* ra, int pc) = nullptr;
     Closure* (*callProlog)(lua_State* L, TValue* ra, StkId argtop, int nresults) = nullptr;
     void (*callEpilogC)(lua_State* L, int nresults, int n) = nullptr;
+    const Instruction* (*returnFallback)(lua_State* L, StkId ra, int n) = nullptr;
+
+    // Opcode fallbacks, implemented in C
+    NativeFallback fallback[LOP__COUNT] = {};
+
+    // Fast call methods, implemented in C
+    luau_FastFunction luauF_table[256] = {};
 };
 
 struct NativeState

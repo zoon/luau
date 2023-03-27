@@ -21,6 +21,7 @@ class ParseError;
 struct Frontend;
 struct TypeError;
 struct LintWarning;
+struct GlobalTypes;
 struct TypeChecker;
 struct FileResolver;
 struct ModuleResolver;
@@ -31,11 +32,12 @@ struct LoadDefinitionFileResult
 {
     bool success;
     ParseResult parseResult;
+    SourceModule sourceModule;
     ModulePtr module;
 };
 
-LoadDefinitionFileResult loadDefinitionFile(
-    TypeChecker& typeChecker, ScopePtr targetScope, std::string_view definition, const std::string& packageName);
+LoadDefinitionFileResult loadDefinitionFile(TypeChecker& typeChecker, GlobalTypes& globals, ScopePtr targetScope, std::string_view definition,
+    const std::string& packageName, bool captureComments);
 
 std::optional<Mode> parseMode(const std::vector<HotComment>& hotcomments);
 
@@ -87,14 +89,21 @@ struct FrontendOptions
     // order to get more precise type information)
     bool forAutocomplete = false;
 
+    bool runLintChecks = false;
+
     // If not empty, randomly shuffle the constraint set before attempting to
     // solve.  Use this value to seed the random number generator.
     std::optional<unsigned> randomizeConstraintResolutionSeed;
+
+    std::optional<LintOptions> enabledLintWarnings;
 };
 
 struct CheckResult
 {
     std::vector<TypeError> errors;
+
+    LintResult lintResult;
+
     std::vector<ModuleName> timeoutHits;
 };
 
@@ -130,9 +139,10 @@ struct Frontend
     Frontend(FileResolver* fileResolver, ConfigResolver* configResolver, const FrontendOptions& options = {});
 
     CheckResult check(const ModuleName& name, std::optional<FrontendOptions> optionOverride = {}); // new shininess
-    LintResult lint(const ModuleName& name, std::optional<LintOptions> enabledLintWarnings = {});
 
-    LintResult lint(const SourceModule& module, std::optional<LintOptions> enabledLintWarnings = {});
+    // Use 'check' with 'runLintChecks' set to true in FrontendOptions (enabledLintWarnings be set there as well)
+    LintResult lint_DEPRECATED(const ModuleName& name, std::optional<LintOptions> enabledLintWarnings = {});
+    LintResult lint_DEPRECATED(const SourceModule& module, std::optional<LintOptions> enabledLintWarnings = {});
 
     bool isDirty(const ModuleName& name, bool forAutocomplete = false) const;
     void markDirty(const ModuleName& name, std::vector<ModuleName>* markedDirty = nullptr);
@@ -152,54 +162,57 @@ struct Frontend
     void clear();
 
     ScopePtr addEnvironment(const std::string& environmentName);
-    ScopePtr getEnvironmentScope(const std::string& environmentName);
+    ScopePtr getEnvironmentScope(const std::string& environmentName) const;
 
-    void registerBuiltinDefinition(const std::string& name, std::function<void(TypeChecker&, ScopePtr)>);
+    void registerBuiltinDefinition(const std::string& name, std::function<void(TypeChecker&, GlobalTypes&, ScopePtr)>);
     void applyBuiltinDefinitionToEnvironment(const std::string& environmentName, const std::string& definitionName);
 
-    LoadDefinitionFileResult loadDefinitionFile(std::string_view source, const std::string& packageName);
-
-    ScopePtr getGlobalScope();
+    LoadDefinitionFileResult loadDefinitionFile(std::string_view source, const std::string& packageName, bool captureComments);
 
 private:
-    ModulePtr check(const SourceModule& sourceModule, Mode mode, const ScopePtr& environmentScope, std::vector<RequireCycle> requireCycles,
-        bool forAutocomplete = false);
+    ModulePtr check(const SourceModule& sourceModule, Mode mode, std::vector<RequireCycle> requireCycles, bool forAutocomplete = false, bool recordJsonLog = false);
 
-    std::pair<SourceNode*, SourceModule*> getSourceNode(CheckResult& checkResult, const ModuleName& name);
+    std::pair<SourceNode*, SourceModule*> getSourceNode(const ModuleName& name);
     SourceModule parse(const ModuleName& name, std::string_view src, const ParseOptions& parseOptions);
 
-    bool parseGraph(std::vector<ModuleName>& buildQueue, CheckResult& checkResult, const ModuleName& root, bool forAutocomplete);
+    bool parseGraph(std::vector<ModuleName>& buildQueue, const ModuleName& root, bool forAutocomplete);
 
     static LintResult classifyLints(const std::vector<LintWarning>& warnings, const Config& config);
 
-    ScopePtr getModuleEnvironment(const SourceModule& module, const Config& config, bool forAutocomplete = false);
+    ScopePtr getModuleEnvironment(const SourceModule& module, const Config& config, bool forAutocomplete) const;
 
     std::unordered_map<std::string, ScopePtr> environments;
-    std::unordered_map<std::string, std::function<void(TypeChecker&, ScopePtr)>> builtinDefinitions;
+    std::unordered_map<std::string, std::function<void(TypeChecker&, GlobalTypes&, ScopePtr)>> builtinDefinitions;
 
-    SingletonTypes singletonTypes_;
+    BuiltinTypes builtinTypes_;
 
 public:
-    const NotNull<SingletonTypes> singletonTypes;
+    const NotNull<BuiltinTypes> builtinTypes;
 
     FileResolver* fileResolver;
     FrontendModuleResolver moduleResolver;
     FrontendModuleResolver moduleResolverForAutocomplete;
+    GlobalTypes globals;
+    GlobalTypes globalsForAutocomplete;
     TypeChecker typeChecker;
     TypeChecker typeCheckerForAutocomplete;
     ConfigResolver* configResolver;
     FrontendOptions options;
     InternalErrorReporter iceHandler;
-    TypeArena globalTypes;
 
     std::unordered_map<ModuleName, SourceNode> sourceNodes;
     std::unordered_map<ModuleName, SourceModule> sourceModules;
     std::unordered_map<ModuleName, RequireTraceResult> requireTrace;
 
     Stats stats = {};
-
-private:
-    ScopePtr globalScope;
 };
+
+ModulePtr check(const SourceModule& sourceModule, const std::vector<RequireCycle>& requireCycles, NotNull<BuiltinTypes> builtinTypes,
+    NotNull<InternalErrorReporter> iceHandler, NotNull<ModuleResolver> moduleResolver, NotNull<FileResolver> fileResolver,
+    const ScopePtr& globalScope, FrontendOptions options);
+
+ModulePtr check(const SourceModule& sourceModule, const std::vector<RequireCycle>& requireCycles, NotNull<BuiltinTypes> builtinTypes,
+    NotNull<InternalErrorReporter> iceHandler, NotNull<ModuleResolver> moduleResolver, NotNull<FileResolver> fileResolver,
+    const ScopePtr& globalScope, FrontendOptions options, bool recordJsonLog);
 
 } // namespace Luau

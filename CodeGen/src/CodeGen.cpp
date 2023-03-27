@@ -1,22 +1,38 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/CodeGen.h"
 
-#include "Luau/AssemblyBuilderX64.h"
 #include "Luau/Common.h"
 #include "Luau/CodeAllocator.h"
 #include "Luau/CodeBlockUnwind.h"
+#include "Luau/IrAnalysis.h"
+#include "Luau/IrBuilder.h"
+#include "Luau/IrDump.h"
+#include "Luau/IrUtils.h"
+#include "Luau/OptimizeConstProp.h"
+#include "Luau/OptimizeFinalX64.h"
+
 #include "Luau/UnwindBuilder.h"
 #include "Luau/UnwindBuilderDwarf2.h"
 #include "Luau/UnwindBuilderWin.h"
 
+#include "Luau/AssemblyBuilderA64.h"
+#include "Luau/AssemblyBuilderX64.h"
+
 #include "CustomExecUtils.h"
+#include "NativeState.h"
+
+#include "CodeGenA64.h"
+#include "EmitCommonA64.h"
+#include "IrLoweringA64.h"
+
 #include "CodeGenX64.h"
 #include "EmitCommonX64.h"
 #include "EmitInstructionX64.h"
-#include "NativeState.h"
+#include "IrLoweringX64.h"
 
 #include "lapi.h"
 
+#include <algorithm>
 #include <memory>
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -27,379 +43,235 @@
 #endif
 #endif
 
+LUAU_FASTFLAGVARIABLE(DebugCodegenNoOpt, false)
+
 namespace Luau
 {
 namespace CodeGen
 {
 
-constexpr uint32_t kFunctionAlignment = 32;
-
-struct InstructionOutline
-{
-    int pcpos;
-    int length;
-};
-
-static void assembleHelpers(AssemblyBuilderX64& build, ModuleHelpers& helpers)
-{
-    if (build.logText)
-        build.logAppend("; exitContinueVm\n");
-    helpers.exitContinueVm = build.setLabel();
-    emitExit(build, /* continueInVm */ true);
-
-    if (build.logText)
-        build.logAppend("; exitNoContinueVm\n");
-    helpers.exitNoContinueVm = build.setLabel();
-    emitExit(build, /* continueInVm */ false);
-
-    if (build.logText)
-        build.logAppend("; continueCallInVm\n");
-    helpers.continueCallInVm = build.setLabel();
-    emitContinueCallInVm(build);
-}
-
-static int emitInst(AssemblyBuilderX64& build, NativeState& data, ModuleHelpers& helpers, Proto* proto, LuauOpcode op, const Instruction* pc, int i,
-    Label* labelarr, Label& next, Label& fallback)
-{
-    int skip = 0;
-
-    switch (op)
-    {
-    case LOP_NOP:
-        break;
-    case LOP_LOADNIL:
-        emitInstLoadNil(build, pc);
-        break;
-    case LOP_LOADB:
-        emitInstLoadB(build, pc, i, labelarr);
-        break;
-    case LOP_LOADN:
-        emitInstLoadN(build, pc);
-        break;
-    case LOP_LOADK:
-        emitInstLoadK(build, pc);
-        break;
-    case LOP_LOADKX:
-        emitInstLoadKX(build, pc);
-        break;
-    case LOP_MOVE:
-        emitInstMove(build, pc);
-        break;
-    case LOP_GETGLOBAL:
-        emitInstGetGlobal(build, pc, i, fallback);
-        break;
-    case LOP_SETGLOBAL:
-        emitInstSetGlobal(build, pc, i, next, fallback);
-        break;
-    case LOP_CALL:
-        emitInstCall(build, helpers, pc, i);
-        break;
-    case LOP_RETURN:
-        emitInstReturn(build, helpers, pc, i);
-        break;
-    case LOP_GETTABLE:
-        emitInstGetTable(build, pc, fallback);
-        break;
-    case LOP_SETTABLE:
-        emitInstSetTable(build, pc, next, fallback);
-        break;
-    case LOP_GETTABLEKS:
-        emitInstGetTableKS(build, pc, i, fallback);
-        break;
-    case LOP_SETTABLEKS:
-        emitInstSetTableKS(build, pc, i, next, fallback);
-        break;
-    case LOP_GETTABLEN:
-        emitInstGetTableN(build, pc, fallback);
-        break;
-    case LOP_SETTABLEN:
-        emitInstSetTableN(build, pc, next, fallback);
-        break;
-    case LOP_JUMP:
-        emitInstJump(build, pc, i, labelarr);
-        break;
-    case LOP_JUMPBACK:
-        emitInstJumpBack(build, pc, i, labelarr);
-        break;
-    case LOP_JUMPIF:
-        emitInstJumpIf(build, pc, i, labelarr, /* not_ */ false);
-        break;
-    case LOP_JUMPIFNOT:
-        emitInstJumpIf(build, pc, i, labelarr, /* not_ */ true);
-        break;
-    case LOP_JUMPIFEQ:
-        emitInstJumpIfEq(build, pc, i, labelarr, /* not_ */ false, fallback);
-        break;
-    case LOP_JUMPIFLE:
-        emitInstJumpIfCond(build, pc, i, labelarr, ConditionX64::LessEqual, fallback);
-        break;
-    case LOP_JUMPIFLT:
-        emitInstJumpIfCond(build, pc, i, labelarr, ConditionX64::Less, fallback);
-        break;
-    case LOP_JUMPIFNOTEQ:
-        emitInstJumpIfEq(build, pc, i, labelarr, /* not_ */ true, fallback);
-        break;
-    case LOP_JUMPIFNOTLE:
-        emitInstJumpIfCond(build, pc, i, labelarr, ConditionX64::NotLessEqual, fallback);
-        break;
-    case LOP_JUMPIFNOTLT:
-        emitInstJumpIfCond(build, pc, i, labelarr, ConditionX64::NotLess, fallback);
-        break;
-    case LOP_JUMPX:
-        emitInstJumpX(build, pc, i, labelarr);
-        break;
-    case LOP_JUMPXEQKNIL:
-        emitInstJumpxEqNil(build, pc, i, labelarr);
-        break;
-    case LOP_JUMPXEQKB:
-        emitInstJumpxEqB(build, pc, i, labelarr);
-        break;
-    case LOP_JUMPXEQKN:
-        emitInstJumpxEqN(build, pc, proto->k, i, labelarr);
-        break;
-    case LOP_JUMPXEQKS:
-        emitInstJumpxEqS(build, pc, i, labelarr);
-        break;
-    case LOP_ADD:
-        emitInstBinary(build, pc, TM_ADD, fallback);
-        break;
-    case LOP_SUB:
-        emitInstBinary(build, pc, TM_SUB, fallback);
-        break;
-    case LOP_MUL:
-        emitInstBinary(build, pc, TM_MUL, fallback);
-        break;
-    case LOP_DIV:
-        emitInstBinary(build, pc, TM_DIV, fallback);
-        break;
-    case LOP_MOD:
-        emitInstBinary(build, pc, TM_MOD, fallback);
-        break;
-    case LOP_POW:
-        emitInstBinary(build, pc, TM_POW, fallback);
-        break;
-    case LOP_ADDK:
-        emitInstBinaryK(build, pc, TM_ADD, fallback);
-        break;
-    case LOP_SUBK:
-        emitInstBinaryK(build, pc, TM_SUB, fallback);
-        break;
-    case LOP_MULK:
-        emitInstBinaryK(build, pc, TM_MUL, fallback);
-        break;
-    case LOP_DIVK:
-        emitInstBinaryK(build, pc, TM_DIV, fallback);
-        break;
-    case LOP_MODK:
-        emitInstBinaryK(build, pc, TM_MOD, fallback);
-        break;
-    case LOP_POWK:
-        emitInstPowK(build, pc, proto->k, fallback);
-        break;
-    case LOP_NOT:
-        emitInstNot(build, pc);
-        break;
-    case LOP_MINUS:
-        emitInstMinus(build, pc, fallback);
-        break;
-    case LOP_LENGTH:
-        emitInstLength(build, pc, fallback);
-        break;
-    case LOP_NEWTABLE:
-        emitInstNewTable(build, pc, i, next);
-        break;
-    case LOP_DUPTABLE:
-        emitInstDupTable(build, pc, i, next);
-        break;
-    case LOP_SETLIST:
-        emitInstSetList(build, pc, next);
-        break;
-    case LOP_GETUPVAL:
-        emitInstGetUpval(build, pc);
-        break;
-    case LOP_SETUPVAL:
-        emitInstSetUpval(build, pc, next);
-        break;
-    case LOP_CLOSEUPVALS:
-        emitInstCloseUpvals(build, pc, next);
-        break;
-    case LOP_FASTCALL:
-        // We want to lower next instruction at skip+2, but this instruction is only 1 long, so we need to add 1
-        skip = emitInstFastCall(build, pc, i, next) + 1;
-        break;
-    case LOP_FASTCALL1:
-        // We want to lower next instruction at skip+2, but this instruction is only 1 long, so we need to add 1
-        skip = emitInstFastCall1(build, pc, i, next) + 1;
-        break;
-    case LOP_FASTCALL2:
-        skip = emitInstFastCall2(build, pc, i, next);
-        break;
-    case LOP_FASTCALL2K:
-        skip = emitInstFastCall2K(build, pc, i, next);
-        break;
-    case LOP_FORNPREP:
-        emitInstForNPrep(build, pc, i, labelarr[i + 1 + LUAU_INSN_D(*pc)]);
-        break;
-    case LOP_FORNLOOP:
-        emitInstForNLoop(build, pc, i, labelarr[i + 1 + LUAU_INSN_D(*pc)]);
-        break;
-    case LOP_FORGLOOP:
-        emitinstForGLoop(build, pc, i, labelarr[i + 1 + LUAU_INSN_D(*pc)], next, fallback);
-        break;
-    case LOP_FORGPREP_NEXT:
-        emitInstForGPrepNext(build, pc, labelarr[i + 1 + LUAU_INSN_D(*pc)], fallback);
-        break;
-    case LOP_FORGPREP_INEXT:
-        emitInstForGPrepInext(build, pc, labelarr[i + 1 + LUAU_INSN_D(*pc)], fallback);
-        break;
-    case LOP_AND:
-        emitInstAnd(build, pc);
-        break;
-    case LOP_ANDK:
-        emitInstAndK(build, pc);
-        break;
-    case LOP_OR:
-        emitInstOr(build, pc);
-        break;
-    case LOP_ORK:
-        emitInstOrK(build, pc);
-        break;
-    case LOP_GETIMPORT:
-        emitInstGetImport(build, pc, fallback);
-        break;
-    case LOP_CONCAT:
-        emitInstConcat(build, pc, i, next);
-        break;
-    default:
-        emitFallback(build, data, op, i);
-        break;
-    }
-
-    return skip;
-}
-
-static void emitInstFallback(AssemblyBuilderX64& build, NativeState& data, LuauOpcode op, const Instruction* pc, int i, Label* labelarr)
-{
-    switch (op)
-    {
-    case LOP_GETIMPORT:
-        emitSetSavedPc(build, i + 1);
-        emitInstGetImportFallback(build, LUAU_INSN_A(*pc), pc[1]);
-        break;
-    case LOP_GETTABLE:
-        emitInstGetTableFallback(build, pc, i);
-        break;
-    case LOP_SETTABLE:
-        emitInstSetTableFallback(build, pc, i);
-        break;
-    case LOP_GETTABLEN:
-        emitInstGetTableNFallback(build, pc, i);
-        break;
-    case LOP_SETTABLEN:
-        emitInstSetTableNFallback(build, pc, i);
-        break;
-    case LOP_JUMPIFEQ:
-        emitInstJumpIfEqFallback(build, pc, i, labelarr, /* not_ */ false);
-        break;
-    case LOP_JUMPIFLE:
-        emitInstJumpIfCondFallback(build, pc, i, labelarr, ConditionX64::LessEqual);
-        break;
-    case LOP_JUMPIFLT:
-        emitInstJumpIfCondFallback(build, pc, i, labelarr, ConditionX64::Less);
-        break;
-    case LOP_JUMPIFNOTEQ:
-        emitInstJumpIfEqFallback(build, pc, i, labelarr, /* not_ */ true);
-        break;
-    case LOP_JUMPIFNOTLE:
-        emitInstJumpIfCondFallback(build, pc, i, labelarr, ConditionX64::NotLessEqual);
-        break;
-    case LOP_JUMPIFNOTLT:
-        emitInstJumpIfCondFallback(build, pc, i, labelarr, ConditionX64::NotLess);
-        break;
-    case LOP_ADD:
-        emitInstBinaryFallback(build, pc, i, TM_ADD);
-        break;
-    case LOP_SUB:
-        emitInstBinaryFallback(build, pc, i, TM_SUB);
-        break;
-    case LOP_MUL:
-        emitInstBinaryFallback(build, pc, i, TM_MUL);
-        break;
-    case LOP_DIV:
-        emitInstBinaryFallback(build, pc, i, TM_DIV);
-        break;
-    case LOP_MOD:
-        emitInstBinaryFallback(build, pc, i, TM_MOD);
-        break;
-    case LOP_POW:
-        emitInstBinaryFallback(build, pc, i, TM_POW);
-        break;
-    case LOP_ADDK:
-        emitInstBinaryKFallback(build, pc, i, TM_ADD);
-        break;
-    case LOP_SUBK:
-        emitInstBinaryKFallback(build, pc, i, TM_SUB);
-        break;
-    case LOP_MULK:
-        emitInstBinaryKFallback(build, pc, i, TM_MUL);
-        break;
-    case LOP_DIVK:
-        emitInstBinaryKFallback(build, pc, i, TM_DIV);
-        break;
-    case LOP_MODK:
-        emitInstBinaryKFallback(build, pc, i, TM_MOD);
-        break;
-    case LOP_POWK:
-        emitInstBinaryKFallback(build, pc, i, TM_POW);
-        break;
-    case LOP_MINUS:
-        emitInstMinusFallback(build, pc, i);
-        break;
-    case LOP_LENGTH:
-        emitInstLengthFallback(build, pc, i);
-        break;
-    case LOP_FORGLOOP:
-        emitinstForGLoopFallback(build, pc, i, labelarr[i + 1 + LUAU_INSN_D(*pc)]);
-        break;
-    case LOP_FORGPREP_NEXT:
-    case LOP_FORGPREP_INEXT:
-        emitInstForGPrepXnextFallback(build, pc, i, labelarr[i + 1 + LUAU_INSN_D(*pc)]);
-        break;
-    case LOP_GETGLOBAL:
-        // TODO: luaV_gettable + cachedslot update instead of full fallback
-        emitFallback(build, data, op, i);
-        break;
-    case LOP_SETGLOBAL:
-        // TODO: luaV_settable + cachedslot update instead of full fallback
-        emitFallback(build, data, op, i);
-        break;
-    case LOP_GETTABLEKS:
-        // Full fallback required for LOP_GETTABLEKS because 'luaV_gettable' doesn't handle builtin vector field access
-        // It is also required to perform cached slot update
-        // TODO: extra fast-paths could be lowered before the full fallback
-        emitFallback(build, data, op, i);
-        break;
-    case LOP_SETTABLEKS:
-        // TODO: luaV_settable + cachedslot update instead of full fallback
-        emitFallback(build, data, op, i);
-        break;
-    default:
-        LUAU_ASSERT(!"Expected fallback for instruction");
-    }
-}
-
-static NativeProto* assembleFunction(AssemblyBuilderX64& build, NativeState& data, ModuleHelpers& helpers, Proto* proto, AssemblyOptions options)
+static NativeProto* createNativeProto(Proto* proto, const IrBuilder& ir)
 {
     NativeProto* result = new NativeProto();
 
     result->proto = proto;
+    result->instTargets = new uintptr_t[proto->sizecode];
 
-    if (build.logText)
+    for (int i = 0; i < proto->sizecode; i++)
+    {
+        auto [irLocation, asmLocation] = ir.function.bcMapping[i];
+
+        result->instTargets[i] = irLocation == ~0u ? 0 : asmLocation;
+    }
+
+    return result;
+}
+
+template<typename AssemblyBuilder, typename IrLowering>
+static void lowerImpl(AssemblyBuilder& build, IrLowering& lowering, IrFunction& function, int bytecodeid, AssemblyOptions options)
+{
+    // While we will need a better block ordering in the future, right now we want to mostly preserve build order with fallbacks outlined
+    std::vector<uint32_t> sortedBlocks;
+    sortedBlocks.reserve(function.blocks.size());
+    for (uint32_t i = 0; i < function.blocks.size(); i++)
+        sortedBlocks.push_back(i);
+
+    std::sort(sortedBlocks.begin(), sortedBlocks.end(), [&](uint32_t idxA, uint32_t idxB) {
+        const IrBlock& a = function.blocks[idxA];
+        const IrBlock& b = function.blocks[idxB];
+
+        // Place fallback blocks at the end
+        if ((a.kind == IrBlockKind::Fallback) != (b.kind == IrBlockKind::Fallback))
+            return (a.kind == IrBlockKind::Fallback) < (b.kind == IrBlockKind::Fallback);
+
+        // Try to order by instruction order
+        return a.start < b.start;
+    });
+
+    DenseHashMap<uint32_t, uint32_t> bcLocations{~0u};
+
+    // Create keys for IR assembly locations that original bytecode instruction are interested in
+    for (const auto& [irLocation, asmLocation] : function.bcMapping)
+    {
+        if (irLocation != ~0u)
+            bcLocations[irLocation] = 0;
+    }
+
+    DenseHashMap<uint32_t, uint32_t> indexIrToBc{~0u};
+    bool outputEnabled = options.includeAssembly || options.includeIr;
+
+    if (outputEnabled && options.annotator)
+    {
+        // Create reverse mapping from IR location to bytecode location
+        for (size_t i = 0; i < function.bcMapping.size(); ++i)
+        {
+            uint32_t irLocation = function.bcMapping[i].irLocation;
+
+            if (irLocation != ~0u)
+                indexIrToBc[irLocation] = uint32_t(i);
+        }
+    }
+
+    IrToStringContext ctx{build.text, function.blocks, function.constants, function.cfg};
+
+    // We use this to skip outlined fallback blocks from IR/asm text output
+    size_t textSize = build.text.length();
+    uint32_t codeSize = build.getCodeSize();
+    bool seenFallback = false;
+
+    IrBlock dummy;
+    dummy.start = ~0u;
+
+    for (size_t i = 0; i < sortedBlocks.size(); ++i)
+    {
+        uint32_t blockIndex = sortedBlocks[i];
+
+        IrBlock& block = function.blocks[blockIndex];
+
+        if (block.kind == IrBlockKind::Dead)
+            continue;
+
+        LUAU_ASSERT(block.start != ~0u);
+        LUAU_ASSERT(block.finish != ~0u);
+
+        // If we want to skip fallback code IR/asm, we'll record when those blocks start once we see them
+        if (block.kind == IrBlockKind::Fallback && !seenFallback)
+        {
+            textSize = build.text.length();
+            codeSize = build.getCodeSize();
+            seenFallback = true;
+        }
+
+        if (options.includeIr)
+        {
+            build.logAppend("# ");
+            toStringDetailed(ctx, block, blockIndex, /* includeUseInfo */ true);
+        }
+
+        build.setLabel(block.label);
+
+        for (uint32_t index = block.start; index <= block.finish; index++)
+        {
+            LUAU_ASSERT(index < function.instructions.size());
+
+            // If IR instruction is the first one for the original bytecode, we can annotate it with source code text
+            if (outputEnabled && options.annotator)
+            {
+                if (uint32_t* bcIndex = indexIrToBc.find(index))
+                    options.annotator(options.annotatorContext, build.text, bytecodeid, *bcIndex);
+            }
+
+            // If bytecode needs the location of this instruction for jumps, record it
+            if (uint32_t* bcLocation = bcLocations.find(index))
+            {
+                Label label = (index == block.start) ? block.label : build.setLabel();
+                *bcLocation = build.getLabelOffset(label);
+            }
+
+            IrInst& inst = function.instructions[index];
+
+            // Skip pseudo instructions, but make sure they are not used at this stage
+            // This also prevents them from getting into text output when that's enabled
+            if (isPseudo(inst.cmd))
+            {
+                LUAU_ASSERT(inst.useCount == 0);
+                continue;
+            }
+
+            if (options.includeIr)
+            {
+                build.logAppend("# ");
+                toStringDetailed(ctx, inst, index, /* includeUseInfo */ true);
+            }
+
+            IrBlock& next = i + 1 < sortedBlocks.size() ? function.blocks[sortedBlocks[i + 1]] : dummy;
+
+            lowering.lowerInst(inst, index, next);
+        }
+
+        if (options.includeIr)
+            build.logAppend("#\n");
+    }
+
+    if (outputEnabled && !options.includeOutlinedCode && seenFallback)
+    {
+        build.text.resize(textSize);
+
+        if (options.includeAssembly)
+            build.logAppend("; skipping %u bytes of outlined code\n", unsigned((build.getCodeSize() - codeSize) * sizeof(build.code[0])));
+    }
+
+    // Copy assembly locations of IR instructions that are mapped to bytecode instructions
+    for (auto& [irLocation, asmLocation] : function.bcMapping)
+    {
+        if (irLocation != ~0u)
+            asmLocation = bcLocations[irLocation];
+    }
+}
+
+[[maybe_unused]] static void lowerIr(
+    X64::AssemblyBuilderX64& build, IrBuilder& ir, NativeState& data, ModuleHelpers& helpers, Proto* proto, AssemblyOptions options)
+{
+    constexpr uint32_t kFunctionAlignment = 32;
+
+    optimizeMemoryOperandsX64(ir.function);
+
+    build.align(kFunctionAlignment, X64::AlignmentDataX64::Ud2);
+
+    X64::IrLoweringX64 lowering(build, helpers, data, ir.function);
+
+    lowerImpl(build, lowering, ir.function, proto->bytecodeid, options);
+}
+
+[[maybe_unused]] static void lowerIr(
+    A64::AssemblyBuilderA64& build, IrBuilder& ir, NativeState& data, ModuleHelpers& helpers, Proto* proto, AssemblyOptions options)
+{
+    if (A64::IrLoweringA64::canLower(ir.function))
+    {
+        A64::IrLoweringA64 lowering(build, helpers, data, proto, ir.function);
+
+        lowerImpl(build, lowering, ir.function, proto->bytecodeid, options);
+    }
+    else
+    {
+        // TODO: This is only needed while we don't support all IR opcodes
+        // When we can't translate some parts of the function, we instead encode a dummy assembly sequence that hands off control to VM
+        // In the future we could return nullptr from assembleFunction and handle it because there may be other reasons for why we refuse to assemble.
+        Label start = build.setLabel();
+
+        build.mov(A64::x0, 1); // finish function in VM
+        build.ldr(A64::x1, A64::mem(A64::rNativeContext, offsetof(NativeContext, gateExit)));
+        build.br(A64::x1);
+
+        for (int i = 0; i < proto->sizecode; i++)
+            ir.function.bcMapping[i].asmLocation = build.getLabelOffset(start);
+    }
+}
+
+template<typename AssemblyBuilder>
+static NativeProto* assembleFunction(AssemblyBuilder& build, NativeState& data, ModuleHelpers& helpers, Proto* proto, AssemblyOptions options)
+{
+    if (options.includeAssembly || options.includeIr)
     {
         if (proto->debugname)
-            build.logAppend("; function %s()", getstr(proto->debugname));
+            build.logAppend("; function %s(", getstr(proto->debugname));
         else
-            build.logAppend("; function()");
+            build.logAppend("; function(");
+
+        for (int i = 0; i < proto->numparams; i++)
+        {
+            LocVar* var = proto->locvars ? &proto->locvars[proto->sizelocvars - proto->numparams + i] : nullptr;
+
+            if (var && var->varname)
+                build.logAppend("%s%s", i == 0 ? "" : ", ", getstr(var->varname));
+            else
+                build.logAppend("%s$arg%d", i == 0 ? "" : ", ", i);
+        }
+
+        if (proto->numparams != 0 && proto->is_vararg)
+            build.logAppend(", ...)");
+        else
+            build.logAppend(")");
 
         if (proto->linedefined >= 0)
             build.logAppend(" line %d\n", proto->linedefined);
@@ -407,128 +279,22 @@ static NativeProto* assembleFunction(AssemblyBuilderX64& build, NativeState& dat
             build.logAppend("\n");
     }
 
-    std::vector<Label> instLabels;
-    instLabels.resize(proto->sizecode);
+    IrBuilder ir;
+    ir.buildFunctionIr(proto);
 
-    std::vector<Label> instFallbacks;
-    instFallbacks.resize(proto->sizecode);
+    computeCfgInfo(ir.function);
 
-    std::vector<InstructionOutline> instOutlines;
-    instOutlines.reserve(64);
-
-    build.align(kFunctionAlignment, AlignmentDataX64::Ud2);
-
-    Label start = build.setLabel();
-
-    for (int i = 0; i < proto->sizecode;)
+    if (!FFlag::DebugCodegenNoOpt)
     {
-        const Instruction* pc = &proto->code[i];
-        LuauOpcode op = LuauOpcode(LUAU_INSN_OP(*pc));
-
-        int nexti = i + getOpLength(op);
-        LUAU_ASSERT(nexti <= proto->sizecode);
-
-        build.setLabel(instLabels[i]);
-
-        if (options.annotator)
-            options.annotator(options.annotatorContext, build.text, proto->bytecodeid, i);
-
-        Label& next = nexti < proto->sizecode ? instLabels[nexti] : start; // Last instruction can't use 'next' label
-
-        int skip = emitInst(build, data, helpers, proto, op, pc, i, instLabels.data(), next, instFallbacks[i]);
-
-        if (skip != 0)
-            instOutlines.push_back({nexti, skip});
-
-        i = nexti + skip;
-        LUAU_ASSERT(i <= proto->sizecode);
+        constPropInBlockChains(ir);
     }
 
-    size_t textSize = build.text.size();
-    uint32_t codeSize = build.getCodeSize();
-
-    if (options.annotator && !options.skipOutlinedCode)
-        build.logAppend("; outlined instructions\n");
-
-    for (auto [pcpos, length] : instOutlines)
-    {
-        int i = pcpos;
-
-        while (i < pcpos + length)
-        {
-            const Instruction* pc = &proto->code[i];
-            LuauOpcode op = LuauOpcode(LUAU_INSN_OP(*pc));
-
-            int nexti = i + getOpLength(op);
-            LUAU_ASSERT(nexti <= proto->sizecode);
-
-            build.setLabel(instLabels[i]);
-
-            if (options.annotator && !options.skipOutlinedCode)
-                options.annotator(options.annotatorContext, build.text, proto->bytecodeid, i);
-
-            Label& next = nexti < proto->sizecode ? instLabels[nexti] : start; // Last instruction can't use 'next' label
-
-            int skip = emitInst(build, data, helpers, proto, op, pc, i, instLabels.data(), next, instFallbacks[i]);
-            LUAU_ASSERT(skip == 0);
-
-            i = nexti;
-        }
-
-        if (i < proto->sizecode)
-            build.jmp(instLabels[i]);
-    }
-
-    if (options.annotator && !options.skipOutlinedCode)
-        build.logAppend("; outlined code\n");
-
-    for (int i = 0, instid = 0; i < proto->sizecode; ++instid)
-    {
-        const Instruction* pc = &proto->code[i];
-        LuauOpcode op = LuauOpcode(LUAU_INSN_OP(*pc));
-
-        int nexti = i + getOpLength(op);
-        LUAU_ASSERT(nexti <= proto->sizecode);
-
-        if (instFallbacks[i].id == 0)
-        {
-            i = nexti;
-            continue;
-        }
-
-        if (options.annotator && !options.skipOutlinedCode)
-            options.annotator(options.annotatorContext, build.text, proto->bytecodeid, instid);
-
-        build.setLabel(instFallbacks[i]);
-
-        emitInstFallback(build, data, op, pc, i, instLabels.data());
-
-        // Jump back to the next instruction handler
-        if (nexti < proto->sizecode)
-            build.jmp(instLabels[nexti]);
-
-        i = nexti;
-    }
-
-    // Truncate assembly output if we don't care for outlined code part
-    if (options.skipOutlinedCode)
-    {
-        build.text.resize(textSize);
-
-        build.logAppend("; skipping %u bytes of outlined code\n", build.getCodeSize() - codeSize);
-    }
-
-    result->instTargets = new uintptr_t[proto->sizecode];
-
-    for (int i = 0; i < proto->sizecode; i++)
-        result->instTargets[i] = instLabels[i].location - start.location;
-
-    result->location = start.location;
+    lowerIr(build, ir, data, helpers, proto, options);
 
     if (build.logText)
         build.logAppend("\n");
 
-    return result;
+    return createNativeProto(proto, ir);
 }
 
 static void destroyNativeProto(NativeProto* nativeProto)
@@ -607,6 +373,9 @@ bool isSupported()
         return false;
 
     return true;
+#elif defined(__aarch64__)
+    // TODO: A64 codegen does not generate correct unwind info at the moment so it requires longjmp instead of C++ exceptions
+    return bool(LUA_USE_LONGJMP);
 #else
     return false;
 #endif
@@ -631,11 +400,19 @@ void create(lua_State* L)
     initFallbackTable(data);
     initHelperFunctions(data);
 
-    if (!x64::initEntryFunction(data))
+#if defined(__x86_64__) || defined(_M_X64)
+    if (!X64::initEntryFunction(data))
     {
         destroyNativeState(L);
         return;
     }
+#elif defined(__aarch64__)
+    if (!A64::initEntryFunction(data))
+    {
+        destroyNativeState(L);
+        return;
+    }
+#endif
 
     lua_ExecutionCallbacks* ecb = getExecutionCallbacks(L);
 
@@ -669,14 +446,23 @@ void compile(lua_State* L, int idx)
     if (!getNativeState(L))
         return;
 
-    AssemblyBuilderX64 build(/* logText= */ false);
+#if defined(__aarch64__)
+    A64::AssemblyBuilderA64 build(/* logText= */ false);
+#else
+    X64::AssemblyBuilderX64 build(/* logText= */ false);
+#endif
+
     NativeState* data = getNativeState(L);
 
     std::vector<Proto*> protos;
     gatherFunctions(protos, clvalue(func)->l.p);
 
     ModuleHelpers helpers;
-    assembleHelpers(build, helpers);
+#if defined(__aarch64__)
+    A64::assembleHelpers(build, helpers);
+#else
+    X64::assembleHelpers(build, helpers);
+#endif
 
     std::vector<NativeProto*> results;
     results.reserve(protos.size());
@@ -691,8 +477,8 @@ void compile(lua_State* L, int idx)
     uint8_t* nativeData = nullptr;
     size_t sizeNativeData = 0;
     uint8_t* codeStart = nullptr;
-    if (!data->codeAllocator.allocate(
-            build.data.data(), int(build.data.size()), build.code.data(), int(build.code.size()), nativeData, sizeNativeData, codeStart))
+    if (!data->codeAllocator.allocate(build.data.data(), int(build.data.size()), reinterpret_cast<const uint8_t*>(build.code.data()),
+            int(build.code.size() * sizeof(build.code[0])), nativeData, sizeNativeData, codeStart))
     {
         for (NativeProto* result : results)
             destroyNativeProto(result);
@@ -704,7 +490,7 @@ void compile(lua_State* L, int idx)
     for (NativeProto* result : results)
     {
         for (int i = 0; i < result->proto->sizecode; i++)
-            result->instTargets[i] += uintptr_t(codeStart + result->location);
+            result->instTargets[i] += uintptr_t(codeStart);
 
         LUAU_ASSERT(result->proto->sizecode);
         result->entryTarget = result->instTargets[0];
@@ -720,7 +506,11 @@ std::string getAssembly(lua_State* L, int idx, AssemblyOptions options)
     LUAU_ASSERT(lua_isLfunction(L, idx));
     const TValue* func = luaA_toobject(L, idx);
 
-    AssemblyBuilderX64 build(/* logText= */ !options.outputBinary);
+#if defined(__aarch64__)
+    A64::AssemblyBuilderA64 build(/* logText= */ options.includeAssembly);
+#else
+    X64::AssemblyBuilderX64 build(/* logText= */ options.includeAssembly);
+#endif
 
     NativeState data;
     initFallbackTable(data);
@@ -729,7 +519,11 @@ std::string getAssembly(lua_State* L, int idx, AssemblyOptions options)
     gatherFunctions(protos, clvalue(func)->l.p);
 
     ModuleHelpers helpers;
-    assembleHelpers(build, helpers);
+#if defined(__aarch64__)
+    A64::assembleHelpers(build, helpers);
+#else
+    X64::assembleHelpers(build, helpers);
+#endif
 
     for (Proto* p : protos)
         if (p)
@@ -741,7 +535,8 @@ std::string getAssembly(lua_State* L, int idx, AssemblyOptions options)
     build.finalize();
 
     if (options.outputBinary)
-        return std::string(build.code.begin(), build.code.end()) + std::string(build.data.begin(), build.data.end());
+        return std::string(reinterpret_cast<const char*>(build.code.data()), reinterpret_cast<const char*>(build.code.data() + build.code.size())) +
+               std::string(build.data.begin(), build.data.end());
     else
         return build.text;
 }

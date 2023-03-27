@@ -342,8 +342,6 @@ TEST_CASE_FIXTURE(Fixture, "weird_fail_to_unify_variadic_pack")
 // Belongs in TypeInfer.builtins.test.cpp.
 TEST_CASE_FIXTURE(BuiltinsFixture, "pcall_returns_at_least_two_value_but_function_returns_nothing")
 {
-    ScopedFastFlag sff{"LuauBetterMessagingOnCountMismatch", true};
-
     CheckResult result = check(R"(
         local function f(): () end
         local ok, res = pcall(f)
@@ -456,7 +454,7 @@ TEST_CASE_FIXTURE(Fixture, "dcr_can_partially_dispatch_a_constraint")
     //
     //     (*blocked*) -> () <: (number) -> (b...)
     //
-    // We solve this by searching both types for BlockedTypeVars and block the
+    // We solve this by searching both types for BlockedTypes and block the
     // constraint on any we find.  It also gets the job done, but I'm worried
     // about the efficiency of doing so many deep type traversals and it may
     // make us more prone to getting stuck on constraint cycles.
@@ -472,25 +470,29 @@ TEST_CASE_FIXTURE(Fixture, "dcr_can_partially_dispatch_a_constraint")
 
 TEST_CASE_FIXTURE(Fixture, "free_options_cannot_be_unified_together")
 {
-    TypeArena arena;
-    TypeId nilType = singletonTypes->nilType;
+    ScopedFastFlag sff[] = {
+        {"LuauTransitiveSubtyping", true},
+    };
 
-    std::unique_ptr scope = std::make_unique<Scope>(singletonTypes->anyTypePack);
+    TypeArena arena;
+    TypeId nilType = builtinTypes->nilType;
+
+    std::unique_ptr scope = std::make_unique<Scope>(builtinTypes->anyTypePack);
 
     TypeId free1 = arena.addType(FreeTypePack{scope.get()});
-    TypeId option1 = arena.addType(UnionTypeVar{{nilType, free1}});
+    TypeId option1 = arena.addType(UnionType{{nilType, free1}});
 
     TypeId free2 = arena.addType(FreeTypePack{scope.get()});
-    TypeId option2 = arena.addType(UnionTypeVar{{nilType, free2}});
+    TypeId option2 = arena.addType(UnionType{{nilType, free2}});
 
     InternalErrorReporter iceHandler;
     UnifierSharedState sharedState{&iceHandler};
-    Normalizer normalizer{&arena, singletonTypes, NotNull{&sharedState}};
+    Normalizer normalizer{&arena, builtinTypes, NotNull{&sharedState}};
     Unifier u{NotNull{&normalizer}, Mode::Strict, NotNull{scope.get()}, Location{}, Variance::Covariant};
 
     u.tryUnify(option1, option2);
 
-    CHECK(u.errors.empty());
+    CHECK(!u.failure);
 
     u.log.commit();
 
@@ -548,9 +550,12 @@ return wrapStrictTable(Constants, "Constants")
     ModulePtr m = frontend.moduleResolver.modules["game/B"];
     REQUIRE(m);
 
-    std::optional<TypeId> result = first(m->getModuleScope()->returnType);
+    std::optional<TypeId> result = first(m->returnType);
     REQUIRE(result);
-    CHECK(get<AnyTypeVar>(*result));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK_EQ("(any?) & ~table", toString(*result));
+    else
+        CHECK_MESSAGE(get<AnyType>(*result), *result);
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "generic_type_leak_to_module_interface_variadic")
@@ -587,31 +592,9 @@ return wrapStrictTable(Constants, "Constants")
     ModulePtr m = frontend.moduleResolver.modules["game/B"];
     REQUIRE(m);
 
-    std::optional<TypeId> result = first(m->getModuleScope()->returnType);
+    std::optional<TypeId> result = first(m->returnType);
     REQUIRE(result);
-    CHECK(get<AnyTypeVar>(*result));
-}
-
-// We need a simplification step to make this do the right thing. ("normalization-lite")
-TEST_CASE_FIXTURE(BuiltinsFixture, "table_insert_with_a_singleton_argument")
-{
-    CheckResult result = check(R"(
-        local function foo(t, x)
-            if x == "hi" or x == "bye" then
-                table.insert(t, x)
-            end
-
-            return t
-        end
-
-        local t = foo({}, "hi")
-        table.insert(t, "totally_unrelated_type" :: "totally_unrelated_type")
-    )");
-
-    LUAU_REQUIRE_NO_ERRORS(result);
-
-    // We'd really like for this to be {string}
-    CHECK_EQ("{string | string}", toString(requireType("t")));
+    CHECK(get<AnyType>(*result));
 }
 
 namespace
@@ -620,7 +603,13 @@ struct IsSubtypeFixture : Fixture
 {
     bool isSubtype(TypeId a, TypeId b)
     {
-        return ::Luau::isSubtype(a, b, NotNull{getMainModule()->getModuleScope().get()}, singletonTypes, ice);
+        ModulePtr module = getMainModule();
+        REQUIRE(module);
+
+        if (!module->hasModuleScope())
+            FAIL("isSubtype: module scope data is not available");
+
+        return ::Luau::isSubtype(a, b, NotNull{module->getModuleScope().get()}, builtinTypes, ice);
     }
 };
 } // namespace
@@ -803,6 +792,32 @@ caused by:
 caused by:
   Property 'x' is not compatible. Type 'number?' could not be converted into 'number')",
             toString(result.errors[0]));
+    }
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "table_insert_with_a_singleton_argument")
+{
+    CheckResult result = check(R"(
+        local function foo(t, x)
+            if x == "hi" or x == "bye" then
+                table.insert(t, x)
+            end
+
+            return t
+        end
+
+        local t = foo({}, "hi")
+        table.insert(t, "totally_unrelated_type" :: "totally_unrelated_type")
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK_EQ("{string}", toString(requireType("t")));
+    else
+    {
+        // We'd really like for this to be {string}
+        CHECK_EQ("{string | string}", toString(requireType("t")));
     }
 }
 

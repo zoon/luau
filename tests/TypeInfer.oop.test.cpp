@@ -4,8 +4,8 @@
 #include "Luau/BuiltinDefinitions.h"
 #include "Luau/Scope.h"
 #include "Luau/TypeInfer.h"
-#include "Luau/TypeVar.h"
-#include "Luau/VisitTypeVar.h"
+#include "Luau/Type.h"
+#include "Luau/VisitType.h"
 
 #include "Fixture.h"
 
@@ -93,8 +93,8 @@ TEST_CASE_FIXTURE(Fixture, "methods_are_topologically_sorted")
     LUAU_REQUIRE_NO_ERRORS(result);
     dumpErrors(result);
 
-    CHECK_EQ(PrimitiveTypeVar::Number, getPrimitiveType(requireType("a")));
-    CHECK_EQ(PrimitiveTypeVar::String, getPrimitiveType(requireType("b")));
+    CHECK_EQ(PrimitiveType::Number, getPrimitiveType(requireType("a")));
+    CHECK_EQ(PrimitiveType::String, getPrimitiveType(requireType("b")));
 }
 
 TEST_CASE_FIXTURE(Fixture, "quantify_methods_defined_using_dot_syntax_and_explicit_self_parameter")
@@ -139,7 +139,7 @@ TEST_CASE_FIXTURE(Fixture, "inferring_hundreds_of_self_calls_should_not_suffocat
     )");
 
     ModulePtr module = getMainModule();
-    CHECK_GE(50, module->internalTypes.typeVars.size());
+    CHECK_GE(50, module->internalTypes.types.size());
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "object_constructor_can_refer_to_method_of_self")
@@ -270,6 +270,115 @@ end
 )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "set_prop_of_intersection_containing_metatable")
+{
+    CheckResult result = check(R"(
+        export type Set<T> = typeof(setmetatable(
+            {} :: {
+                add: (self: Set<T>, T) -> Set<T>,
+            },
+            {}
+        ))
+
+        local Set = {} :: Set<any> & {}
+
+        function Set:add(t)
+            return self
+        end
+    )");
+}
+
+// DCR once had a bug in the following code where it would erroneously bind the 'self' table to itself.
+TEST_CASE_FIXTURE(Fixture, "dont_bind_free_tables_to_themselves")
+{
+    CheckResult result = check(R"(
+        local T = {}
+        local b: any
+
+        function T:m()
+            local a = b[i]
+            if a then
+                self:n()
+                if self:p(a) then
+                    self:n()
+                end
+            end
+        end
+    )");
+}
+
+// We should probably flag an error on this.  See CLI-68672
+TEST_CASE_FIXTURE(BuiltinsFixture, "flag_when_index_metamethod_returns_0_values")
+{
+    CheckResult result = check(R"(
+        local T = {}
+        function T.__index()
+        end
+
+        local a = setmetatable({}, T)
+        local p = a.prop
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    CHECK("nil" == toString(requireType("p")));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "augmenting_an_unsealed_table_with_a_metatable")
+{
+    CheckResult result = check(R"(
+        local A = {number = 8}
+
+        local B = setmetatable({}, A)
+
+        function B:method()
+            return "hello!!"
+        end
+    )");
+
+    CHECK("{ @metatable { number: number }, { method: <a>(a) -> string } }" == toString(requireType("B"), {true}));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "react_style_oo")
+{
+    CheckResult result = check(R"(
+        local Prototype = {}
+
+        local ClassMetatable = {
+            __index = Prototype
+        }
+
+        local BaseClass = (setmetatable({}, ClassMetatable))
+
+        function BaseClass:extend(name)
+            local class = {
+                name=name
+            }
+
+            class.__index = class
+
+            function class.ctor(props)
+                return setmetatable({props=props}, class)
+            end
+
+            return setmetatable(class, getmetatable(self))
+        end
+
+        local C = BaseClass:extend('C')
+        local i = C.ctor({hello='world'})
+
+        local iName = i.name
+        local cName = C.name
+        local hello = i.props.hello
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    CHECK("string" == toString(requireType("iName")));
+    CHECK("string" == toString(requireType("cName")));
+    CHECK("string" == toString(requireType("hello")));
 }
 
 TEST_SUITE_END();

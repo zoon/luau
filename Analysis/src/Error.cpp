@@ -131,9 +131,9 @@ struct ErrorConverter
     std::string operator()(const Luau::UnknownProperty& e) const
     {
         TypeId t = follow(e.table);
-        if (get<TableTypeVar>(t))
+        if (get<TableType>(t))
             return "Key '" + e.key + "' not found in table '" + Luau::toString(t) + "'";
-        else if (get<ClassTypeVar>(t))
+        else if (get<ClassType>(t))
             return "Key '" + e.key + "' not found in class '" + Luau::toString(t) + "'";
         else
             return "Type '" + Luau::toString(e.table) + "' does not have key '" + e.key + "'";
@@ -301,7 +301,7 @@ struct ErrorConverter
         std::string s = "Key '" + e.key + "' not found in ";
 
         TypeId t = follow(e.table);
-        if (get<ClassTypeVar>(t))
+        if (get<ClassType>(t))
             s += "class";
         else
             s += "table";
@@ -952,14 +952,14 @@ void copyErrors(ErrorVec& errors, TypeArena& destArena)
         copyError(e, destArena, cloneState);
     };
 
-    LUAU_ASSERT(!destArena.typeVars.isFrozen());
+    LUAU_ASSERT(!destArena.types.isFrozen());
     LUAU_ASSERT(!destArena.typePacks.isFrozen());
 
     for (TypeError& error : errors)
         visit(visitErrorData, error.data);
 }
 
-void InternalErrorReporter::ice(const std::string& message, const Location& location)
+void InternalErrorReporter::ice(const std::string& message, const Location& location) const
 {
     InternalCompilerError error(message, moduleName, location);
 
@@ -969,7 +969,7 @@ void InternalErrorReporter::ice(const std::string& message, const Location& loca
     throw error;
 }
 
-void InternalErrorReporter::ice(const std::string& message)
+void InternalErrorReporter::ice(const std::string& message) const
 {
     InternalCompilerError error(message, moduleName);
 

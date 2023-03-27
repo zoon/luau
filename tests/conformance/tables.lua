@@ -578,6 +578,21 @@ do
   assert(#t2 == 6)
 end
 
+-- test boundary invariant in sparse arrays or various kinds
+do
+  local function obscuredalloc() return {} end
+
+  local bits = 16
+
+  for i = 1, 2^bits - 1 do
+      local t1 = obscuredalloc() -- to avoid NEWTABLE guessing correct size
+
+      for k = 1, bits do
+          t1[k] = if bit32.extract(i, k - 1) == 1 then true else nil
+      end
+  end
+end
+
 -- test table.unpack fastcall for rejecting large unpacks
 do
   local ok, res = pcall(function()
@@ -684,6 +699,20 @@ do
   assert(pcall(table.find, {}, 42, 0) == false)
 
   assert(pcall(table.clear, table.freeze({})) == false)
+end
+
+-- check that namecall lookup doesn't give up on entries missing from cached slot position
+do
+  for i = 1,10 do
+    local t = setmetatable({}, { __index = { foo = 1 }})
+
+    assert(t.foo == 1)
+
+    t[-i] = 2
+    t.foo = function(t, i) return -i end
+
+    assert(t:foo(i) == -i)
+  end
 end
 
 return"OK"

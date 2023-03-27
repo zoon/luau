@@ -4,7 +4,7 @@
 #include "Luau/BuiltinDefinitions.h"
 #include "Luau/Scope.h"
 #include "Luau/TypeInfer.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 
 #include "Fixture.h"
 
@@ -12,6 +12,7 @@
 
 LUAU_FASTFLAG(LuauInstantiateInSubtyping)
 LUAU_FASTFLAG(LuauTypeMismatchInvarianceInError)
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
 
 using namespace Luau;
 
@@ -105,7 +106,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "require_types")
     REQUIRE(b != nullptr);
 
     TypeId hType = requireType(b, "h");
-    REQUIRE_MESSAGE(bool(get<TableTypeVar>(hType)), "Expected table but got " << toString(hType));
+    REQUIRE_MESSAGE(bool(get<TableType>(hType)), "Expected table but got " << toString(hType));
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "require_a_variadic_function")
@@ -128,7 +129,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "require_a_variadic_function")
 
     TypeId f = follow(requireType(bModule, "f"));
 
-    const FunctionTypeVar* ftv = get<FunctionTypeVar>(f);
+    const FunctionType* ftv = get<FunctionType>(f);
     REQUIRE(ftv);
 
     auto iter = begin(ftv->argTypes);
@@ -351,7 +352,7 @@ local arrayops = require(game.A)
 local tbl = {}
 tbl.a = 2
 function tbl:foo(b: number, c: number)
-    -- introduce BoundTypeVar to imported type
+    -- introduce BoundType to imported type
     arrayops.foo(self._regions)
 end
 -- this alias decreases function type level and causes a demotion of its type
@@ -376,7 +377,7 @@ local arrayops = require(game.A)
 local tbl = {}
 tbl.a = 2
 function tbl:foo(b: number, c: number)
-    -- introduce boundTo TableTypeVar to imported type
+    -- introduce boundTo TableType to imported type
     self.x.a = 2
     arrayops.foo(self.x)
 end
@@ -475,13 +476,42 @@ return l0
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "fuzz_anyify_variadic_return_must_follow")
 {
-    ScopedFastFlag luauTypeInferMissingFollows{"LuauTypeInferMissingFollows", true};
-
     CheckResult result = check(R"(
 return unpack(l0[_])
     )");
 
     LUAU_REQUIRE_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "check_imported_module_names")
+{
+    ScopedFastFlag sff{"LuauTinyControlFlowAnalysis", true};
+
+    fileResolver.source["game/A"] = R"(
+return function(...) end
+    )";
+
+    fileResolver.source["game/B"] = R"(
+local l0 = require(game.A)
+return l0
+    )";
+
+    CheckResult result = check(R"(
+local l0 = require(game.B)
+if true then
+    local l1 = require(game.A)
+end
+return l0
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    ModulePtr mod = getMainModule();
+    REQUIRE(mod);
+
+    REQUIRE(mod->scopes.size() == 4);
+    CHECK(mod->scopes[0].second->importedModules["l0"] == "game/B");
+    CHECK(mod->scopes[3].second->importedModules["l1"] == "game/A");
 }
 
 TEST_SUITE_END();

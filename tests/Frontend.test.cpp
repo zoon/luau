@@ -81,8 +81,8 @@ struct FrontendFixture : BuiltinsFixture
 {
     FrontendFixture()
     {
-        addGlobalBinding(frontend, "game", frontend.typeChecker.anyType, "@test");
-        addGlobalBinding(frontend, "script", frontend.typeChecker.anyType, "@test");
+        addGlobalBinding(frontend.globals, "game", builtinTypes->anyType, "@test");
+        addGlobalBinding(frontend.globals, "script", builtinTypes->anyType, "@test");
     }
 };
 
@@ -157,7 +157,7 @@ TEST_CASE_FIXTURE(FrontendFixture, "automatically_check_dependent_scripts")
     CHECK(bModule->errors.empty());
     Luau::dumpErrors(bModule);
 
-    auto bExports = first(bModule->getModuleScope()->returnType);
+    auto bExports = first(bModule->returnType);
     REQUIRE(!!bExports);
 
     CHECK_EQ("{| b_value: number |}", toString(*bExports));
@@ -243,13 +243,13 @@ TEST_CASE_FIXTURE(FrontendFixture, "nocheck_modules_are_typed")
     ModulePtr aModule = frontend.moduleResolver.modules["game/Gui/Modules/A"];
     REQUIRE(bool(aModule));
 
-    std::optional<TypeId> aExports = first(aModule->getModuleScope()->returnType);
+    std::optional<TypeId> aExports = first(aModule->returnType);
     REQUIRE(bool(aExports));
 
     ModulePtr bModule = frontend.moduleResolver.modules["game/Gui/Modules/B"];
     REQUIRE(bool(bModule));
 
-    std::optional<TypeId> bExports = first(bModule->getModuleScope()->returnType);
+    std::optional<TypeId> bExports = first(bModule->returnType);
     REQUIRE(bool(bExports));
 
     CHECK_EQ(toString(*aExports), toString(*bExports));
@@ -300,7 +300,7 @@ TEST_CASE_FIXTURE(FrontendFixture, "nocheck_cycle_used_by_checked")
     ModulePtr cModule = frontend.moduleResolver.modules["game/Gui/Modules/C"];
     REQUIRE(bool(cModule));
 
-    std::optional<TypeId> cExports = first(cModule->getModuleScope()->returnType);
+    std::optional<TypeId> cExports = first(cModule->returnType);
     REQUIRE(bool(cExports));
     CHECK_EQ("{| a: any, b: any |}", toString(*cExports));
 }
@@ -456,16 +456,16 @@ TEST_CASE_FIXTURE(FrontendFixture, "dont_reparse_clean_file_when_linting")
         end
     )";
 
-    frontend.check("Modules/A");
+    configResolver.defaultConfig.enabledLint.enableWarning(LintWarning::Code_ForRange);
+
+    lintModule("Modules/A");
 
     fileResolver.source["Modules/A"] = R"(
         -- We have fixed the lint error, but we did not tell the Frontend that the file is changed!
-        -- Therefore, we expect Frontend to reuse the parse tree.
+        -- Therefore, we expect Frontend to reuse the results from previous lint.
     )";
 
-    configResolver.defaultConfig.enabledLint.enableWarning(LintWarning::Code_ForRange);
-
-    LintResult lintResult = frontend.lint("Modules/A");
+    LintResult lintResult = lintModule("Modules/A");
 
     CHECK_EQ(1, lintResult.warnings.size());
 }
@@ -511,7 +511,7 @@ TEST_CASE_FIXTURE(FrontendFixture, "recheck_if_dependent_script_is_dirty")
     CHECK(bModule->errors.empty());
     Luau::dumpErrors(bModule);
 
-    auto bExports = first(bModule->getModuleScope()->returnType);
+    auto bExports = first(bModule->returnType);
     REQUIRE(!!bExports);
 
     CHECK_EQ("{| b_value: string |}", toString(*bExports));
@@ -760,23 +760,47 @@ TEST_CASE_FIXTURE(FrontendFixture, "test_lint_uses_correct_config")
 
     configResolver.configFiles["Module/A"].enabledLint.enableWarning(LintWarning::Code_ForRange);
 
-    auto result = frontend.lint("Module/A");
+    auto result = lintModule("Module/A");
     CHECK_EQ(1, result.warnings.size());
 
     configResolver.configFiles["Module/A"].enabledLint.disableWarning(LintWarning::Code_ForRange);
+    frontend.markDirty("Module/A");
 
-    auto result2 = frontend.lint("Module/A");
+    auto result2 = lintModule("Module/A");
     CHECK_EQ(0, result2.warnings.size());
 
     LintOptions overrideOptions;
 
     overrideOptions.enableWarning(LintWarning::Code_ForRange);
-    auto result3 = frontend.lint("Module/A", overrideOptions);
+    frontend.markDirty("Module/A");
+
+    auto result3 = lintModule("Module/A", overrideOptions);
     CHECK_EQ(1, result3.warnings.size());
 
     overrideOptions.disableWarning(LintWarning::Code_ForRange);
-    auto result4 = frontend.lint("Module/A", overrideOptions);
+    frontend.markDirty("Module/A");
+
+    auto result4 = lintModule("Module/A", overrideOptions);
     CHECK_EQ(0, result4.warnings.size());
+}
+
+TEST_CASE_FIXTURE(FrontendFixture, "lint_results_are_only_for_checked_module")
+{
+    fileResolver.source["Module/A"] = R"(
+local _ = 0b10000000000000000000000000000000000000000000000000000000000000000
+    )";
+
+    fileResolver.source["Module/B"] = R"(
+require(script.Parent.A)
+local _ = 0x10000000000000000
+    )";
+
+    LintResult lintResult = lintModule("Module/B");
+    CHECK_EQ(1, lintResult.warnings.size());
+
+    // Check cached result
+    lintResult = lintModule("Module/B");
+    CHECK_EQ(1, lintResult.warnings.size());
 }
 
 TEST_CASE_FIXTURE(FrontendFixture, "discard_type_graphs")
@@ -791,7 +815,7 @@ TEST_CASE_FIXTURE(FrontendFixture, "discard_type_graphs")
 
     ModulePtr module = fe.moduleResolver.getModule("Module/A");
 
-    CHECK_EQ(0, module->internalTypes.typeVars.size());
+    CHECK_EQ(0, module->internalTypes.types.size());
     CHECK_EQ(0, module->internalTypes.typePacks.size());
     CHECK_EQ(0, module->astTypes.size());
     CHECK_EQ(0, module->astResolvedTypes.size());
@@ -852,12 +876,12 @@ TEST_CASE_FIXTURE(FrontendFixture, "environments")
 {
     ScopePtr testScope = frontend.addEnvironment("test");
 
-    unfreeze(typeChecker.globalTypes);
-    loadDefinitionFile(typeChecker, testScope, R"(
+    unfreeze(frontend.globals.globalTypes);
+    loadDefinitionFile(frontend.typeChecker, frontend.globals, testScope, R"(
         export type Foo = number | string
     )",
-        "@test");
-    freeze(typeChecker.globalTypes);
+        "@test", /* captureComments */ false);
+    freeze(frontend.globals.globalTypes);
 
     fileResolver.source["A"] = R"(
         --!nonstrict

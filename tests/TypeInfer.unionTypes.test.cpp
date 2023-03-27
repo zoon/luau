@@ -1,6 +1,6 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/TypeInfer.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 
 #include "Fixture.h"
 
@@ -26,7 +26,7 @@ TEST_CASE_FIXTURE(Fixture, "return_types_can_be_disjoint")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    const FunctionTypeVar* utv = get<FunctionTypeVar>(requireType("most_of_the_natural_numbers"));
+    const FunctionType* utv = get<FunctionType>(requireType("most_of_the_natural_numbers"));
     REQUIRE(utv != nullptr);
 }
 
@@ -131,7 +131,7 @@ TEST_CASE_FIXTURE(Fixture, "index_on_a_union_type_with_property_guaranteed_to_ex
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
-    CHECK_EQ(*typeChecker.numberType, *requireType("r"));
+    CHECK_EQ(*builtinTypes->numberType, *requireType("r"));
 }
 
 TEST_CASE_FIXTURE(Fixture, "index_on_a_union_type_with_mixed_types")
@@ -196,7 +196,6 @@ TEST_CASE_FIXTURE(Fixture, "index_on_a_union_type_with_missing_property")
     REQUIRE(bTy);
     CHECK_EQ(mup->missing[0], *bTy);
     CHECK_EQ(mup->key, "x");
-
     CHECK_EQ("*error-type*", toString(requireType("r")));
 }
 
@@ -211,7 +210,7 @@ TEST_CASE_FIXTURE(Fixture, "index_on_a_union_type_with_one_property_of_type_any"
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
-    CHECK_EQ(*typeChecker.anyType, *requireType("r"));
+    CHECK_EQ(*builtinTypes->anyType, *requireType("r"));
 }
 
 TEST_CASE_FIXTURE(Fixture, "union_equality_comparisons")
@@ -245,7 +244,7 @@ local c = bf.a.y
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(*typeChecker.numberType, *requireType("c"));
+    CHECK_EQ(*builtinTypes->numberType, *requireType("c"));
     CHECK_EQ("Value of type 'A?' could be nil", toString(result.errors[0]));
 }
 
@@ -260,7 +259,7 @@ TEST_CASE_FIXTURE(Fixture, "optional_union_functions")
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(*typeChecker.numberType, *requireType("c"));
+    CHECK_EQ(*builtinTypes->numberType, *requireType("c"));
     CHECK_EQ("Value of type 'A?' could be nil", toString(result.errors[0]));
 }
 
@@ -275,7 +274,7 @@ local c = b:foo(1, 2)
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(*typeChecker.numberType, *requireType("c"));
+    CHECK_EQ(*builtinTypes->numberType, *requireType("c"));
     CHECK_EQ("Value of type 'A?' could be nil", toString(result.errors[0]));
 }
 
@@ -354,7 +353,11 @@ a.x = 2
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ("Value of type '({| x: number |} & {| y: number |})?' could be nil", toString(result.errors[0]));
+    auto s = toString(result.errors[0]);
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK_EQ("Value of type '{| x: number, y: number |}?' could be nil", s);
+    else
+        CHECK_EQ("Value of type '({| x: number |} & {| y: number |})?' could be nil", s);
 }
 
 TEST_CASE_FIXTURE(Fixture, "optional_length_error")
@@ -397,8 +400,6 @@ local e = a.z
 
 TEST_CASE_FIXTURE(Fixture, "optional_iteration")
 {
-    ScopedFastFlag luauNilIterator{"LuauNilIterator", true};
-
     CheckResult result = check(R"(
 function foo(values: {number}?)
     local s = 0
@@ -546,11 +547,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "table_union_write_indirect")
 
 TEST_CASE_FIXTURE(Fixture, "union_true_and_false")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x : boolean
         local y1 : (true | false) = x -- OK
@@ -564,11 +560,6 @@ TEST_CASE_FIXTURE(Fixture, "union_true_and_false")
 
 TEST_CASE_FIXTURE(Fixture, "union_of_functions")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x : (number) -> number?
         local y : ((number?) -> number?) | ((number) -> number) = x -- OK
@@ -601,11 +592,6 @@ TEST_CASE_FIXTURE(Fixture, "union_of_generic_typepack_functions")
 
 TEST_CASE_FIXTURE(Fixture, "union_of_functions_mentioning_generics")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
       function f<a,b>()
         local x : (a) -> a?
@@ -621,11 +607,6 @@ TEST_CASE_FIXTURE(Fixture, "union_of_functions_mentioning_generics")
 
 TEST_CASE_FIXTURE(Fixture, "union_of_functions_mentioning_generic_typepacks")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
       function f<a...>()
         local x : (number, a...) -> (number?, a...)
@@ -641,11 +622,6 @@ TEST_CASE_FIXTURE(Fixture, "union_of_functions_mentioning_generic_typepacks")
 
 TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_arg_arities")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x : (number) -> number?
         local y : ((number?) -> number) | ((number | string) -> nil) = x -- OK
@@ -659,11 +635,6 @@ TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_arg_arities")
 
 TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_result_arities")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x : () -> (number | string)
         local y : (() -> number) | (() -> string) = x -- OK
@@ -677,11 +648,6 @@ TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_result_arities")
 
 TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_variadics")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x : (...nil) -> (...number?)
         local y : ((...string?) -> (...number)) | ((...number?) -> nil) = x -- OK
@@ -695,11 +661,6 @@ TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_variadics")
 
 TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_arg_variadics")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x : (number) -> ()
         local y : ((number?) -> ()) | ((...number) -> ()) = x -- OK
@@ -713,11 +674,6 @@ TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_arg_variadics")
 
 TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_result_variadics")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauSubtypeNormalizer", true},
-        {"LuauTypeNormalization2", true},
-    };
-
     CheckResult result = check(R"(
         local x : () -> (number?, ...number)
         local y : (() -> (...number)) | (() -> nil) = x -- OK
@@ -760,6 +716,64 @@ TEST_CASE_FIXTURE(Fixture, "less_greedy_unification_with_union_types_2")
     LUAU_REQUIRE_NO_ERRORS(result);
 
     CHECK_EQ("({| x: number |} | {| x: string |}) -> number | string", toString(requireType("f")));
+}
+
+TEST_CASE_FIXTURE(Fixture, "union_table_any_property")
+{
+    CheckResult result = check(R"(
+        function f(x)
+            -- x : X
+            -- sup : { p : { q : X } }?
+            local sup = if true then { p = { q = x } } else nil
+            local sub : { p : any }
+            sup = nil
+            sup = sub
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "union_function_any_args")
+{
+    CheckResult result = check(R"(
+        local sup : ((...any) -> (...any))?
+        local sub : ((number) -> (...any))
+        sup = sub
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "optional_any")
+{
+    CheckResult result = check(R"(
+        local sup : any?
+        local sub : number
+        sup = sub
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "generic_function_with_optional_arg")
+{
+    ScopedFastFlag sff[] = {
+        {"LuauTransitiveSubtyping", true},
+    };
+
+    CheckResult result = check(R"(
+        function f<T>(x : T?) : {T}
+            local result = {}
+            if x then
+                result[1] = x
+            end
+            return result
+        end
+        local t : {string} = f(nil)
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
 }
 
 TEST_SUITE_END();

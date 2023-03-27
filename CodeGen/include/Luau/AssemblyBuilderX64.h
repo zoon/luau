@@ -14,6 +14,8 @@ namespace Luau
 {
 namespace CodeGen
 {
+namespace X64
+{
 
 enum class RoundingModeX64
 {
@@ -78,6 +80,7 @@ public:
 
     void test(OperandX64 lhs, OperandX64 rhs);
     void lea(OperandX64 lhs, OperandX64 rhs);
+    void setcc(ConditionX64 cond, OperandX64 op);
 
     void push(OperandX64 op);
     void pop(OperandX64 op);
@@ -107,7 +110,11 @@ public:
     void vmulsd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
     void vdivsd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
 
+    void vandpd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+    void vandnpd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+
     void vxorpd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+    void vorpd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
 
     void vucomisd(OperandX64 src1, OperandX64 src2);
 
@@ -129,6 +136,15 @@ public:
     void vmovaps(OperandX64 dst, OperandX64 src);
     void vmovupd(OperandX64 dst, OperandX64 src);
     void vmovups(OperandX64 dst, OperandX64 src);
+    void vmovq(OperandX64 lhs, OperandX64 rhs);
+
+    void vmaxsd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+    void vminsd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+
+    void vcmpltsd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+
+    void vblendvpd(RegisterX64 dst, RegisterX64 src1, OperandX64 mask, RegisterX64 src3);
+
 
     // Run final checks
     void finalize();
@@ -139,11 +155,19 @@ public:
     // Assigns label position to the current location
     void setLabel(Label& label);
 
+    // Extracts code offset (in bytes) from label
+    uint32_t getLabelOffset(const Label& label)
+    {
+        LUAU_ASSERT(label.location != ~0u);
+        return label.location;
+    }
+
     // Constant allocation (uses rip-relative addressing)
     OperandX64 i64(int64_t value);
     OperandX64 f32(float value);
     OperandX64 f64(double value);
     OperandX64 f32x4(float x, float y, float z, float w);
+    OperandX64 f64x2(double x, double y);
     OperandX64 bytes(const void* ptr, size_t size, size_t align = 8);
 
     void logAppend(const char* fmt, ...) LUAU_PRINTF_ATTR(2, 3);
@@ -182,8 +206,8 @@ private:
         const char* name, OperandX64 dst, OperandX64 src1, OperandX64 src2, uint8_t imm8, uint8_t code, bool setW, uint8_t mode, uint8_t prefix);
 
     // Instruction components
-    void placeRegAndModRegMem(OperandX64 lhs, OperandX64 rhs);
-    void placeModRegMem(OperandX64 rhs, uint8_t regop);
+    void placeRegAndModRegMem(OperandX64 lhs, OperandX64 rhs, int32_t extraCodeBytes = 0);
+    void placeModRegMem(OperandX64 rhs, uint8_t regop, int32_t extraCodeBytes = 0);
     void placeRex(RegisterX64 op);
     void placeRex(OperandX64 op);
     void placeRexNoW(OperandX64 op);
@@ -227,5 +251,6 @@ private:
     uint8_t* codeEnd = nullptr;
 };
 
+} // namespace X64
 } // namespace CodeGen
 } // namespace Luau

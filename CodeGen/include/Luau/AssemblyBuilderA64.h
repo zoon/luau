@@ -13,6 +13,8 @@ namespace Luau
 {
 namespace CodeGen
 {
+namespace A64
+{
 
 class AssemblyBuilderA64
 {
@@ -22,20 +24,24 @@ public:
 
     // Moves
     void mov(RegisterA64 dst, RegisterA64 src);
-    void mov(RegisterA64 dst, uint16_t src, int shift = 0);
+    void mov(RegisterA64 dst, int src); // macro
+
+    // Moves of 32-bit immediates get decomposed into one or more of these
+    void movz(RegisterA64 dst, uint16_t src, int shift = 0);
+    void movn(RegisterA64 dst, uint16_t src, int shift = 0);
     void movk(RegisterA64 dst, uint16_t src, int shift = 0);
 
     // Arithmetics
     void add(RegisterA64 dst, RegisterA64 src1, RegisterA64 src2, int shift = 0);
-    void add(RegisterA64 dst, RegisterA64 src1, int src2);
+    void add(RegisterA64 dst, RegisterA64 src1, uint16_t src2);
     void sub(RegisterA64 dst, RegisterA64 src1, RegisterA64 src2, int shift = 0);
-    void sub(RegisterA64 dst, RegisterA64 src1, int src2);
+    void sub(RegisterA64 dst, RegisterA64 src1, uint16_t src2);
     void neg(RegisterA64 dst, RegisterA64 src);
 
     // Comparisons
     // Note: some arithmetic instructions also have versions that update flags (ADDS etc) but we aren't using them atm
     void cmp(RegisterA64 src1, RegisterA64 src2);
-    void cmp(RegisterA64 src1, int src2);
+    void cmp(RegisterA64 src1, uint16_t src2);
 
     // Bitwise
     // Note: shifted-register support and bitfield operations are omitted for simplicity
@@ -61,11 +67,13 @@ public:
     void ldrsb(RegisterA64 dst, AddressA64 src);
     void ldrsh(RegisterA64 dst, AddressA64 src);
     void ldrsw(RegisterA64 dst, AddressA64 src);
+    void ldp(RegisterA64 dst1, RegisterA64 dst2, AddressA64 src);
 
     // Store
     void str(RegisterA64 src, AddressA64 dst);
     void strb(RegisterA64 src, AddressA64 dst);
     void strh(RegisterA64 src, AddressA64 dst);
+    void stp(RegisterA64 src1, RegisterA64 src2, AddressA64 dst);
 
     // Control flow
     // Note: tbz/tbnz are currently not supported because they have 15-bit offsets and we don't support branch thunks
@@ -82,6 +90,9 @@ public:
     void adr(RegisterA64 dst, uint64_t value);
     void adr(RegisterA64 dst, double value);
 
+    // Address of code (label)
+    void adr(RegisterA64 dst, Label& label);
+
     // Run final checks
     bool finalize();
 
@@ -90,6 +101,13 @@ public:
 
     // Assigns label position to the current location
     void setLabel(Label& label);
+
+    // Extracts code offset (in bytes) from label
+    uint32_t getLabelOffset(const Label& label)
+    {
+        LUAU_ASSERT(label.location != ~0u);
+        return label.location * 4;
+    }
 
     void logAppend(const char* fmt, ...) LUAU_PRINTF_ATTR(2, 3);
 
@@ -103,6 +121,9 @@ public:
     std::string text;
 
     const bool logText = false;
+
+    // Maximum immediate argument to functions like add/sub/cmp
+    static constexpr size_t kMaxImmediate = (1 << 12) - 1;
 
 private:
     // Instruction archetypes
@@ -118,6 +139,8 @@ private:
     void placeBCR(const char* name, Label& label, uint8_t op, RegisterA64 cond);
     void placeBR(const char* name, RegisterA64 src, uint32_t op);
     void placeADR(const char* name, RegisterA64 src, uint8_t op);
+    void placeADR(const char* name, RegisterA64 src, uint8_t op, Label& label);
+    void placeP(const char* name, RegisterA64 dst1, RegisterA64 dst2, AddressA64 src, uint8_t op, uint8_t size);
 
     void place(uint32_t word);
 
@@ -137,6 +160,7 @@ private:
     LUAU_NOINLINE void log(const char* opcode, RegisterA64 dst, RegisterA64 src);
     LUAU_NOINLINE void log(const char* opcode, RegisterA64 dst, int src, int shift = 0);
     LUAU_NOINLINE void log(const char* opcode, RegisterA64 dst, AddressA64 src);
+    LUAU_NOINLINE void log(const char* opcode, RegisterA64 dst1, RegisterA64 dst2, AddressA64 src);
     LUAU_NOINLINE void log(const char* opcode, RegisterA64 src, Label label);
     LUAU_NOINLINE void log(const char* opcode, RegisterA64 src);
     LUAU_NOINLINE void log(const char* opcode, Label label);
@@ -157,5 +181,6 @@ private:
     uint32_t* codeEnd = nullptr;
 };
 
+} // namespace A64
 } // namespace CodeGen
 } // namespace Luau

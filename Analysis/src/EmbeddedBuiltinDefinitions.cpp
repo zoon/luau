@@ -1,9 +1,6 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/BuiltinDefinitions.h"
 
-LUAU_FASTFLAG(LuauUnknownAndNeverType)
-LUAU_FASTFLAG(LuauOptionalNextKey)
-
 namespace Luau
 {
 
@@ -116,6 +113,7 @@ declare function typeof<T>(value: T): string
 
 -- `assert` has a magic function attached that will give more detailed type information
 declare function assert<T>(value: T, errorMessage: string?): T
+declare function error<T>(message: T, level: number?): never
 
 declare function tostring<T>(value: T): string
 declare function tonumber<T>(value: T, radix: number?): number?
@@ -127,7 +125,7 @@ declare function rawlen<K, V>(obj: {[K]: V} | string): number
 
 declare function setfenv<T..., R...>(target: number | (T...) -> R..., env: {[string]: any}): ((T...) -> R...)?
 
--- TODO: place ipairs definition here with removal of FFlagLuauOptionalNextKey
+declare function ipairs<V>(tab: {V}): (({V}, number) -> (number?, V), {V}, number)
 
 declare function pcall<A..., R...>(f: (A...) -> R..., ...: A...): (boolean, R...)
 
@@ -200,19 +198,7 @@ declare function unpack<V>(tab: {V}, i: number?, j: number?): ...V
 
 std::string getBuiltinDefinitionSource()
 {
-
     std::string result = kBuiltinDefinitionLuaSrc;
-
-    if (FFlag::LuauUnknownAndNeverType)
-        result += "declare function error<T>(message: T, level: number?): never\n";
-    else
-        result += "declare function error<T>(message: T, level: number?)\n";
-
-    if (FFlag::LuauOptionalNextKey)
-        result += "declare function ipairs<V>(tab: {V}): (({V}, number) -> (number?, V), {V}, number)\n";
-    else
-        result += "declare function ipairs<V>(tab: {V}): (({V}, number) -> (number, V), {V}, number)\n";
-
     return result;
 }
 

@@ -25,8 +25,7 @@ LUAU_FASTINTVARIABLE(LuauCompileInlineThreshold, 25)
 LUAU_FASTINTVARIABLE(LuauCompileInlineThresholdMaxBoost, 300)
 LUAU_FASTINTVARIABLE(LuauCompileInlineDepth, 5)
 
-LUAU_FASTFLAG(LuauInterpolatedStringBaseSupport)
-LUAU_FASTFLAGVARIABLE(LuauMultiAssignmentConflictFix, false)
+LUAU_FASTFLAGVARIABLE(LuauCompileBuiltinArity, false)
 
 namespace Luau
 {
@@ -135,14 +134,18 @@ struct Compiler
         return uint8_t(upvals.size() - 1);
     }
 
-    bool allPathsEndWithReturn(AstStat* node)
+    // true iff all execution paths through node subtree result in return/break/continue
+    // note: because this function doesn't visit loop nodes, it (correctly) only detects break/continue that refer to the outer control flow
+    bool alwaysTerminates(AstStat* node)
     {
         if (AstStatBlock* stat = node->as<AstStatBlock>())
-            return stat->body.size > 0 && allPathsEndWithReturn(stat->body.data[stat->body.size - 1]);
+            return stat->body.size > 0 && alwaysTerminates(stat->body.data[stat->body.size - 1]);
         else if (node->is<AstStatReturn>())
             return true;
+        else if (node->is<AstStatBreak>() || node->is<AstStatContinue>())
+            return true;
         else if (AstStatIf* stat = node->as<AstStatIf>())
-            return stat->elsebody && allPathsEndWithReturn(stat->thenbody) && allPathsEndWithReturn(stat->elsebody);
+            return stat->elsebody && alwaysTerminates(stat->thenbody) && alwaysTerminates(stat->elsebody);
         else
             return false;
     }
@@ -216,7 +219,7 @@ struct Compiler
 
         // valid function bytecode must always end with RETURN
         // we elide this if we're guaranteed to hit a RETURN statement regardless of the control flow
-        if (!allPathsEndWithReturn(stat))
+        if (!alwaysTerminates(stat))
         {
             setDebugLineEnd(stat);
             closeLocals(0);
@@ -260,7 +263,7 @@ struct Compiler
             f.costModel = modelCost(func->body, func->args.data, func->args.size, builtins);
 
             // track functions that only ever return a single value so that we can convert multret calls to fixedret calls
-            if (allPathsEndWithReturn(func->body))
+            if (alwaysTerminates(func->body))
             {
                 ReturnVisitor returnVisitor(this);
                 stat->visit(&returnVisitor);
@@ -289,6 +292,12 @@ struct Compiler
         // without this we may omit some optimizations eg compiling fast calls without use of FASTCALL2K
         if (isConstant(expr))
             return false;
+
+        // handles builtin calls that can't be constant-folded but are known to return one value
+        // note: optimizationLevel check is technically redundant but it's important that we never optimize based on builtins in O1
+        if (FFlag::LuauCompileBuiltinArity && options.optimizationLevel >= 2)
+            if (int* bfid = builtins.find(expr))
+                return getBuiltinInfo(*bfid).results != 1;
 
         // handles local function calls where we know only one argument is returned
         AstExprFunction* func = getFunctionExpr(expr->func);
@@ -350,7 +359,7 @@ struct Compiler
     {
         LUAU_ASSERT(!multRet || unsigned(target + targetCount) == regTop);
 
-        setDebugLine(expr); // normally compileExpr sets up line info, but compileExprCall can be called directly
+        setDebugLine(expr); // normally compileExpr sets up line info, but compileExprVarargs can be called directly
 
         bytecode.emitABC(LOP_GETVARARGS, target, multRet ? 0 : uint8_t(targetCount + 1), 0);
     }
@@ -503,6 +512,7 @@ struct Compiler
         // we can't inline multret functions because the caller expects L->top to be adjusted:
         // - inlined return compiles to a JUMP, and we don't have an instruction that adjusts L->top arbitrarily
         // - even if we did, right now all L->top adjustments are immediately consumed by the next instruction, and for now we want to preserve that
+        // - additionally, we can't easily compile multret expressions into designated target as computed call arguments will get clobbered
         if (multRet)
         {
             bytecode.addDebugRemark("inlining failed: can't convert fixed returns to multret");
@@ -643,7 +653,7 @@ struct Compiler
         }
 
         // for the fallthrough path we need to ensure we clear out target registers
-        if (!usedFallthrough && !allPathsEndWithReturn(func->body))
+        if (!usedFallthrough && !alwaysTerminates(func->body))
         {
             for (size_t i = 0; i < targetCount; ++i)
                 bytecode.emitABC(LOP_LOADNIL, uint8_t(target + i), 0, 0);
@@ -752,8 +762,13 @@ struct Compiler
         }
 
         // Optimization: for 1/2 argument fast calls use specialized opcodes
-        if (bfid >= 0 && expr->args.size >= 1 && expr->args.size <= 2 && !isExprMultRet(expr->args.data[expr->args.size - 1]))
-            return compileExprFastcallN(expr, target, targetCount, targetTop, multRet, regs, bfid);
+        if (bfid >= 0 && expr->args.size >= 1 && expr->args.size <= 2)
+        {
+            if (!isExprMultRet(expr->args.data[expr->args.size - 1]))
+                return compileExprFastcallN(expr, target, targetCount, targetTop, multRet, regs, bfid);
+            else if (FFlag::LuauCompileBuiltinArity && options.optimizationLevel >= 2 && int(expr->args.size) == getBuiltinInfo(bfid).params)
+                return compileExprFastcallN(expr, target, targetCount, targetTop, multRet, regs, bfid);
+        }
 
         if (expr->self)
         {
@@ -1579,7 +1594,7 @@ struct Compiler
 
         RegScope rs(this);
 
-        uint8_t baseReg = allocReg(expr, uint8_t(2 + expr->expressions.size));
+        uint8_t baseReg = allocReg(expr, unsigned(2 + expr->expressions.size));
 
         emitLoadK(baseReg, formatStringIndex);
 
@@ -2027,7 +2042,9 @@ struct Compiler
             // note: this can't check expr->upvalue because upvalues may be upgraded to locals during inlining
             if (int reg = getExprLocalReg(expr); reg >= 0)
             {
-                bytecode.emitABC(LOP_MOVE, target, uint8_t(reg), 0);
+                // Optimization: we don't need to move if target happens to be in the same register
+                if (options.optimizationLevel == 0 || target != reg)
+                    bytecode.emitABC(LOP_MOVE, target, uint8_t(reg), 0);
             }
             else
             {
@@ -2085,7 +2102,7 @@ struct Compiler
         {
             compileExprIfElse(expr, target, targetTemp);
         }
-        else if (AstExprInterpString* interpString = node->as<AstExprInterpString>(); FFlag::LuauInterpolatedStringBaseSupport && interpString)
+        else if (AstExprInterpString* interpString = node->as<AstExprInterpString>())
         {
             compileExprInterpString(interpString, target, targetTemp);
         }
@@ -2436,9 +2453,9 @@ struct Compiler
 
         if (stat->elsebody && elseJump.size() > 0)
         {
-            // we don't need to skip past "else" body if "then" ends with return
+            // we don't need to skip past "else" body if "then" ends with return/break/continue
             // this is important because, if "else" also ends with return, we may *not* have any statement to skip to!
-            if (allPathsEndWithReturn(stat->thenbody))
+            if (alwaysTerminates(stat->thenbody))
             {
                 size_t elseLabel = bytecode.emitLabel();
 
@@ -2978,46 +2995,29 @@ struct Compiler
 
         Visitor visitor(this);
 
-        if (FFlag::LuauMultiAssignmentConflictFix)
+        // mark any registers that are used *after* assignment as conflicting
+
+        // first we go through assignments to locals, since they are performed before assignments to other l-values
+        for (size_t i = 0; i < vars.size(); ++i)
         {
-            // mark any registers that are used *after* assignment as conflicting
+            const LValue& li = vars[i].lvalue;
 
-            // first we go through assignments to locals, since they are performed before assignments to other l-values
-            for (size_t i = 0; i < vars.size(); ++i)
+            if (li.kind == LValue::Kind_Local)
             {
-                const LValue& li = vars[i].lvalue;
-
-                if (li.kind == LValue::Kind_Local)
-                {
-                    if (i < values.size)
-                        values.data[i]->visit(&visitor);
-
-                    visitor.assigned[li.reg] = true;
-                }
-            }
-
-            // and now we handle all other l-values
-            for (size_t i = 0; i < vars.size(); ++i)
-            {
-                const LValue& li = vars[i].lvalue;
-
-                if (li.kind != LValue::Kind_Local && i < values.size)
-                    values.data[i]->visit(&visitor);
-            }
-        }
-        else
-        {
-            // mark any registers that are used *after* assignment as conflicting
-            for (size_t i = 0; i < vars.size(); ++i)
-            {
-                const LValue& li = vars[i].lvalue;
-
                 if (i < values.size)
                     values.data[i]->visit(&visitor);
 
-                if (li.kind == LValue::Kind_Local)
-                    visitor.assigned[li.reg] = true;
+                visitor.assigned[li.reg] = true;
             }
+        }
+
+        // and now we handle all other l-values
+        for (size_t i = 0; i < vars.size(); ++i)
+        {
+            const LValue& li = vars[i].lvalue;
+
+            if (li.kind != LValue::Kind_Local && i < values.size)
+                values.data[i]->visit(&visitor);
         }
 
         // mark any registers used in trailing expressions as conflicting as well
