@@ -19,13 +19,13 @@ LUAU_FASTINT(LuauTypeInferTypePackLoopLimit)
 LUAU_FASTFLAG(LuauErrorRecoveryType)
 LUAU_FASTFLAGVARIABLE(LuauInstantiateInSubtyping, false)
 LUAU_FASTFLAGVARIABLE(LuauUninhabitedSubAnything2, false)
+LUAU_FASTFLAGVARIABLE(LuauVariadicAnyCanBeGeneric, false)
 LUAU_FASTFLAGVARIABLE(LuauMaintainScopesInUnifier, false)
 LUAU_FASTFLAGVARIABLE(LuauTransitiveSubtyping, false)
-LUAU_FASTFLAGVARIABLE(LuauTinyUnifyNormalsFix, false)
+LUAU_FASTFLAGVARIABLE(LuauOccursIsntAlwaysFailure, false)
 LUAU_FASTFLAG(LuauClassTypeVarsInSubstitution)
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
 LUAU_FASTFLAG(LuauNormalizeBlockedTypes)
-LUAU_FASTFLAG(LuauNegatedFunctionTypes)
 LUAU_FASTFLAG(LuauNegatedClassTypes)
 LUAU_FASTFLAG(LuauNegatedTableTypes)
 
@@ -433,14 +433,14 @@ void Unifier::tryUnify_(TypeId subTy, TypeId superTy, bool isFunctionCall, bool 
 
     if (superFree && subFree && subsumes(useScopes, superFree, subFree))
     {
-        if (!occursCheck(subTy, superTy))
+        if (!occursCheck(subTy, superTy, /* reversed = */ false))
             log.replace(subTy, BoundType(superTy));
 
         return;
     }
     else if (superFree && subFree)
     {
-        if (!occursCheck(superTy, subTy))
+        if (!occursCheck(superTy, subTy, /* reversed = */ true))
         {
             if (subsumes(useScopes, superFree, subFree))
             {
@@ -463,7 +463,7 @@ void Unifier::tryUnify_(TypeId subTy, TypeId superTy, bool isFunctionCall, bool 
             return;
         }
 
-        if (!occursCheck(superTy, subTy))
+        if (!occursCheck(superTy, subTy, /* reversed = */ true))
         {
             promoteTypeLevels(log, types, superFree->level, superFree->scope, useScopes, subTy);
 
@@ -489,7 +489,7 @@ void Unifier::tryUnify_(TypeId subTy, TypeId superTy, bool isFunctionCall, bool 
             return;
         }
 
-        if (!occursCheck(subTy, superTy))
+        if (!occursCheck(subTy, superTy, /* reversed = */ false))
         {
             promoteTypeLevels(log, types, subFree->level, subFree->scope, useScopes, superTy);
             log.replace(subTy, BoundType(superTy));
@@ -615,8 +615,7 @@ void Unifier::tryUnify_(TypeId subTy, TypeId superTy, bool isFunctionCall, bool 
     else if ((log.getMutable<PrimitiveType>(superTy) || log.getMutable<SingletonType>(superTy)) && log.getMutable<SingletonType>(subTy))
         tryUnifySingletons(subTy, superTy);
 
-    else if (auto ptv = get<PrimitiveType>(superTy);
-             FFlag::LuauNegatedFunctionTypes && ptv && ptv->type == PrimitiveType::Function && get<FunctionType>(subTy))
+    else if (auto ptv = get<PrimitiveType>(superTy); ptv && ptv->type == PrimitiveType::Function && get<FunctionType>(subTy))
     {
         // Ok.  Do nothing.  forall functions F, F <: function
     }
@@ -1275,17 +1274,7 @@ void Unifier::tryUnifyNormalizedTypes(
 
             Unifier innerState = makeChildUnifier();
 
-            if (FFlag::LuauTinyUnifyNormalsFix)
-                innerState.tryUnify(subTable, superTable);
-            else
-            {
-                if (get<MetatableType>(superTable))
-                    innerState.tryUnifyWithMetatable(subTable, superTable, /* reversed */ false);
-                else if (get<MetatableType>(subTable))
-                    innerState.tryUnifyWithMetatable(superTable, subTable, /* reversed */ true);
-                else
-                    innerState.tryUnifyTables(subTable, superTable);
-            }
+            innerState.tryUnify(subTable, superTable);
 
             if (innerState.errors.empty())
             {
@@ -1304,7 +1293,7 @@ void Unifier::tryUnifyNormalizedTypes(
     {
         if (superNorm.functions.isNever())
             return reportError(location, TypeMismatch{superTy, subTy, reason, error, mismatchContext()});
-        for (TypeId superFun : *superNorm.functions.parts)
+        for (TypeId superFun : superNorm.functions.parts)
         {
             Unifier innerState = makeChildUnifier();
             const FunctionType* superFtv = get<FunctionType>(superFun);
@@ -1343,7 +1332,7 @@ TypePackId Unifier::tryApplyOverloadedFunction(TypeId function, const Normalized
 
     std::optional<TypePackId> result;
     const FunctionType* firstFun = nullptr;
-    for (TypeId overload : *overloads.parts)
+    for (TypeId overload : overloads.parts)
     {
         if (const FunctionType* ftv = get<FunctionType>(overload))
         {
@@ -1502,7 +1491,7 @@ struct WeirdIter
 
     bool canGrow() const
     {
-        return nullptr != log.getMutable<Unifiable::Free>(packId);
+        return nullptr != log.getMutable<FreeTypePack>(packId);
     }
 
     void grow(TypePackId newTail)
@@ -1510,7 +1499,7 @@ struct WeirdIter
         LUAU_ASSERT(canGrow());
         LUAU_ASSERT(log.getMutable<TypePack>(newTail));
 
-        auto freePack = log.getMutable<Unifiable::Free>(packId);
+        auto freePack = log.getMutable<FreeTypePack>(packId);
 
         level = freePack->level;
         if (FFlag::LuauMaintainScopesInUnifier && freePack->scope != nullptr)
@@ -1604,17 +1593,17 @@ void Unifier::tryUnify_(TypePackId subTp, TypePackId superTp, bool isFunctionCal
     if (log.haveSeen(superTp, subTp))
         return;
 
-    if (log.getMutable<Unifiable::Free>(superTp))
+    if (log.getMutable<FreeTypePack>(superTp))
     {
-        if (!occursCheck(superTp, subTp))
+        if (!occursCheck(superTp, subTp, /* reversed = */ true))
         {
             Widen widen{types, builtinTypes};
             log.replace(superTp, Unifiable::Bound<TypePackId>(widen(subTp)));
         }
     }
-    else if (log.getMutable<Unifiable::Free>(subTp))
+    else if (log.getMutable<FreeTypePack>(subTp))
     {
-        if (!occursCheck(subTp, superTp))
+        if (!occursCheck(subTp, superTp, /* reversed = */ false))
         {
             log.replace(subTp, Unifiable::Bound<TypePackId>(superTp));
         }
@@ -2580,9 +2569,9 @@ static void queueTypePack(std::vector<TypeId>& queue, DenseHashSet<TypePackId>& 
             break;
         seenTypePacks.insert(a);
 
-        if (state.log.getMutable<Unifiable::Free>(a))
+        if (state.log.getMutable<FreeTypePack>(a))
         {
-            state.log.replace(a, Unifiable::Bound{anyTypePack});
+            state.log.replace(a, BoundTypePack{anyTypePack});
         }
         else if (auto tp = state.log.getMutable<TypePack>(a))
         {
@@ -2598,13 +2587,14 @@ static void queueTypePack(std::vector<TypeId>& queue, DenseHashSet<TypePackId>& 
 void Unifier::tryUnifyVariadics(TypePackId subTp, TypePackId superTp, bool reversed, int subOffset)
 {
     const VariadicTypePack* superVariadic = log.getMutable<VariadicTypePack>(superTp);
+    const TypeId variadicTy = follow(superVariadic->ty);
 
     if (!superVariadic)
         ice("passed non-variadic pack to tryUnifyVariadics");
 
     if (const VariadicTypePack* subVariadic = log.get<VariadicTypePack>(subTp))
     {
-        tryUnify_(reversed ? superVariadic->ty : subVariadic->ty, reversed ? subVariadic->ty : superVariadic->ty);
+        tryUnify_(reversed ? variadicTy : subVariadic->ty, reversed ? subVariadic->ty : variadicTy);
     }
     else if (log.get<TypePack>(subTp))
     {
@@ -2615,7 +2605,7 @@ void Unifier::tryUnifyVariadics(TypePackId subTp, TypePackId superTp, bool rever
 
         while (subIter != subEnd)
         {
-            tryUnify_(reversed ? superVariadic->ty : *subIter, reversed ? *subIter : superVariadic->ty);
+            tryUnify_(reversed ? variadicTy : *subIter, reversed ? *subIter : variadicTy);
             ++subIter;
         }
 
@@ -2628,9 +2618,9 @@ void Unifier::tryUnifyVariadics(TypePackId subTp, TypePackId superTp, bool rever
             }
             else if (const VariadicTypePack* vtp = get<VariadicTypePack>(tail))
             {
-                tryUnify_(vtp->ty, superVariadic->ty);
+                tryUnify_(vtp->ty, variadicTy);
             }
-            else if (get<Unifiable::Generic>(tail))
+            else if (get<GenericTypePack>(tail))
             {
                 reportError(location, GenericError{"Cannot unify variadic and generic packs"});
             }
@@ -2643,6 +2633,10 @@ void Unifier::tryUnifyVariadics(TypePackId subTp, TypePackId superTp, bool rever
                 ice("Unknown TypePack kind");
             }
         }
+    }
+    else if (FFlag::LuauVariadicAnyCanBeGeneric && get<AnyType>(variadicTy) && log.get<GenericTypePack>(subTp))
+    {
+        // Nothing to do.  This is ok.
     }
     else
     {
@@ -2764,11 +2758,42 @@ TxnLog Unifier::combineLogsIntoUnion(std::vector<TxnLog> logs)
     return result;
 }
 
-bool Unifier::occursCheck(TypeId needle, TypeId haystack)
+bool Unifier::occursCheck(TypeId needle, TypeId haystack, bool reversed)
 {
     sharedState.tempSeenTy.clear();
 
-    return occursCheck(sharedState.tempSeenTy, needle, haystack);
+    bool occurs = occursCheck(sharedState.tempSeenTy, needle, haystack);
+
+    if (occurs && FFlag::LuauOccursIsntAlwaysFailure)
+    {
+        Unifier innerState = makeChildUnifier();
+        if (const UnionType* ut = get<UnionType>(haystack))
+        {
+            if (reversed)
+                innerState.tryUnifyUnionWithType(haystack, ut, needle);
+            else
+                innerState.tryUnifyTypeWithUnion(needle, haystack, ut, /* cacheEnabled = */ false, /* isFunction = */ false);
+        }
+        else if (const IntersectionType* it = get<IntersectionType>(haystack))
+        {
+            if (reversed)
+                innerState.tryUnifyIntersectionWithType(haystack, it, needle, /* cacheEnabled = */ false, /* isFunction = */ false);
+            else
+                innerState.tryUnifyTypeWithIntersection(needle, haystack, it);
+        }
+        else
+        {
+            innerState.failure = true;
+        }
+
+        if (innerState.failure)
+        {
+            reportError(location, OccursCheckFailed{});
+            log.replace(needle, *builtinTypes->errorRecoveryType());
+        }
+    }
+
+    return occurs;
 }
 
 bool Unifier::occursCheck(DenseHashSet<TypeId>& seen, TypeId needle, TypeId haystack)
@@ -2790,16 +2815,19 @@ bool Unifier::occursCheck(DenseHashSet<TypeId>& seen, TypeId needle, TypeId hays
 
     seen.insert(haystack);
 
-    if (log.getMutable<Unifiable::Error>(needle))
+    if (log.getMutable<ErrorType>(needle))
         return false;
 
-    if (!log.getMutable<Unifiable::Free>(needle))
+    if (!log.getMutable<FreeType>(needle))
         ice("Expected needle to be free");
 
     if (needle == haystack)
     {
-        reportError(location, OccursCheckFailed{});
-        log.replace(needle, *builtinTypes->errorRecoveryType());
+        if (!FFlag::LuauOccursIsntAlwaysFailure)
+        {
+            reportError(location, OccursCheckFailed{});
+            log.replace(needle, *builtinTypes->errorRecoveryType());
+        }
 
         return true;
     }
@@ -2820,11 +2848,19 @@ bool Unifier::occursCheck(DenseHashSet<TypeId>& seen, TypeId needle, TypeId hays
     return occurrence;
 }
 
-bool Unifier::occursCheck(TypePackId needle, TypePackId haystack)
+bool Unifier::occursCheck(TypePackId needle, TypePackId haystack, bool reversed)
 {
     sharedState.tempSeenTp.clear();
 
-    return occursCheck(sharedState.tempSeenTp, needle, haystack);
+    bool occurs = occursCheck(sharedState.tempSeenTp, needle, haystack);
+
+    if (occurs && FFlag::LuauOccursIsntAlwaysFailure)
+    {
+        reportError(location, OccursCheckFailed{});
+        log.replace(needle, *builtinTypes->errorRecoveryTypePack());
+    }
+
+    return occurs;
 }
 
 bool Unifier::occursCheck(DenseHashSet<TypePackId>& seen, TypePackId needle, TypePackId haystack)
@@ -2837,10 +2873,10 @@ bool Unifier::occursCheck(DenseHashSet<TypePackId>& seen, TypePackId needle, Typ
 
     seen.insert(haystack);
 
-    if (log.getMutable<Unifiable::Error>(needle))
+    if (log.getMutable<ErrorTypePack>(needle))
         return false;
 
-    if (!log.getMutable<Unifiable::Free>(needle))
+    if (!log.getMutable<FreeTypePack>(needle))
         ice("Expected needle pack to be free");
 
     RecursionLimiter _ra(&sharedState.counters.recursionCount, sharedState.counters.recursionLimit);
@@ -2849,8 +2885,11 @@ bool Unifier::occursCheck(DenseHashSet<TypePackId>& seen, TypePackId needle, Typ
     {
         if (needle == haystack)
         {
-            reportError(location, OccursCheckFailed{});
-            log.replace(needle, *builtinTypes->errorRecoveryTypePack());
+            if (!FFlag::LuauOccursIsntAlwaysFailure)
+            {
+                reportError(location, OccursCheckFailed{});
+                log.replace(needle, *builtinTypes->errorRecoveryTypePack());
+            }
 
             return true;
         }

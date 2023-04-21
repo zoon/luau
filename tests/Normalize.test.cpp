@@ -470,7 +470,6 @@ TEST_SUITE_END();
 
 struct NormalizeFixture : Fixture
 {
-    ScopedFastFlag sff1{"LuauNegatedFunctionTypes", true};
     ScopedFastFlag sff2{"LuauNegatedClassTypes", true};
 
     TypeArena arena;
@@ -747,6 +746,20 @@ TEST_CASE_FIXTURE(NormalizeFixture, "narrow_union_of_classes_with_intersection")
 
     createSomeClasses(&frontend);
     CHECK("Child" == toString(normal("(Child | Unrelated) & Child")));
+}
+
+TEST_CASE_FIXTURE(NormalizeFixture, "intersection_of_metatables_where_the_metatable_is_top_or_bottom")
+{
+    ScopedFastFlag sff{"LuauNormalizeMetatableFixes", true};
+
+    CHECK("{ @metatable *error-type*, {|  |} }" == toString(normal("Mt<{}, any> & Mt<{}, err>")));
+}
+
+TEST_CASE_FIXTURE(NormalizeFixture, "crazy_metatable")
+{
+    ScopedFastFlag sff{"LuauNormalizeMetatableFixes", true};
+
+    CHECK("never" == toString(normal("Mt<{}, number> & Mt<{}, string>")));
 }
 
 TEST_CASE_FIXTURE(NormalizeFixture, "negations_of_classes")

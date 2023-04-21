@@ -1281,6 +1281,39 @@ f(function(x) return x * 2 end)
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
+TEST_CASE_FIXTURE(Fixture, "variadic_any_is_compatible_with_a_generic_TypePack")
+{
+    ScopedFastFlag sff[] = {
+        {"LuauVariadicAnyCanBeGeneric", true}
+    };
+
+    CheckResult result = check(R"(
+        --!strict
+        local function f(...) return ... end
+        local g = function(...) return f(...) end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+// https://github.com/Roblox/luau/issues/767
+TEST_CASE_FIXTURE(BuiltinsFixture, "variadic_any_is_compatible_with_a_generic_TypePack_2")
+{
+    ScopedFastFlag sff{"LuauVariadicAnyCanBeGeneric", true};
+
+    CheckResult result = check(R"(
+        local function somethingThatsAny(...: any)
+            print(...)
+        end
+
+        local function x<T...>(...: T...)
+            somethingThatsAny(...) -- Failed to unify variadic type packs
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
 TEST_CASE_FIXTURE(Fixture, "infer_anonymous_function_arguments_outside_call")
 {
     CheckResult result = check(R"(
@@ -1784,7 +1817,6 @@ z = y -- Not OK, so the line is colorable
 
 TEST_CASE_FIXTURE(Fixture, "function_is_supertype_of_concrete_functions")
 {
-    ScopedFastFlag sff{"LuauNegatedFunctionTypes", true};
     registerHiddenTypes(&frontend);
 
     CheckResult result = check(R"(
@@ -1803,7 +1835,6 @@ TEST_CASE_FIXTURE(Fixture, "function_is_supertype_of_concrete_functions")
 
 TEST_CASE_FIXTURE(Fixture, "concrete_functions_are_not_supertypes_of_function")
 {
-    ScopedFastFlag sff{"LuauNegatedFunctionTypes", true};
     registerHiddenTypes(&frontend);
 
     CheckResult result = check(R"(
@@ -1824,7 +1855,6 @@ TEST_CASE_FIXTURE(Fixture, "concrete_functions_are_not_supertypes_of_function")
 
 TEST_CASE_FIXTURE(Fixture, "other_things_are_not_related_to_function")
 {
-    ScopedFastFlag sff{"LuauNegatedFunctionTypes", true};
     registerHiddenTypes(&frontend);
 
     CheckResult result = check(R"(

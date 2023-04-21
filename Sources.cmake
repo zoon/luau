@@ -65,8 +65,10 @@ target_sources(Luau.CodeGen PRIVATE
     CodeGen/include/Luau/ConditionX64.h
     CodeGen/include/Luau/IrAnalysis.h
     CodeGen/include/Luau/IrBuilder.h
+    CodeGen/include/Luau/IrCallWrapperX64.h
     CodeGen/include/Luau/IrDump.h
     CodeGen/include/Luau/IrData.h
+    CodeGen/include/Luau/IrRegAllocX64.h
     CodeGen/include/Luau/IrUtils.h
     CodeGen/include/Luau/Label.h
     CodeGen/include/Luau/OperandX64.h
@@ -87,16 +89,16 @@ target_sources(Luau.CodeGen PRIVATE
     CodeGen/src/CodeGenA64.cpp
     CodeGen/src/CodeGenX64.cpp
     CodeGen/src/EmitBuiltinsX64.cpp
-    CodeGen/src/EmitCommonA64.cpp
     CodeGen/src/EmitCommonX64.cpp
-    CodeGen/src/EmitInstructionA64.cpp
     CodeGen/src/EmitInstructionX64.cpp
     CodeGen/src/Fallbacks.cpp
     CodeGen/src/IrAnalysis.cpp
     CodeGen/src/IrBuilder.cpp
+    CodeGen/src/IrCallWrapperX64.cpp
     CodeGen/src/IrDump.cpp
     CodeGen/src/IrLoweringA64.cpp
     CodeGen/src/IrLoweringX64.cpp
+    CodeGen/src/IrRegAllocA64.cpp
     CodeGen/src/IrRegAllocX64.cpp
     CodeGen/src/IrTranslateBuiltins.cpp
     CodeGen/src/IrTranslation.cpp
@@ -107,6 +109,7 @@ target_sources(Luau.CodeGen PRIVATE
     CodeGen/src/UnwindBuilderDwarf2.cpp
     CodeGen/src/UnwindBuilderWin.cpp
 
+    CodeGen/src/BitUtils.h
     CodeGen/src/ByteUtils.h
     CodeGen/src/CustomExecUtils.h
     CodeGen/src/CodeGenUtils.h
@@ -116,13 +119,12 @@ target_sources(Luau.CodeGen PRIVATE
     CodeGen/src/EmitCommon.h
     CodeGen/src/EmitCommonA64.h
     CodeGen/src/EmitCommonX64.h
-    CodeGen/src/EmitInstructionA64.h
     CodeGen/src/EmitInstructionX64.h
     CodeGen/src/Fallbacks.h
     CodeGen/src/FallbacksProlog.h
     CodeGen/src/IrLoweringA64.h
     CodeGen/src/IrLoweringX64.h
-    CodeGen/src/IrRegAllocX64.h
+    CodeGen/src/IrRegAllocA64.h
     CodeGen/src/IrTranslateBuiltins.h
     CodeGen/src/IrTranslation.h
     CodeGen/src/NativeState.h
@@ -342,6 +344,7 @@ if(TARGET Luau.UnitTest)
         tests/Fixture.h
         tests/IostreamOptional.h
         tests/ScopedFlags.h
+        tests/AssemblyBuilderA64.test.cpp
         tests/AssemblyBuilderX64.test.cpp
         tests/AstJsonEncoder.test.cpp
         tests/AstQuery.test.cpp
@@ -358,6 +361,7 @@ if(TARGET Luau.UnitTest)
         tests/Error.test.cpp
         tests/Frontend.test.cpp
         tests/IrBuilder.test.cpp
+        tests/IrCallWrapperX64.test.cpp
         tests/JsonEmitter.test.cpp
         tests/Lexer.test.cpp
         tests/Linter.test.cpp
