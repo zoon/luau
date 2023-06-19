@@ -13,8 +13,7 @@
 // See docs/SyntaxChanges.md for an explanation.
 LUAU_FASTINTVARIABLE(LuauRecursionLimit, 1000)
 LUAU_FASTINTVARIABLE(LuauParseErrorLimit, 100)
-
-LUAU_FASTFLAGVARIABLE(LuauParserErrorsOnMissingDefaultTypePackArgument, false)
+LUAU_FASTFLAGVARIABLE(LuauParseDeclareClassIndexer, false)
 
 #define ERROR_INVALID_INTERP_DOUBLE_BRACE "Double braces are not permitted within interpolated strings. Did you mean '\\{'?"
 
@@ -327,22 +326,19 @@ AstStat* Parser::parseStat()
     // we know this isn't a call or an assignment; therefore it must be a context-sensitive keyword such as `type` or `continue`
     AstName ident = getIdentifier(expr);
 
-    if (options.allowTypeAnnotations)
-    {
-        if (ident == "type")
-            return parseTypeAlias(expr->location, /* exported= */ false);
+    if (ident == "type")
+        return parseTypeAlias(expr->location, /* exported= */ false);
 
-        if (ident == "export" && lexer.current().type == Lexeme::Name && AstName(lexer.current().name) == "type")
-        {
-            nextLexeme();
-            return parseTypeAlias(expr->location, /* exported= */ true);
-        }
+    if (ident == "export" && lexer.current().type == Lexeme::Name && AstName(lexer.current().name) == "type")
+    {
+        nextLexeme();
+        return parseTypeAlias(expr->location, /* exported= */ true);
     }
 
-    if (options.supportContinueStatement && ident == "continue")
+    if (ident == "continue")
         return parseContinue(expr->location);
 
-    if (options.allowTypeAnnotations && options.allowDeclarationSyntax)
+    if (options.allowDeclarationSyntax)
     {
         if (ident == "declare")
             return parseDeclaration(expr->location);
@@ -882,6 +878,7 @@ AstStat* Parser::parseDeclaration(const Location& start)
         }
 
         TempVector<AstDeclaredClassProp> props(scratchDeclaredClassProps);
+        AstTableIndexer* indexer = nullptr;
 
         while (lexer.current().type != Lexeme::ReservedEnd)
         {
@@ -890,7 +887,8 @@ AstStat* Parser::parseDeclaration(const Location& start)
             {
                 props.push_back(parseDeclaredClassMethod());
             }
-            else if (lexer.current().type == '[')
+            else if (lexer.current().type == '[' && (!FFlag::LuauParseDeclareClassIndexer || lexer.lookahead().type == Lexeme::RawString ||
+                                                        lexer.lookahead().type == Lexeme::QuotedString))
             {
                 const Lexeme begin = lexer.current();
                 nextLexeme(); // [
@@ -909,6 +907,22 @@ AstStat* Parser::parseDeclaration(const Location& start)
                 else
                     report(begin.location, "String literal contains malformed escape sequence");
             }
+            else if (lexer.current().type == '[' && FFlag::LuauParseDeclareClassIndexer)
+            {
+                if (indexer)
+                {
+                    // maybe we don't need to parse the entire badIndexer...
+                    // however, we either have { or [ to lint, not the entire table type or the bad indexer.
+                    AstTableIndexer* badIndexer = parseTableIndexer();
+
+                    // we lose all additional indexer expressions from the AST after error recovery here
+                    report(badIndexer->location, "Cannot have more than one class indexer");
+                }
+                else
+                {
+                    indexer = parseTableIndexer();
+                }
+            }
             else
             {
                 Name propName = parseName("property name");
@@ -921,7 +935,7 @@ AstStat* Parser::parseDeclaration(const Location& start)
         Location classEnd = lexer.current().location;
         nextLexeme(); // skip past `end`
 
-        return allocator.alloc<AstStatDeclareClass>(Location(classStart, classEnd), className.name, superName, copy(props));
+        return allocator.alloc<AstStatDeclareClass>(Location(classStart, classEnd), className.name, superName, copy(props), indexer);
     }
     else if (std::optional<Name> globalName = parseNameOpt("global variable name"))
     {
@@ -1123,7 +1137,7 @@ std::tuple<bool, Location, AstTypePack*> Parser::parseBindingList(TempVector<Bin
 
 AstType* Parser::parseOptionalType()
 {
-    if (options.allowTypeAnnotations && lexer.current().type == ':')
+    if (lexer.current().type == ':')
     {
         nextLexeme();
         return parseType();
@@ -1175,7 +1189,7 @@ AstTypePack* Parser::parseTypeList(TempVector<AstType*>& result, TempVector<std:
 
 std::optional<AstTypeList> Parser::parseOptionalReturnType()
 {
-    if (options.allowTypeAnnotations && (lexer.current().type == ':' || lexer.current().type == Lexeme::SkinnyArrow))
+    if (lexer.current().type == ':' || lexer.current().type == Lexeme::SkinnyArrow)
     {
         if (lexer.current().type == Lexeme::SkinnyArrow)
             report(lexer.current().location, "Function return type annotations are written after ':' instead of '->'");
@@ -2056,7 +2070,7 @@ AstExpr* Parser::parseAssertionExpr()
     Location start = lexer.current().location;
     AstExpr* expr = parseSimpleExpr();
 
-    if (options.allowTypeAnnotations && lexer.current().type == Lexeme::DoubleColon)
+    if (lexer.current().type == Lexeme::DoubleColon)
     {
         nextLexeme();
         AstType* annotation = parseType();
@@ -2449,24 +2463,13 @@ std::pair<AstArray<AstGenericType>, AstArray<AstGenericTypePack>> Parser::parseG
                     seenDefault = true;
                     nextLexeme();
 
-                    Lexeme packBegin = lexer.current();
-
                     if (shouldParseTypePack(lexer))
                     {
                         AstTypePack* typePack = parseTypePack();
 
                         namePacks.push_back({name, nameLocation, typePack});
                     }
-                    else if (!FFlag::LuauParserErrorsOnMissingDefaultTypePackArgument && lexer.current().type == '(')
-                    {
-                        auto [type, typePack] = parseTypeOrPack();
-
-                        if (type)
-                            report(Location(packBegin.location.begin, lexer.previousLocation().end), "Expected type pack after '=', got type");
-
-                        namePacks.push_back({name, nameLocation, typePack});
-                    }
-                    else if (FFlag::LuauParserErrorsOnMissingDefaultTypePackArgument)
+                    else
                     {
                         auto [type, typePack] = parseTypeOrPack();
 

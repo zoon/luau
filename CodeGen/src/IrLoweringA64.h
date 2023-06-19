@@ -5,10 +5,9 @@
 #include "Luau/IrData.h"
 
 #include "IrRegAllocA64.h"
+#include "IrValueLocationTracking.h"
 
 #include <vector>
-
-struct Proto;
 
 namespace Luau
 {
@@ -24,9 +23,11 @@ namespace A64
 
 struct IrLoweringA64
 {
-    IrLoweringA64(AssemblyBuilderA64& build, ModuleHelpers& helpers, NativeState& data, Proto* proto, IrFunction& function);
+    IrLoweringA64(AssemblyBuilderA64& build, ModuleHelpers& helpers, NativeState& data, IrFunction& function);
 
     void lowerInst(IrInst& inst, uint32_t index, IrBlock& next);
+    void finishBlock();
+    void finishFunction();
 
     bool hasError() const;
 
@@ -34,16 +35,18 @@ struct IrLoweringA64
     void jumpOrFallthrough(IrBlock& target, IrBlock& next);
 
     // Operand data build helpers
+    // May emit data/address synthesis instructions
     RegisterA64 tempDouble(IrOp op);
     RegisterA64 tempInt(IrOp op);
+    RegisterA64 tempUint(IrOp op);
     AddressA64 tempAddr(IrOp op, int offset);
 
-    // Operand data lookup helpers
-    RegisterA64 regOp(IrOp op) const;
+    // May emit restore instructions
+    RegisterA64 regOp(IrOp op);
 
+    // Operand data lookup helpers
     IrConst constOp(IrOp op) const;
     uint8_t tagOp(IrOp op) const;
-    bool boolOp(IrOp op) const;
     int intOp(IrOp op) const;
     unsigned uintOp(IrOp op) const;
     double doubleOp(IrOp op) const;
@@ -51,14 +54,24 @@ struct IrLoweringA64
     IrBlock& blockOp(IrOp op) const;
     Label& labelOp(IrOp op) const;
 
+    struct InterruptHandler
+    {
+        Label self;
+        unsigned int pcpos;
+        Label next;
+    };
+
     AssemblyBuilderA64& build;
     ModuleHelpers& helpers;
     NativeState& data;
-    Proto* proto = nullptr; // Temporarily required to provide 'Instruction* pc' to old emitInst* methods
 
     IrFunction& function;
 
     IrRegAllocA64 regs;
+
+    IrValueLocationTracking valueTracker;
+
+    std::vector<InterruptHandler> interruptHandlers;
 
     bool error = false;
 };

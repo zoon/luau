@@ -52,6 +52,43 @@ TEST_CASE_FIXTURE(Fixture, "typeguard_inference_incomplete")
     CHECK_EQ(expected, decorateWithTypes(code));
 }
 
+TEST_CASE_FIXTURE(BuiltinsFixture, "luau-polyfill.Array.filter")
+{
+    // This test exercises the fact that we should reduce sealed/unsealed/free tables
+    // res is a unsealed table with type {((T & ~nil)?) & any}
+    // Because we do not reduce it fully, we cannot unify it with `Array<T> = { [number] : T}
+    // TLDR; reduction needs to reduce the indexer on res so it unifies with Array<T>
+    CheckResult result = check(R"(
+--!strict
+-- Implements Javascript's `Array.prototype.filter` as defined below
+-- https://developer.cmozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/filter
+type Array<T> = { [number]: T }
+type callbackFn<T> = (element: T, index: number, array: Array<T>) -> boolean
+type callbackFnWithThisArg<T, U> = (thisArg: U, element: T, index: number, array: Array<T>) -> boolean
+type Object = { [string]: any }
+return function<T, U>(t: Array<T>, callback: callbackFn<T> | callbackFnWithThisArg<T, U>, thisArg: U?): Array<T>
+
+	local len = #t
+	local res = {}
+	if thisArg == nil then
+		for i = 1, len do
+			local kValue = t[i]
+			if kValue ~= nil then
+				if (callback :: callbackFn<T>)(kValue, i, t) then
+					res[i] = kValue
+				end
+			end
+		end
+	else
+	end
+
+	return res
+end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
 TEST_CASE_FIXTURE(BuiltinsFixture, "xpcall_returns_what_f_returns")
 {
     const std::string code = R"(
@@ -260,10 +297,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "bail_early_if_unification_is_too_complicated
 // FIXME: Move this test to another source file when removing FFlag::LuauLowerBoundsCalculation
 TEST_CASE_FIXTURE(Fixture, "do_not_ice_when_trying_to_pick_first_of_generic_type_pack")
 {
-    ScopedFastFlag sff[]{
-        {"LuauReturnAnyInsteadOfICE", true},
-    };
-
     // In-place quantification causes these types to have the wrong types but only because of nasty interaction with prototyping.
     // The type of f is initially () -> free1...
     // Then the prototype iterator advances, and checks the function expression assigned to g, which has the type () -> free2...
@@ -469,7 +502,7 @@ TEST_CASE_FIXTURE(Fixture, "free_options_cannot_be_unified_together")
     InternalErrorReporter iceHandler;
     UnifierSharedState sharedState{&iceHandler};
     Normalizer normalizer{&arena, builtinTypes, NotNull{&sharedState}};
-    Unifier u{NotNull{&normalizer}, Mode::Strict, NotNull{scope.get()}, Location{}, Variance::Covariant};
+    Unifier u{NotNull{&normalizer}, NotNull{scope.get()}, Location{}, Variance::Covariant};
 
     u.tryUnify(option1, option2);
 
@@ -528,13 +561,13 @@ return wrapStrictTable(Constants, "Constants")
 
     frontend.check("game/B");
 
-    ModulePtr m = frontend.moduleResolver.modules["game/B"];
+    ModulePtr m = frontend.moduleResolver.getModule("game/B");
     REQUIRE(m);
 
     std::optional<TypeId> result = first(m->returnType);
     REQUIRE(result);
     if (FFlag::DebugLuauDeferredConstraintResolution)
-        CHECK_EQ("(any?) & ~table", toString(*result));
+        CHECK_EQ("(any & ~table)?", toString(*result));
     else
         CHECK_MESSAGE(get<AnyType>(*result), *result);
 }
@@ -570,7 +603,7 @@ return wrapStrictTable(Constants, "Constants")
 
     frontend.check("game/B");
 
-    ModulePtr m = frontend.moduleResolver.modules["game/B"];
+    ModulePtr m = frontend.moduleResolver.getModule("game/B");
     REQUIRE(m);
 
     std::optional<TypeId> result = first(m->returnType);
@@ -819,6 +852,163 @@ TEST_CASE_FIXTURE(Fixture, "lookup_prop_of_intersection_containing_unions_of_tab
     // REQUIRE(unknownProp);
 
     // CHECK("variable" == unknownProp->key);
+}
+
+TEST_CASE_FIXTURE(Fixture, "expected_type_should_be_a_helpful_deduction_guide_for_function_calls")
+{
+    ScopedFastFlag sffs[]{
+        {"LuauTypeMismatchInvarianceInError", true},
+    };
+
+    CheckResult result = check(R"(
+        type Ref<T> = { val: T }
+
+        local function useRef<T>(x: T): Ref<T?>
+            return { val = x }
+        end
+
+        local x: Ref<number?> = useRef(nil)
+    )");
+
+    // This is actually wrong! Sort of. It's doing the wrong thing, it's actually asking whether
+    //  `{| val: number? |} <: {| val: nil |}`
+    // instead of the correct way, which is
+    //  `{| val: nil |} <: {| val: number? |}`
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "floating_generics_should_not_be_allowed")
+{
+    CheckResult result = check(R"(
+        local assign : <T, U, V, W>(target: T, source0: U?, source1: V?, source2: W?, ...any) -> T & U & V & W = (nil :: any)
+
+        -- We have a big problem here: The generics U, V, and W are not bound to anything!
+        -- Things get strange because of this.
+        local benchmark = assign({})
+        local options = benchmark.options
+        do
+            local resolve2: any = nil
+            options.fn({
+                resolve = function(...)
+                    resolve2(...)
+                end,
+            })
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "free_options_can_be_unified_together")
+{
+    ScopedFastFlag sff[] = {
+        {"LuauTransitiveSubtyping", true},
+    };
+
+    TypeArena arena;
+    TypeId nilType = builtinTypes->nilType;
+
+    std::unique_ptr scope = std::make_unique<Scope>(builtinTypes->anyTypePack);
+
+    TypeId free1 = arena.addType(FreeType{scope.get()});
+    TypeId option1 = arena.addType(UnionType{{nilType, free1}});
+
+    TypeId free2 = arena.addType(FreeType{scope.get()});
+    TypeId option2 = arena.addType(UnionType{{nilType, free2}});
+
+    InternalErrorReporter iceHandler;
+    UnifierSharedState sharedState{&iceHandler};
+    Normalizer normalizer{&arena, builtinTypes, NotNull{&sharedState}};
+    Unifier u{NotNull{&normalizer}, NotNull{scope.get()}, Location{}, Variance::Covariant};
+
+    u.tryUnify(option1, option2);
+
+    CHECK(!u.failure);
+
+    u.log.commit();
+
+    ToStringOptions opts;
+    CHECK("a?" == toString(option1, opts));
+    CHECK("b?" == toString(option2, opts)); // should be `a?`.
+}
+
+TEST_CASE_FIXTURE(Fixture, "unify_more_complex_unions_that_include_nil")
+{
+    CheckResult result = check(R"(
+        type Record = {prop: (string | boolean)?}
+
+        function concatPagination(prop: (string | boolean | nil)?): Record
+            return {prop = prop}
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "optional_class_instances_are_invariant")
+{
+    ScopedFastFlag sff[] = {
+        {"LuauTypeMismatchInvarianceInError", true}
+    };
+
+    createSomeClasses(&frontend);
+
+    CheckResult result = check(R"(
+        function foo(ref: {current: Parent?})
+        end
+
+        function bar(ref: {current: Child?})
+            foo(ref)
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "luau-polyfill.Map.entries")
+{
+
+    fileResolver.source["Module/Map"] = R"(
+--!strict
+
+type Object = { [any]: any }
+type Array<T> = { [number]: T }
+type Table<T, V> = { [T]: V }
+type Tuple<T, V> = Array<T | V>
+
+local Map = {}
+
+export type Map<K, V> = {
+	size: number,
+	-- method definitions
+	set: (self: Map<K, V>, K, V) -> Map<K, V>,
+	get: (self: Map<K, V>, K) -> V | nil,
+	clear: (self: Map<K, V>) -> (),
+	delete: (self: Map<K, V>, K) -> boolean,
+	has: (self: Map<K, V>, K) -> boolean,
+	keys: (self: Map<K, V>) -> Array<K>,
+	values: (self: Map<K, V>) -> Array<V>,
+	entries: (self: Map<K, V>) -> Array<Tuple<K, V>>,
+	ipairs: (self: Map<K, V>) -> any,
+	[K]: V,
+	_map: { [K]: V },
+	_array: { [number]: K },
+}
+
+function Map:entries()
+	return {}
+end
+
+local function coerceToTable(mapLike: Map<any, any> | Table<any, any>): Array<Tuple<any, any>>
+    local e = mapLike:entries();
+    return e
+end
+
+    )";
+
+    CheckResult result = frontend.check("Module/Map");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
 }
 
 TEST_SUITE_END();

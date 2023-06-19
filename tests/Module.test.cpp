@@ -137,7 +137,7 @@ TEST_CASE_FIXTURE(Fixture, "deepClone_cyclic_table")
 
     CHECK_EQ(std::optional<std::string>{"Cyclic"}, ttv->syntheticName);
 
-    TypeId methodType = ttv->props["get"].type;
+    TypeId methodType = ttv->props["get"].type();
     REQUIRE(methodType != nullptr);
 
     const FunctionType* ftv = get<FunctionType>(methodType);
@@ -161,7 +161,7 @@ TEST_CASE_FIXTURE(Fixture, "deepClone_cyclic_table_2")
 
     TypeId methodTy = src.addType(FunctionType{src.addTypePack({}), src.addTypePack({tableTy})});
 
-    tt->props["get"].type = methodTy;
+    tt->props["get"].setType(methodTy);
 
     TypeArena dest;
 
@@ -170,7 +170,7 @@ TEST_CASE_FIXTURE(Fixture, "deepClone_cyclic_table_2")
     TableType* ctt = getMutable<TableType>(cloneTy);
     REQUIRE(ctt);
 
-    TypeId clonedMethodType = ctt->props["get"].type;
+    TypeId clonedMethodType = ctt->props["get"].type();
     REQUIRE(clonedMethodType);
 
     const FunctionType* cmf = get<FunctionType>(clonedMethodType);
@@ -199,7 +199,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "builtin_types_point_into_globalTypes_arena")
     TableType* exportsTable = getMutable<TableType>(*exports);
     REQUIRE(exportsTable != nullptr);
 
-    TypeId signType = exportsTable->props["sign"].type;
+    TypeId signType = exportsTable->props["sign"].type();
     REQUIRE(signType != nullptr);
 
     CHECK(!isInArena(signType, module->interfaceTypes));
@@ -340,14 +340,43 @@ TEST_CASE_FIXTURE(Fixture, "clone_recursion_limit")
     {
         TableType* ttv = getMutable<TableType>(nested);
 
-        ttv->props["a"].type = src.addType(TableType{});
-        nested = ttv->props["a"].type;
+        ttv->props["a"].setType(src.addType(TableType{}));
+        nested = ttv->props["a"].type();
     }
 
     TypeArena dest;
     CloneState cloneState;
 
     CHECK_THROWS_AS(clone(table, dest, cloneState), RecursionLimitException);
+}
+
+// Unions should never be cyclic, but we should clone them correctly even if
+// they are.
+TEST_CASE_FIXTURE(Fixture, "clone_cyclic_union")
+{
+    ScopedFastFlag sff{"LuauCloneCyclicUnions", true};
+
+    TypeArena src;
+
+    TypeId u = src.addType(UnionType{{builtinTypes->numberType, builtinTypes->stringType}});
+    UnionType* uu = getMutable<UnionType>(u);
+    REQUIRE(uu);
+
+    uu->options.push_back(u);
+
+    TypeArena dest;
+    CloneState cloneState;
+
+    TypeId cloned = clone(u, dest, cloneState);
+    REQUIRE(cloned);
+
+    const UnionType* clonedUnion = get<UnionType>(cloned);
+    REQUIRE(clonedUnion);
+    REQUIRE(3 == clonedUnion->options.size());
+
+    CHECK(builtinTypes->numberType == clonedUnion->options[0]);
+    CHECK(builtinTypes->stringType == clonedUnion->options[1]);
+    CHECK(cloned == clonedUnion->options[2]);
 }
 
 TEST_CASE_FIXTURE(Fixture, "any_persistance_does_not_leak")
@@ -369,7 +398,11 @@ type B = A
     auto mod = frontend.moduleResolver.getModule("Module/A");
     auto it = mod->exportedTypeBindings.find("A");
     REQUIRE(it != mod->exportedTypeBindings.end());
-    CHECK(toString(it->second.type) == "*error-type*");
+
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK(toString(it->second.type) == "any");
+    else
+        CHECK(toString(it->second.type) == "*error-type*");
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "do_not_clone_reexports")
@@ -407,7 +440,7 @@ return {}
     TypeId typeB = modBiter->second.type;
     TableType* tableB = getMutable<TableType>(typeB);
     REQUIRE(tableB);
-    CHECK(typeA == tableB->props["q"].type);
+    CHECK(typeA == tableB->props["q"].type());
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "do_not_clone_types_of_reexported_values")
@@ -443,7 +476,7 @@ return exports
     REQUIRE(typeB);
     TableType* tableA = getMutable<TableType>(*typeA);
     TableType* tableB = getMutable<TableType>(*typeB);
-    CHECK(tableA->props["a"].type == tableB->props["b"].type);
+    CHECK(tableA->props["a"].type() == tableB->props["b"].type());
 }
 
 TEST_SUITE_END();

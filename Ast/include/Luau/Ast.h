@@ -8,6 +8,7 @@
 #include <string>
 
 #include <string.h>
+#include <stdint.h>
 
 namespace Luau
 {
@@ -800,12 +801,20 @@ struct AstDeclaredClassProp
     bool isMethod = false;
 };
 
+struct AstTableIndexer
+{
+    AstType* indexType;
+    AstType* resultType;
+    Location location;
+};
+
 class AstStatDeclareClass : public AstStat
 {
 public:
     LUAU_RTTI(AstStatDeclareClass)
 
-    AstStatDeclareClass(const Location& location, const AstName& name, std::optional<AstName> superName, const AstArray<AstDeclaredClassProp>& props);
+    AstStatDeclareClass(const Location& location, const AstName& name, std::optional<AstName> superName, const AstArray<AstDeclaredClassProp>& props,
+        AstTableIndexer* indexer = nullptr);
 
     void visit(AstVisitor* visitor) override;
 
@@ -813,6 +822,7 @@ public:
     std::optional<AstName> superName;
 
     AstArray<AstDeclaredClassProp> props;
+    AstTableIndexer* indexer;
 };
 
 class AstType : public AstNode
@@ -859,13 +869,6 @@ struct AstTableProp
     AstName name;
     Location location;
     AstType* type;
-};
-
-struct AstTableIndexer
-{
-    AstType* indexType;
-    AstType* resultType;
-    Location location;
 };
 
 class AstTypeTable : public AstType

@@ -10,6 +10,7 @@
 #include "Luau/Unifiable.h"
 #include "Luau/Variant.h"
 
+#include <atomic>
 #include <deque>
 #include <map>
 #include <memory>
@@ -22,6 +23,7 @@
 
 LUAU_FASTINT(LuauTableTypeMaximumStringifierLength)
 LUAU_FASTINT(LuauTypeMaximumStringifierLength)
+LUAU_FASTFLAG(LuauTypecheckClassTypeIndexers)
 
 namespace Luau
 {
@@ -29,6 +31,8 @@ namespace Luau
 struct TypeArena;
 struct Scope;
 using ScopePtr = std::shared_ptr<Scope>;
+
+struct TypeFamily;
 
 /**
  * There are three kinds of type variables:
@@ -300,7 +304,7 @@ struct MagicFunctionCallContext
     TypePackId result;
 };
 
-using DcrMagicFunction = bool (*)(MagicFunctionCallContext);
+using DcrMagicFunction = std::function<bool(MagicFunctionCallContext)>;
 
 struct MagicRefinementContext
 {
@@ -345,7 +349,9 @@ struct FunctionType
     DcrMagicFunction dcrMagicFunction = nullptr;
     DcrMagicRefinement dcrMagicRefinement = nullptr;
     bool hasSelf;
-    bool hasNoGenerics = false;
+    // `hasNoFreeOrGenericTypes` should be true if and only if the type does not have any free or generic types present inside it.
+    // this flag is used as an optimization to exit early from procedures that manipulate free or generic types.
+    bool hasNoFreeOrGenericTypes = false;
 };
 
 enum class TableState
@@ -378,12 +384,47 @@ struct TableIndexer
 
 struct Property
 {
-    TypeId type;
+    static Property readonly(TypeId ty);
+    static Property writeonly(TypeId ty);
+    static Property rw(TypeId ty);                 // Shared read-write type.
+    static Property rw(TypeId read, TypeId write); // Separate read-write type.
+
+    // Invariant: at least one of the two optionals are not nullopt!
+    // If the read type is not nullopt, but the write type is, then the property is readonly.
+    // If the read type is nullopt, but the write type is not, then the property is writeonly.
+    // If the read and write types are not nullopt, then the property is read and write.
+    // Otherwise, an assertion where read and write types are both nullopt will be tripped.
+    static Property create(std::optional<TypeId> read, std::optional<TypeId> write);
+
     bool deprecated = false;
     std::string deprecatedSuggestion;
     std::optional<Location> location = std::nullopt;
     Tags tags;
     std::optional<std::string> documentationSymbol;
+
+    // DEPRECATED
+    // TODO: Kill all constructors in favor of `Property::rw(TypeId read, TypeId write)` and friends.
+    Property();
+    Property(TypeId readTy, bool deprecated = false, const std::string& deprecatedSuggestion = "", std::optional<Location> location = std::nullopt,
+        const Tags& tags = {}, const std::optional<std::string>& documentationSymbol = std::nullopt);
+
+    // DEPRECATED: Should only be called in non-RWP! We assert that the `readTy` is not nullopt.
+    // TODO: Kill once we don't have non-RWP.
+    TypeId type() const;
+    void setType(TypeId ty);
+
+    // Should only be called in RWP!
+    // We do not assert that `readTy` nor `writeTy` are nullopt or not.
+    // The invariant is that at least one of them mustn't be nullopt, which we do assert here.
+    // TODO: Kill this in favor of exposing `readTy`/`writeTy` directly? If we do, we'll lose the asserts which will be useful while debugging.
+    std::optional<TypeId> readType() const;
+    std::optional<TypeId> writeType() const;
+
+    bool isShared() const;
+
+private:
+    std::optional<TypeId> readTy;
+    std::optional<TypeId> writeTy;
 };
 
 struct TableType
@@ -461,6 +502,7 @@ struct ClassType
     Tags tags;
     std::shared_ptr<ClassUserData> userData;
     ModuleName definitionModuleName;
+    std::optional<TableIndexer> indexer;
 
     ClassType(Name name, Props props, std::optional<TypeId> parent, std::optional<TypeId> metatable, Tags tags,
         std::shared_ptr<ClassUserData> userData, ModuleName definitionModuleName)
@@ -473,6 +515,35 @@ struct ClassType
         , definitionModuleName(definitionModuleName)
     {
     }
+
+    ClassType(Name name, Props props, std::optional<TypeId> parent, std::optional<TypeId> metatable, Tags tags,
+        std::shared_ptr<ClassUserData> userData, ModuleName definitionModuleName, std::optional<TableIndexer> indexer)
+        : name(name)
+        , props(props)
+        , parent(parent)
+        , metatable(metatable)
+        , tags(tags)
+        , userData(userData)
+        , definitionModuleName(definitionModuleName)
+        , indexer(indexer)
+    {
+        LUAU_ASSERT(FFlag::LuauTypecheckClassTypeIndexers);
+    }
+};
+
+/**
+ * An instance of a type family that has not yet been reduced to a more concrete
+ * type. The constraint solver receives a constraint to reduce each
+ * TypeFamilyInstanceType to a concrete type. A design detail is important to
+ * note here: the parameters for this instantiation of the type family are
+ * contained within this type, so that they can be substituted.
+ */
+struct TypeFamilyInstanceType
+{
+    NotNull<const TypeFamily> family;
+
+    std::vector<TypeId> typeArguments;
+    std::vector<TypePackId> packArguments;
 };
 
 struct TypeFun
@@ -550,7 +621,43 @@ struct IntersectionType
 
 struct LazyType
 {
-    std::function<TypeId()> thunk;
+    LazyType() = default;
+    LazyType(std::function<void(LazyType&)> unwrap)
+        : unwrap(unwrap)
+    {
+    }
+
+    // std::atomic is sad and requires a manual copy
+    LazyType(const LazyType& rhs)
+        : unwrap(rhs.unwrap)
+        , unwrapped(rhs.unwrapped.load())
+    {
+    }
+
+    LazyType(LazyType&& rhs) noexcept
+        : unwrap(std::move(rhs.unwrap))
+        , unwrapped(rhs.unwrapped.load())
+    {
+    }
+
+    LazyType& operator=(const LazyType& rhs)
+    {
+        unwrap = rhs.unwrap;
+        unwrapped = rhs.unwrapped.load();
+
+        return *this;
+    }
+
+    LazyType& operator=(LazyType&& rhs) noexcept
+    {
+        unwrap = std::move(rhs.unwrap);
+        unwrapped = rhs.unwrapped.load();
+
+        return *this;
+    }
+
+    std::function<void(LazyType&)> unwrap;
+    std::atomic<TypeId> unwrapped = nullptr;
 };
 
 struct UnknownType
@@ -569,8 +676,9 @@ struct NegationType
 
 using ErrorType = Unifiable::Error;
 
-using TypeVariant = Unifiable::Variant<TypeId, FreeType, GenericType, PrimitiveType, BlockedType, PendingExpansionType, SingletonType, FunctionType,
-    TableType, MetatableType, ClassType, AnyType, UnionType, IntersectionType, LazyType, UnknownType, NeverType, NegationType>;
+using TypeVariant =
+    Unifiable::Variant<TypeId, FreeType, GenericType, PrimitiveType, BlockedType, PendingExpansionType, SingletonType, FunctionType, TableType,
+        MetatableType, ClassType, AnyType, UnionType, IntersectionType, LazyType, UnknownType, NeverType, NegationType, TypeFamilyInstanceType>;
 
 struct Type final
 {
@@ -623,7 +731,7 @@ bool areEqual(SeenSet& seen, const Type& lhs, const Type& rhs);
 
 // Follow BoundTypes until we get to something real
 TypeId follow(TypeId t);
-TypeId follow(TypeId t, std::function<TypeId(TypeId)> mapper);
+TypeId follow(TypeId t, const void* context, TypeId (*mapper)(const void*, TypeId));
 
 std::vector<TypeId> flattenIntersection(TypeId ty);
 
@@ -798,7 +906,7 @@ struct TypeIterator
     TypeIterator<T> operator++(int)
     {
         TypeIterator<T> copy = *this;
-        ++copy;
+        ++*this;
         return copy;
     }
 

@@ -26,6 +26,7 @@ LUAU_FASTINTVARIABLE(LuauTableTypeMaximumStringifierLength, 0)
 LUAU_FASTINT(LuauTypeInferRecursionLimit)
 LUAU_FASTFLAG(LuauInstantiateInSubtyping)
 LUAU_FASTFLAG(LuauNormalizeBlockedTypes)
+LUAU_FASTFLAG(DebugLuauReadWriteProperties)
 
 namespace Luau
 {
@@ -46,36 +47,49 @@ static std::optional<WithPredicate<TypePackId>> magicFunctionFind(
     TypeChecker& typechecker, const ScopePtr& scope, const AstExprCall& expr, WithPredicate<TypePackId> withPredicate);
 static bool dcrMagicFunctionFind(MagicFunctionCallContext context);
 
+// LUAU_NOINLINE prevents unwrapLazy from being inlined into advance below; advance is important to keep inlineable
+static LUAU_NOINLINE TypeId unwrapLazy(LazyType* ltv)
+{
+    TypeId unwrapped = ltv->unwrapped.load();
+
+    if (unwrapped)
+        return unwrapped;
+
+    ltv->unwrap(*ltv);
+    unwrapped = ltv->unwrapped.load();
+
+    if (!unwrapped)
+        throw InternalCompilerError("Lazy Type didn't fill in unwrapped type field");
+
+    if (get<LazyType>(unwrapped))
+        throw InternalCompilerError("Lazy Type cannot resolve to another Lazy Type");
+
+    return unwrapped;
+}
+
 TypeId follow(TypeId t)
 {
-    return follow(t, [](TypeId t) {
+    return follow(t, nullptr, [](const void*, TypeId t) -> TypeId {
         return t;
     });
 }
 
-TypeId follow(TypeId t, std::function<TypeId(TypeId)> mapper)
+TypeId follow(TypeId t, const void* context, TypeId (*mapper)(const void*, TypeId))
 {
-    auto advance = [&mapper](TypeId ty) -> std::optional<TypeId> {
-        if (auto btv = get<Unifiable::Bound<TypeId>>(mapper(ty)))
+    auto advance = [context, mapper](TypeId ty) -> std::optional<TypeId> {
+        TypeId mapped = mapper(context, ty);
+
+        if (auto btv = get<Unifiable::Bound<TypeId>>(mapped))
             return btv->boundTo;
-        else if (auto ttv = get<TableType>(mapper(ty)))
+
+        if (auto ttv = get<TableType>(mapped))
             return ttv->boundTo;
-        else
-            return std::nullopt;
+
+        if (auto ltv = getMutable<LazyType>(mapped))
+            return unwrapLazy(ltv);
+
+        return std::nullopt;
     };
-
-    auto force = [&mapper](TypeId ty) {
-        if (auto ltv = get_if<LazyType>(&mapper(ty)->ty))
-        {
-            TypeId res = ltv->thunk();
-            if (get<LazyType>(res))
-                throw InternalCompilerError("Lazy Type cannot resolve to another Lazy Type");
-
-            *asMutable(ty) = BoundType(res);
-        }
-    };
-
-    force(t);
 
     TypeId cycleTester = t; // Null once we've determined that there is no cycle
     if (auto a = advance(cycleTester))
@@ -83,9 +97,11 @@ TypeId follow(TypeId t, std::function<TypeId(TypeId)> mapper)
     else
         return t;
 
+    if (!advance(cycleTester)) // Short circuit traversal for the rather common case when advance(advance(t)) == null
+        return cycleTester;
+
     while (true)
     {
-        force(t);
         auto a1 = advance(t);
         if (a1)
             t = *a1;
@@ -585,6 +601,99 @@ FunctionType::FunctionType(TypeLevel level, Scope* scope, std::vector<TypeId> ge
 {
 }
 
+Property::Property() {}
+
+Property::Property(TypeId readTy, bool deprecated, const std::string& deprecatedSuggestion, std::optional<Location> location, const Tags& tags,
+    const std::optional<std::string>& documentationSymbol)
+    : deprecated(deprecated)
+    , deprecatedSuggestion(deprecatedSuggestion)
+    , location(location)
+    , tags(tags)
+    , documentationSymbol(documentationSymbol)
+    , readTy(readTy)
+    , writeTy(readTy)
+{
+    LUAU_ASSERT(!FFlag::DebugLuauReadWriteProperties);
+}
+
+Property Property::readonly(TypeId ty)
+{
+    LUAU_ASSERT(FFlag::DebugLuauReadWriteProperties);
+
+    Property p;
+    p.readTy = ty;
+    return p;
+}
+
+Property Property::writeonly(TypeId ty)
+{
+    LUAU_ASSERT(FFlag::DebugLuauReadWriteProperties);
+
+    Property p;
+    p.writeTy = ty;
+    return p;
+}
+
+Property Property::rw(TypeId ty)
+{
+    return Property::rw(ty, ty);
+}
+
+Property Property::rw(TypeId read, TypeId write)
+{
+    LUAU_ASSERT(FFlag::DebugLuauReadWriteProperties);
+
+    Property p;
+    p.readTy = read;
+    p.writeTy = write;
+    return p;
+}
+
+Property Property::create(std::optional<TypeId> read, std::optional<TypeId> write)
+{
+    if (read && !write)
+        return Property::readonly(*read);
+    else if (!read && write)
+        return Property::writeonly(*write);
+    else
+    {
+        LUAU_ASSERT(read && write);
+        return Property::rw(*read, *write);
+    }
+}
+
+TypeId Property::type() const
+{
+    LUAU_ASSERT(!FFlag::DebugLuauReadWriteProperties);
+    LUAU_ASSERT(readTy);
+    return *readTy;
+}
+
+void Property::setType(TypeId ty)
+{
+    LUAU_ASSERT(!FFlag::DebugLuauReadWriteProperties);
+    readTy = ty;
+}
+
+std::optional<TypeId> Property::readType() const
+{
+    LUAU_ASSERT(FFlag::DebugLuauReadWriteProperties);
+    LUAU_ASSERT(!(bool(readTy) && bool(writeTy)));
+    return readTy;
+}
+
+std::optional<TypeId> Property::writeType() const
+{
+    LUAU_ASSERT(FFlag::DebugLuauReadWriteProperties);
+    LUAU_ASSERT(!(bool(readTy) && bool(writeTy)));
+    return writeTy;
+}
+
+bool Property::isShared() const
+{
+    return readTy && writeTy && readTy == writeTy;
+}
+
 TableType::TableType(TableState state, TypeLevel level, Scope* scope)
     : state(state)
     , level(level)
@@ -672,7 +781,7 @@ bool areEqual(SeenSet& seen, const TableType& lhs, const TableType& rhs)
         if (l->first != r->first)
             return false;
 
-        if (!areEqual(seen, *l->second.type, *r->second.type))
+        if (!areEqual(seen, *l->second.type(), *r->second.type()))
             return false;
         ++l;
         ++r;
@@ -974,7 +1083,7 @@ void persist(TypeId ty)
             LUAU_ASSERT(ttv->state != TableState::Free && ttv->state != TableState::Unsealed);
 
             for (const auto& [_name, prop] : ttv->props)
-                queue.push_back(prop.type);
+                queue.push_back(prop.type());
 
             if (ttv->indexer)
             {
@@ -985,7 +1094,7 @@ void persist(TypeId ty)
         else if (auto ctv = get<ClassType>(t))
         {
             for (const auto& [_name, prop] : ctv->props)
-                queue.push_back(prop.type);
+                queue.push_back(prop.type());
         }
         else if (auto utv = get<UnionType>(t))
         {

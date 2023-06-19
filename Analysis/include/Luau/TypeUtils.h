@@ -15,6 +15,12 @@ namespace Luau
 struct TxnLog;
 struct TypeArena;
 
+enum class ValueContext
+{
+    LValue,
+    RValue
+};
+
 using ScopePtr = std::shared_ptr<struct Scope>;
 
 std::optional<TypeId> findMetatableEntry(
@@ -48,5 +54,14 @@ std::vector<TypeId> reduceUnion(const std::vector<TypeId>& types);
  * @returns a type with nil removed, or nil itself if that were the only option.
  */
 TypeId stripNil(NotNull<BuiltinTypes> builtinTypes, TypeArena& arena, TypeId ty);
+
+template<typename T, typename Ty>
+const T* get(std::optional<Ty> ty)
+{
+    if (ty)
+        return get<T>(*ty);
+    else
+        return nullptr;
+}
 
 } // namespace Luau

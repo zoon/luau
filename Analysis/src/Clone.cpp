@@ -8,14 +8,56 @@
 
 LUAU_FASTFLAG(DebugLuauCopyBeforeNormalizing)
 LUAU_FASTFLAG(LuauClonePublicInterfaceLess2)
+LUAU_FASTFLAG(DebugLuauReadWriteProperties)
 
 LUAU_FASTINTVARIABLE(LuauTypeCloneRecursionLimit, 300)
+LUAU_FASTFLAGVARIABLE(LuauCloneCyclicUnions, false)
 
 namespace Luau
 {
 
 namespace
 {
+
+Property clone(const Property& prop, TypeArena& dest, CloneState& cloneState)
+{
+    if (FFlag::DebugLuauReadWriteProperties)
+    {
+        std::optional<TypeId> cloneReadTy;
+        if (auto ty = prop.readType())
+            cloneReadTy = clone(*ty, dest, cloneState);
+
+        std::optional<TypeId> cloneWriteTy;
+        if (auto ty = prop.writeType())
+            cloneWriteTy = clone(*ty, dest, cloneState);
+
+        std::optional<Property> cloned = Property::create(cloneReadTy, cloneWriteTy);
+        LUAU_ASSERT(cloned);
+        cloned->deprecated = prop.deprecated;
+        cloned->deprecatedSuggestion = prop.deprecatedSuggestion;
+        cloned->location = prop.location;
+        cloned->tags = prop.tags;
+        cloned->documentationSymbol = prop.documentationSymbol;
+        return *cloned;
+    }
+    else
+    {
+        return Property{
+            clone(prop.type(), dest, cloneState),
+            prop.deprecated,
+            prop.deprecatedSuggestion,
+            prop.location,
+            prop.tags,
+            prop.documentationSymbol,
+        };
+    }
+}
+
+static TableIndexer clone(const TableIndexer& indexer, TypeArena& dest, CloneState& cloneState)
+{
+    LUAU_ASSERT(FFlag::LuauTypecheckClassTypeIndexers);
+    return TableIndexer{clone(indexer.indexType, dest, cloneState), clone(indexer.indexResultType, dest, cloneState)};
+}
 
 struct TypePackCloner;
 
@@ -63,6 +105,7 @@ struct TypeCloner
     void operator()(const UnknownType& t);
     void operator()(const NeverType& t);
     void operator()(const NegationType& t);
+    void operator()(const TypeFamilyInstanceType& t);
 };
 
 struct TypePackCloner
@@ -135,6 +178,22 @@ struct TypePackCloner
 
         if (t.tail)
             destTp->tail = clone(*t.tail, dest, cloneState);
+    }
+
+    void operator()(const TypeFamilyInstanceTypePack& t)
+    {
+        TypePackId cloned = dest.addTypePack(TypeFamilyInstanceTypePack{t.family, {}, {}});
+        TypeFamilyInstanceTypePack* destTp = getMutable<TypeFamilyInstanceTypePack>(cloned);
+        LUAU_ASSERT(destTp);
+        seenTypePacks[typePackId] = cloned;
+
+        destTp->typeArguments.reserve(t.typeArguments.size());
+        for (TypeId ty : t.typeArguments)
+            destTp->typeArguments.push_back(clone(ty, dest, cloneState));
+
+        destTp->packArguments.reserve(t.packArguments.size());
+        for (TypePackId tp : t.packArguments)
+            destTp->packArguments.push_back(clone(tp, dest, cloneState));
     }
 };
 
@@ -224,7 +283,7 @@ void TypeCloner::operator()(const FunctionType& t)
     ftv->argTypes = clone(t.argTypes, dest, cloneState);
     ftv->argNames = t.argNames;
     ftv->retTypes = clone(t.retTypes, dest, cloneState);
-    ftv->hasNoGenerics = t.hasNoGenerics;
+    ftv->hasNoFreeOrGenericTypes = t.hasNoFreeOrGenericTypes;
 }
 
 void TypeCloner::operator()(const TableType& t)
@@ -251,10 +310,18 @@ void TypeCloner::operator()(const TableType& t)
         ttv->boundTo = clone(*t.boundTo, dest, cloneState);
 
     for (const auto& [name, prop] : t.props)
-        ttv->props[name] = {clone(prop.type, dest, cloneState), prop.deprecated, {}, prop.location, prop.tags};
+        ttv->props[name] = clone(prop, dest, cloneState);
 
-    if (t.indexer)
-        ttv->indexer = TableIndexer{clone(t.indexer->indexType, dest, cloneState), clone(t.indexer->indexResultType, dest, cloneState)};
+    if (FFlag::LuauTypecheckClassTypeIndexers)
+    {
+        if (t.indexer)
+            ttv->indexer = clone(*t.indexer, dest, cloneState);
+    }
+    else
+    {
+        if (t.indexer)
+            ttv->indexer = TableIndexer{clone(t.indexer->indexType, dest, cloneState), clone(t.indexer->indexResultType, dest, cloneState)};
+    }
 
     for (TypeId& arg : ttv->instantiatedTypeParams)
         arg = clone(arg, dest, cloneState);
@@ -285,13 +352,19 @@ void TypeCloner::operator()(const ClassType& t)
     seenTypes[typeId] = result;
 
     for (const auto& [name, prop] : t.props)
-        ctv->props[name] = {clone(prop.type, dest, cloneState), prop.deprecated, {}, prop.location, prop.tags};
+        ctv->props[name] = clone(prop, dest, cloneState);
 
     if (t.parent)
         ctv->parent = clone(*t.parent, dest, cloneState);
 
     if (t.metatable)
         ctv->metatable = clone(*t.metatable, dest, cloneState);
+
+    if (FFlag::LuauTypecheckClassTypeIndexers)
+    {
+        if (t.indexer)
+            ctv->indexer = clone(*t.indexer, dest, cloneState);
+    }
 }
 
 void TypeCloner::operator()(const AnyType& t)
@@ -301,14 +374,30 @@ void TypeCloner::operator()(const AnyType& t)
 
 void TypeCloner::operator()(const UnionType& t)
 {
-    std::vector<TypeId> options;
-    options.reserve(t.options.size());
+    if (FFlag::LuauCloneCyclicUnions)
+    {
+        TypeId result = dest.addType(FreeType{nullptr});
+        seenTypes[typeId] = result;
 
-    for (TypeId ty : t.options)
-        options.push_back(clone(ty, dest, cloneState));
+        std::vector<TypeId> options;
+        options.reserve(t.options.size());
 
-    TypeId result = dest.addType(UnionType{std::move(options)});
-    seenTypes[typeId] = result;
+        for (TypeId ty : t.options)
+            options.push_back(clone(ty, dest, cloneState));
+
+        asMutable(result)->ty.emplace<UnionType>(std::move(options));
+    }
+    else
+    {
+        std::vector<TypeId> options;
+        options.reserve(t.options.size());
+
+        for (TypeId ty : t.options)
+            options.push_back(clone(ty, dest, cloneState));
+
+        TypeId result = dest.addType(UnionType{std::move(options)});
+        seenTypes[typeId] = result;
+    }
 }
 
 void TypeCloner::operator()(const IntersectionType& t)
@@ -325,7 +414,14 @@ void TypeCloner::operator()(const IntersectionType& t)
 
 void TypeCloner::operator()(const LazyType& t)
 {
-    defaultClone(t);
+    if (TypeId unwrapped = t.unwrapped.load())
+    {
+        seenTypes[typeId] = clone(unwrapped, dest, cloneState);
+    }
+    else
+    {
+        defaultClone(t);
+    }
 }
 
 void TypeCloner::operator()(const UnknownType& t)
@@ -345,6 +441,28 @@ void TypeCloner::operator()(const NegationType& t)
 
     TypeId ty = clone(t.ty, dest, cloneState);
     asMutable(result)->ty = NegationType{ty};
+}
+
+void TypeCloner::operator()(const TypeFamilyInstanceType& t)
+{
+    TypeId result = dest.addType(TypeFamilyInstanceType{
+        t.family,
+        {},
+        {},
+    });
+
+    seenTypes[typeId] = result;
+
+    TypeFamilyInstanceType* tfit = getMutable<TypeFamilyInstanceType>(result);
+    LUAU_ASSERT(tfit != nullptr);
+
+    tfit->typeArguments.reserve(t.typeArguments.size());
+    for (TypeId p : t.typeArguments)
+        tfit->typeArguments.push_back(clone(p, dest, cloneState));
+
+    tfit->packArguments.reserve(t.packArguments.size());
+    for (TypePackId p : t.packArguments)
+        tfit->packArguments.push_back(clone(p, dest, cloneState));
 }
 
 } // anonymous namespace

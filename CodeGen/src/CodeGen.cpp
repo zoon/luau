@@ -18,7 +18,6 @@
 #include "Luau/AssemblyBuilderA64.h"
 #include "Luau/AssemblyBuilderX64.h"
 
-#include "CustomExecUtils.h"
 #include "NativeState.h"
 
 #include "CodeGenA64.h"
@@ -34,6 +33,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #ifdef _MSC_VER
@@ -50,27 +50,61 @@
 #endif
 
 LUAU_FASTFLAGVARIABLE(DebugCodegenNoOpt, false)
+LUAU_FASTFLAGVARIABLE(DebugCodegenOptSize, false)
+LUAU_FASTFLAGVARIABLE(DebugCodegenSkipNumbering, false)
 
 namespace Luau
 {
 namespace CodeGen
 {
 
-static NativeProto* createNativeProto(Proto* proto, const IrBuilder& ir)
+static const Instruction kCodeEntryInsn = LOP_NATIVECALL;
+
+static void* gPerfLogContext = nullptr;
+static PerfLogFn gPerfLogFn = nullptr;
+
+struct NativeProto
 {
-    NativeProto* result = new NativeProto();
+    Proto* p;
+    void* execdata;
+    uintptr_t exectarget;
+};
 
-    result->proto = proto;
-    result->instTargets = new uintptr_t[proto->sizecode];
+static NativeProto createNativeProto(Proto* proto, const IrBuilder& ir)
+{
+    int sizecode = proto->sizecode;
 
-    for (int i = 0; i < proto->sizecode; i++)
+    uint32_t* instOffsets = new uint32_t[sizecode];
+    uint32_t instTarget = ir.function.bcMapping[0].asmLocation;
+
+    for (int i = 0; i < sizecode; i++)
     {
-        auto [irLocation, asmLocation] = ir.function.bcMapping[i];
+        LUAU_ASSERT(ir.function.bcMapping[i].asmLocation >= instTarget);
 
-        result->instTargets[i] = irLocation == ~0u ? 0 : asmLocation;
+        instOffsets[i] = ir.function.bcMapping[i].asmLocation - instTarget;
     }
 
-    return result;
+    // entry target will be relocated when assembly is finalized
+    return {proto, instOffsets, instTarget};
+}
+
+static void destroyExecData(void* execdata)
+{
+    delete[] static_cast<uint32_t*>(execdata);
+}
+
+static void logPerfFunction(Proto* p, uintptr_t addr, unsigned size)
+{
+    LUAU_ASSERT(p->source);
+
+    const char* source = getstr(p->source);
+    source = (source[0] == '=' || source[0] == '@') ? source + 1 : "[string]";
+
+    char name[256];
+    snprintf(name, sizeof(name), "<luau> %s:%d %s", source, p->linedefined, p->debugname ? getstr(p->debugname) : "");
+
+    if (gPerfLogFn)
+        gPerfLogFn(gPerfLogContext, addr, size, name);
 }
 
 template<typename AssemblyBuilder, typename IrLowering>
@@ -91,32 +125,21 @@ static bool lowerImpl(AssemblyBuilder& build, IrLowering& lowering, IrFunction& 
             return (a.kind == IrBlockKind::Fallback) < (b.kind == IrBlockKind::Fallback);
 
         // Try to order by instruction order
-        return a.start < b.start;
+        return a.sortkey < b.sortkey;
     });
 
-    DenseHashMap<uint32_t, uint32_t> bcLocations{~0u};
+    // For each IR instruction that begins a bytecode instruction, which bytecode instruction is it?
+    std::vector<uint32_t> bcLocations(function.instructions.size() + 1, ~0u);
 
-    // Create keys for IR assembly locations that original bytecode instruction are interested in
-    for (const auto& [irLocation, asmLocation] : function.bcMapping)
+    for (size_t i = 0; i < function.bcMapping.size(); ++i)
     {
+        uint32_t irLocation = function.bcMapping[i].irLocation;
+
         if (irLocation != ~0u)
-            bcLocations[irLocation] = 0;
+            bcLocations[irLocation] = uint32_t(i);
     }
 
-    DenseHashMap<uint32_t, uint32_t> indexIrToBc{~0u};
     bool outputEnabled = options.includeAssembly || options.includeIr;
-
-    if (outputEnabled && options.annotator)
-    {
-        // Create reverse mapping from IR location to bytecode location
-        for (size_t i = 0; i < function.bcMapping.size(); ++i)
-        {
-            uint32_t irLocation = function.bcMapping[i].irLocation;
-
-            if (irLocation != ~0u)
-                indexIrToBc[irLocation] = uint32_t(i);
-        }
-    }
 
     IrToStringContext ctx{build.text, function.blocks, function.constants, function.cfg};
 
@@ -131,7 +154,6 @@ static bool lowerImpl(AssemblyBuilder& build, IrLowering& lowering, IrFunction& 
     for (size_t i = 0; i < sortedBlocks.size(); ++i)
     {
         uint32_t blockIndex = sortedBlocks[i];
-
         IrBlock& block = function.blocks[blockIndex];
 
         if (block.kind == IrBlockKind::Dead)
@@ -154,31 +176,31 @@ static bool lowerImpl(AssemblyBuilder& build, IrLowering& lowering, IrFunction& 
             toStringDetailed(ctx, block, blockIndex, /* includeUseInfo */ true);
         }
 
+        // Values can only reference restore operands in the current block
+        function.validRestoreOpBlockIdx = blockIndex;
+
         build.setLabel(block.label);
 
         for (uint32_t index = block.start; index <= block.finish; index++)
         {
             LUAU_ASSERT(index < function.instructions.size());
 
+            uint32_t bcLocation = bcLocations[index];
+
             // If IR instruction is the first one for the original bytecode, we can annotate it with source code text
-            if (outputEnabled && options.annotator)
+            if (outputEnabled && options.annotator && bcLocation != ~0u)
             {
-                if (uint32_t* bcIndex = indexIrToBc.find(index))
-                    options.annotator(options.annotatorContext, build.text, bytecodeid, *bcIndex);
+                options.annotator(options.annotatorContext, build.text, bytecodeid, bcLocation);
             }
 
             // If bytecode needs the location of this instruction for jumps, record it
-            if (uint32_t* bcLocation = bcLocations.find(index))
+            if (bcLocation != ~0u)
             {
                 Label label = (index == block.start) ? block.label : build.setLabel();
-                *bcLocation = build.getLabelOffset(label);
+                function.bcMapping[bcLocation].asmLocation = build.getLabelOffset(label);
             }
 
             IrInst& inst = function.instructions[index];
-
-            // Substitutions might have meta information about operand restore location from memory
-            if (inst.cmd == IrCmd::SUBSTITUTE && inst.b.kind != IrOpKind::None)
-                function.recordRestoreOp(inst.a.index, inst.b);
 
             // Skip pseudo instructions, but make sure they are not used at this stage
             // This also prevents them from getting into text output when that's enabled
@@ -188,10 +210,13 @@ static bool lowerImpl(AssemblyBuilder& build, IrLowering& lowering, IrFunction& 
                 continue;
             }
 
+            // Either instruction result value is not referenced or the use count is not zero
+            LUAU_ASSERT(inst.lastUse == 0 || inst.useCount != 0);
+
             if (options.includeIr)
             {
                 build.logAppend("# ");
-                toStringDetailed(ctx, inst, index, /* includeUseInfo */ true);
+                toStringDetailed(ctx, block, blockIndex, inst, index, /* includeUseInfo */ true);
             }
 
             IrBlock& next = i + 1 < sortedBlocks.size() ? function.blocks[sortedBlocks[i + 1]] : dummy;
@@ -209,27 +234,32 @@ static bool lowerImpl(AssemblyBuilder& build, IrLowering& lowering, IrFunction& 
                     build.setLabel(abandoned.label);
                 }
 
+                lowering.finishFunction();
+
                 return false;
             }
         }
+
+        lowering.finishBlock();
 
         if (options.includeIr)
             build.logAppend("#\n");
     }
 
-    if (outputEnabled && !options.includeOutlinedCode && seenFallback)
+    if (!seenFallback)
+    {
+        textSize = build.text.length();
+        codeSize = build.getCodeSize();
+    }
+
+    lowering.finishFunction();
+
+    if (outputEnabled && !options.includeOutlinedCode && textSize < build.text.size())
     {
         build.text.resize(textSize);
 
         if (options.includeAssembly)
             build.logAppend("; skipping %u bytes of outlined code\n", unsigned((build.getCodeSize() - codeSize) * sizeof(build.code[0])));
-    }
-
-    // Copy assembly locations of IR instructions that are mapped to bytecode instructions
-    for (auto& [irLocation, asmLocation] : function.bcMapping)
-    {
-        if (irLocation != ~0u)
-            asmLocation = bcLocations[irLocation];
     }
 
     return true;
@@ -248,13 +278,13 @@ static bool lowerImpl(AssemblyBuilder& build, IrLowering& lowering, IrFunction& 
 [[maybe_unused]] static bool lowerIr(
     A64::AssemblyBuilderA64& build, IrBuilder& ir, NativeState& data, ModuleHelpers& helpers, Proto* proto, AssemblyOptions options)
 {
-    A64::IrLoweringA64 lowering(build, helpers, data, proto, ir.function);
+    A64::IrLoweringA64 lowering(build, helpers, data, ir.function);
 
     return lowerImpl(build, lowering, ir.function, proto->bytecodeid, options);
 }
 
 template<typename AssemblyBuilder>
-static NativeProto* assembleFunction(AssemblyBuilder& build, NativeState& data, ModuleHelpers& helpers, Proto* proto, AssemblyOptions options)
+static std::optional<NativeProto> assembleFunction(AssemblyBuilder& build, NativeState& data, ModuleHelpers& helpers, Proto* proto, AssemblyOptions options)
 {
     if (options.includeAssembly || options.includeIr)
     {
@@ -291,7 +321,12 @@ static NativeProto* assembleFunction(AssemblyBuilder& build, NativeState& data, 
 
     if (!FFlag::DebugCodegenNoOpt)
     {
-        constPropInBlockChains(ir);
+        bool useValueNumbering = !FFlag::DebugCodegenSkipNumbering;
+
+        constPropInBlockChains(ir, useValueNumbering);
+
+        if (!FFlag::DebugCodegenOptSize)
+            createLinearBlocks(ir, useValueNumbering);
     }
 
     if (!lowerIr(build, ir, data, helpers, proto, options))
@@ -299,7 +334,7 @@ static NativeProto* assembleFunction(AssemblyBuilder& build, NativeState& data, 
         if (build.logText)
             build.logAppend("; skipping (can't lower)\n\n");
 
-        return nullptr;
+        return std::nullopt;
     }
 
     if (build.logText)
@@ -308,52 +343,44 @@ static NativeProto* assembleFunction(AssemblyBuilder& build, NativeState& data, 
     return createNativeProto(proto, ir);
 }
 
-static void destroyNativeProto(NativeProto* nativeProto)
+static NativeState* getNativeState(lua_State* L)
 {
-    delete[] nativeProto->instTargets;
-    delete nativeProto;
+    return static_cast<NativeState*>(L->global->ecb.context);
 }
 
 static void onCloseState(lua_State* L)
 {
-    destroyNativeState(L);
+    delete getNativeState(L);
+    L->global->ecb = lua_ExecutionCallbacks();
 }
 
 static void onDestroyFunction(lua_State* L, Proto* proto)
 {
-    NativeProto* nativeProto = getProtoExecData(proto);
-    LUAU_ASSERT(nativeProto->proto == proto);
-
-    setProtoExecData(proto, nullptr);
-    destroyNativeProto(nativeProto);
+    destroyExecData(proto->execdata);
+    proto->execdata = nullptr;
+    proto->exectarget = 0;
+    proto->codeentry = proto->code;
 }
 
 static int onEnter(lua_State* L, Proto* proto)
 {
-    if (L->singlestep)
-        return 1;
-
     NativeState* data = getNativeState(L);
 
-    if (!L->ci->savedpc)
-        L->ci->savedpc = proto->code;
+    LUAU_ASSERT(proto->execdata);
+    LUAU_ASSERT(L->ci->savedpc >= proto->code && L->ci->savedpc < proto->code + proto->sizecode);
 
-    // We will jump into native code through a gateway
-    bool (*gate)(lua_State*, Proto*, uintptr_t, NativeContext*) = (bool (*)(lua_State*, Proto*, uintptr_t, NativeContext*))data->context.gateEntry;
-
-    NativeProto* nativeProto = getProtoExecData(proto);
-    uintptr_t target = nativeProto->instTargets[L->ci->savedpc - proto->code];
+    uintptr_t target = proto->exectarget + static_cast<uint32_t*>(proto->execdata)[L->ci->savedpc - proto->code];
 
     // Returns 1 to finish the function in the VM
-    return gate(L, proto, target, &data->context);
+    return GateFn(data->context.gateEntry)(L, proto, target, &data->context);
 }
 
 static void onSetBreakpoint(lua_State* L, Proto* proto, int instruction)
 {
-    if (!getProtoExecData(proto))
+    if (!proto->execdata)
         return;
 
-    LUAU_ASSERT(!"native breakpoints are not implemented");
+    LUAU_ASSERT(!"Native breakpoints are not implemented");
 }
 
 #if defined(__aarch64__)
@@ -374,9 +401,9 @@ static unsigned int getCpuFeaturesA64()
 
 bool isSupported()
 {
-#if !LUA_CUSTOM_EXECUTION
-    return false;
-#elif defined(__x86_64__) || defined(_M_X64)
+    if (!LUA_CUSTOM_EXECUTION)
+        return false;
+
     if (LUA_EXTRA_SIZE != 1)
         return false;
 
@@ -386,6 +413,16 @@ bool isSupported()
     if (sizeof(LuaNode) != 32)
         return false;
 
+    // Windows CRT uses stack unwinding in longjmp so we have to use unwind data; on other platforms, it's only necessary for C++ EH.
+#if defined(_WIN32)
+    if (!isUnwindSupported())
+        return false;
+#else
+    if (!LUA_USE_LONGJMP && !isUnwindSupported())
+        return false;
+#endif
+
+#if defined(__x86_64__) || defined(_M_X64)
     int cpuinfo[4] = {};
 #ifdef _MSC_VER
     __cpuid(cpuinfo, 1);
@@ -401,19 +438,6 @@ bool isSupported()
 
     return true;
 #elif defined(__aarch64__)
-    if (LUA_EXTRA_SIZE != 1)
-        return false;
-
-    if (sizeof(TValue) != 16)
-        return false;
-
-    if (sizeof(LuaNode) != 32)
-        return false;
-
-    // TODO: A64 codegen does not generate correct unwind info at the moment so it requires longjmp instead of C++ exceptions
-    if (!LUA_USE_LONGJMP)
-        return false;
-
     return true;
 #else
     return false;
@@ -424,37 +448,34 @@ void create(lua_State* L)
 {
     LUAU_ASSERT(isSupported());
 
-    NativeState& data = *createNativeState(L);
+    std::unique_ptr<NativeState> data = std::make_unique<NativeState>();
 
 #if defined(_WIN32)
-    data.unwindBuilder = std::make_unique<UnwindBuilderWin>();
+    data->unwindBuilder = std::make_unique<UnwindBuilderWin>();
 #else
-    data.unwindBuilder = std::make_unique<UnwindBuilderDwarf2>();
+    data->unwindBuilder = std::make_unique<UnwindBuilderDwarf2>();
 #endif
 
-    data.codeAllocator.context = data.unwindBuilder.get();
-    data.codeAllocator.createBlockUnwindInfo = createBlockUnwindInfo;
-    data.codeAllocator.destroyBlockUnwindInfo = destroyBlockUnwindInfo;
+    data->codeAllocator.context = data->unwindBuilder.get();
+    data->codeAllocator.createBlockUnwindInfo = createBlockUnwindInfo;
+    data->codeAllocator.destroyBlockUnwindInfo = destroyBlockUnwindInfo;
 
-    initFallbackTable(data);
-    initHelperFunctions(data);
+    initFunctions(*data);
 
 #if defined(__x86_64__) || defined(_M_X64)
-    if (!X64::initHeaderFunctions(data))
-    {
-        destroyNativeState(L);
+    if (!X64::initHeaderFunctions(*data))
         return;
-    }
 #elif defined(__aarch64__)
-    if (!A64::initHeaderFunctions(data))
-    {
-        destroyNativeState(L);
+    if (!A64::initHeaderFunctions(*data))
         return;
-    }
 #endif
 
-    lua_ExecutionCallbacks* ecb = getExecutionCallbacks(L);
+    if (gPerfLogFn)
+        gPerfLogFn(gPerfLogContext, uintptr_t(data->context.gateEntry), 4096, "<luau gate>");
 
+    lua_ExecutionCallbacks* ecb = &L->global->ecb;
+
+    ecb->context = data.release();
     ecb->close = onCloseState;
     ecb->destroy = onDestroyFunction;
     ecb->enter = onEnter;
@@ -482,7 +503,8 @@ void compile(lua_State* L, int idx)
     const TValue* func = luaA_toobject(L, idx);
 
     // If initialization has failed, do not compile any functions
-    if (!getNativeState(L))
+    NativeState* data = getNativeState(L);
+    if (!data)
         return;
 
 #if defined(__aarch64__)
@@ -490,8 +512,6 @@ void compile(lua_State* L, int idx)
 #else
     X64::AssemblyBuilderX64 build(/* logText= */ false);
 #endif
-
-    NativeState* data = getNativeState(L);
 
     std::vector<Proto*> protos;
     gatherFunctions(protos, clvalue(func)->l.p);
@@ -503,16 +523,23 @@ void compile(lua_State* L, int idx)
     X64::assembleHelpers(build, helpers);
 #endif
 
-    std::vector<NativeProto*> results;
+    std::vector<NativeProto> results;
     results.reserve(protos.size());
 
     // Skip protos that have been compiled during previous invocations of CodeGen::compile
     for (Proto* p : protos)
-        if (p && getProtoExecData(p) == nullptr)
-            if (NativeProto* np = assembleFunction(build, *data, helpers, p, {}))
-                results.push_back(np);
+        if (p && p->execdata == nullptr)
+            if (std::optional<NativeProto> np = assembleFunction(build, *data, helpers, p, {}))
+                results.push_back(*np);
 
-    build.finalize();
+    // Very large modules might result in overflowing a jump offset; in this case we currently abandon the entire module
+    if (!build.finalize())
+    {
+        for (NativeProto result : results)
+            destroyExecData(result.execdata);
+
+        return;
+    }
 
     // If no functions were assembled, we don't need to allocate/copy executable pages for helpers
     if (results.empty())
@@ -524,25 +551,33 @@ void compile(lua_State* L, int idx)
     if (!data->codeAllocator.allocate(build.data.data(), int(build.data.size()), reinterpret_cast<const uint8_t*>(build.code.data()),
             int(build.code.size() * sizeof(build.code[0])), nativeData, sizeNativeData, codeStart))
     {
-        for (NativeProto* result : results)
-            destroyNativeProto(result);
+        for (NativeProto result : results)
+            destroyExecData(result.execdata);
 
         return;
     }
 
-    // Relocate instruction offsets
-    for (NativeProto* result : results)
+    if (gPerfLogFn && results.size() > 0)
     {
-        for (int i = 0; i < result->proto->sizecode; i++)
-            result->instTargets[i] += uintptr_t(codeStart);
+        gPerfLogFn(gPerfLogContext, uintptr_t(codeStart), uint32_t(results[0].exectarget), "<luau helpers>");
 
-        LUAU_ASSERT(result->proto->sizecode);
-        result->entryTarget = result->instTargets[0];
+        for (size_t i = 0; i < results.size(); ++i)
+        {
+            uint32_t begin = uint32_t(results[i].exectarget);
+            uint32_t end = i + 1 < results.size() ? uint32_t(results[i + 1].exectarget) : uint32_t(build.code.size() * sizeof(build.code[0]));
+            LUAU_ASSERT(begin < end);
+
+            logPerfFunction(results[i].p, uintptr_t(codeStart) + begin, end - begin);
+        }
     }
 
-    // Link native proto objects to Proto; the memory is now managed by VM and will be freed via onDestroyFunction
-    for (NativeProto* result : results)
-        setProtoExecData(result->proto, result);
+    for (NativeProto result : results)
+    {
+        // the memory is now managed by VM and will be freed via onDestroyFunction
+        result.p->execdata = result.execdata;
+        result.p->exectarget = uintptr_t(codeStart) + result.exectarget;
+        result.p->codeentry = &kCodeEntryInsn;
+    }
 }
 
 std::string getAssembly(lua_State* L, int idx, AssemblyOptions options)
@@ -557,7 +592,7 @@ std::string getAssembly(lua_State* L, int idx, AssemblyOptions options)
 #endif
 
     NativeState data;
-    initFallbackTable(data);
+    initFunctions(data);
 
     std::vector<Proto*> protos;
     gatherFunctions(protos, clvalue(func)->l.p);
@@ -569,18 +604,31 @@ std::string getAssembly(lua_State* L, int idx, AssemblyOptions options)
     X64::assembleHelpers(build, helpers);
 #endif
 
+    if (!options.includeOutlinedCode && options.includeAssembly)
+    {
+        build.text.clear();
+        build.logAppend("; skipping %u bytes of outlined helpers\n", unsigned(build.getCodeSize() * sizeof(build.code[0])));
+    }
+
     for (Proto* p : protos)
         if (p)
-            if (NativeProto* np = assembleFunction(build, data, helpers, p, options))
-                destroyNativeProto(np);
+            if (std::optional<NativeProto> np = assembleFunction(build, data, helpers, p, options))
+                destroyExecData(np->execdata);
 
-    build.finalize();
+    if (!build.finalize())
+        return std::string();
 
     if (options.outputBinary)
         return std::string(reinterpret_cast<const char*>(build.code.data()), reinterpret_cast<const char*>(build.code.data() + build.code.size())) +
                std::string(build.data.begin(), build.data.end());
     else
         return build.text;
+}
+
+void setPerfLog(void* context, PerfLogFn logFn)
+{
+    gPerfLogContext = context;
+    gPerfLogFn = logFn;
 }
 
 } // namespace CodeGen

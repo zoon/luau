@@ -17,8 +17,6 @@
 
 #include <string.h>
 
-LUAU_FASTFLAGVARIABLE(LuauBetterOOMHandling, false)
-
 /*
 ** {======================================================
 ** Error-recovery functions
@@ -82,7 +80,7 @@ public:
     const char* what() const throw() override
     {
         // LUA_ERRRUN passes error object on the stack
-        if (status == LUA_ERRRUN || (status == LUA_ERRSYNTAX && !FFlag::LuauBetterOOMHandling))
+        if (status == LUA_ERRRUN)
             if (const char* str = lua_tostring(L, -1))
                 return str;
 
@@ -231,12 +229,14 @@ void luaD_checkCstack(lua_State* L)
 ** When returns, all the results are on the stack, starting at the original
 ** function position.
 */
-void luaD_call(lua_State* L, StkId func, int nResults)
+void luaD_call(lua_State* L, StkId func, int nresults)
 {
     if (++L->nCcalls >= LUAI_MAXCCALLS)
         luaD_checkCstack(L);
 
-    if (luau_precall(L, func, nResults) == PCRLUA)
+    ptrdiff_t old_func = savestack(L, func);
+
+    if (luau_precall(L, func, nresults) == PCRLUA)
     {                                        // is a Lua function?
         L->ci->flags |= LUA_CALLINFO_RETURN; // luau_execute will stop after returning from the stack frame
 
@@ -249,6 +249,9 @@ void luaD_call(lua_State* L, StkId func, int nResults)
         if (!oldactive)
             L->isactive = false;
     }
+
+    if (nresults != LUA_MULTRET)
+        L->top = restorestack(L, old_func) + nresults;
 
     L->nCcalls--;
     luaC_checkGC(L);
@@ -552,30 +555,21 @@ int luaD_pcall(lua_State* L, Pfunc func, void* u, ptrdiff_t old_top, ptrdiff_t e
         // call user-defined error function (used in xpcall)
         if (ef)
         {
-            if (FFlag::LuauBetterOOMHandling)
-            {
-                // push error object to stack top if it's not already there
-                if (status != LUA_ERRRUN)
-                    seterrorobj(L, status, L->top);
+            // push error object to stack top if it's not already there
+            if (status != LUA_ERRRUN)
+                seterrorobj(L, status, L->top);
 
-                // if errfunc fails, we fail with "error in error handling" or "not enough memory"
-                int err = luaD_rawrunprotected(L, callerrfunc, restorestack(L, ef));
+            // if errfunc fails, we fail with "error in error handling" or "not enough memory"
+            int err = luaD_rawrunprotected(L, callerrfunc, restorestack(L, ef));
 
-                // in general we preserve the status, except for cases when the error handler fails
-                // out of memory is treated specially because it's common for it to be cascading, in which case we preserve the code
-                if (err == 0)
-                    errstatus = LUA_ERRRUN;
-                else if (status == LUA_ERRMEM && err == LUA_ERRMEM)
-                    errstatus = LUA_ERRMEM;
-                else
-                    errstatus = status = LUA_ERRERR;
-            }
+            // in general we preserve the status, except for cases when the error handler fails
+            // out of memory is treated specially because it's common for it to be cascading, in which case we preserve the code
+            if (err == 0)
+                errstatus = LUA_ERRRUN;
+            else if (status == LUA_ERRMEM && err == LUA_ERRMEM)
+                errstatus = LUA_ERRMEM;
             else
-            {
-                // if errfunc fails, we fail with "error in error handling"
-                if (luaD_rawrunprotected(L, callerrfunc, restorestack(L, ef)) != 0)
-                    status = LUA_ERRERR;
-            }
+                errstatus = status = LUA_ERRERR;
         }
 
         // since the call failed with an error, we might have to reset the 'active' thread state
@@ -597,7 +591,7 @@ int luaD_pcall(lua_State* L, Pfunc func, void* u, ptrdiff_t old_top, ptrdiff_t e
 
         StkId oldtop = restorestack(L, old_top);
         luaF_close(L, oldtop); // close eventual pending closures
-        seterrorobj(L, FFlag::LuauBetterOOMHandling ? errstatus : status, oldtop);
+        seterrorobj(L, errstatus, oldtop);
         L->ci = restoreci(L, old_ci);
         L->base = L->ci->base;
         restore_stack_limit(L);

@@ -28,7 +28,9 @@ class AstTypePack;
 /// Root of the AST of a parsed source file
 struct SourceModule
 {
-    ModuleName name; // DataModel path if possible.  Filename if not.
+    ModuleName name; // Module identifier or a filename
+    std::string humanReadableName;
+
     SourceCode::Type type = SourceCode::None;
     std::optional<std::string> environmentName;
     bool cyclic = false;
@@ -63,6 +65,9 @@ struct Module
 {
     ~Module();
 
+    ModuleName name;
+    std::string humanReadableName;
+
     TypeArena interfaceTypes;
     TypeArena internalTypes;
 
@@ -80,13 +85,10 @@ struct Module
     DenseHashMap<const AstNode*, TypeId> astOverloadResolvedTypes{nullptr};
 
     DenseHashMap<const AstType*, TypeId> astResolvedTypes{nullptr};
-    DenseHashMap<const AstType*, TypeId> astOriginalResolvedTypes{nullptr};
     DenseHashMap<const AstTypePack*, TypePackId> astResolvedTypePacks{nullptr};
 
     // Map AST nodes to the scope they create.  Cannot be NotNull<Scope> because we need a sentinel value for the map.
     DenseHashMap<const AstNode*, Scope*> astScopes{nullptr};
-
-    std::unique_ptr<struct TypeReduction> reduction;
 
     std::unordered_map<Name, TypeId> declaredGlobals;
     ErrorVec errors;

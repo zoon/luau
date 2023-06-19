@@ -12,11 +12,13 @@ namespace Luau
 {
 
 struct TypeArena;
+struct TypePackFamily;
 struct TxnLog;
 
 struct TypePack;
 struct VariadicTypePack;
 struct BlockedTypePack;
+struct TypeFamilyInstanceTypePack;
 
 struct TypePackVar;
 using TypePackId = const TypePackVar*;
@@ -50,10 +52,10 @@ struct GenericTypePack
 };
 
 using BoundTypePack = Unifiable::Bound<TypePackId>;
-
 using ErrorTypePack = Unifiable::Error;
 
-using TypePackVariant = Unifiable::Variant<TypePackId, FreeTypePack, GenericTypePack, TypePack, VariadicTypePack, BlockedTypePack>;
+using TypePackVariant =
+    Unifiable::Variant<TypePackId, FreeTypePack, GenericTypePack, TypePack, VariadicTypePack, BlockedTypePack, TypeFamilyInstanceTypePack>;
 
 /* A TypePack is a rope-like string of TypeIds.  We use this structure to encode
  * notions like packs of unknown length and packs of any length, as well as more
@@ -81,6 +83,17 @@ struct BlockedTypePack
     size_t index;
 
     static size_t nextIndex;
+};
+
+/**
+ * Analogous to a TypeFamilyInstanceType.
+ */
+struct TypeFamilyInstanceTypePack
+{
+    NotNull<TypePackFamily> family;
+
+    std::vector<TypeId> typeArguments;
+    std::vector<TypePackId> packArguments;
 };
 
 struct TypePackVar
@@ -169,7 +182,7 @@ using SeenSet = std::set<std::pair<const void*, const void*>>;
 bool areEqual(SeenSet& seen, const TypePackVar& lhs, const TypePackVar& rhs);
 
 TypePackId follow(TypePackId tp);
-TypePackId follow(TypePackId tp, std::function<TypePackId(TypePackId)> mapper);
+TypePackId follow(TypePackId t, const void* context, TypePackId (*mapper)(const void*, TypePackId));
 
 size_t size(TypePackId tp, TxnLog* log = nullptr);
 bool finite(TypePackId tp, TxnLog* log = nullptr);

@@ -11,6 +11,7 @@
 #include "Luau/TxnLog.h"
 #include "Luau/Type.h"
 #include "Luau/TypePack.h"
+#include "Luau/TypeUtils.h"
 #include "Luau/Unifier.h"
 #include "Luau/UnifierSharedState.h"
 
@@ -29,7 +30,14 @@ struct ModuleResolver;
 
 using Name = std::string;
 using ScopePtr = std::shared_ptr<Scope>;
-using OverloadErrorEntry = std::tuple<std::vector<TypeError>, std::vector<TypeId>, const FunctionType*>;
+
+struct OverloadErrorEntry
+{
+    TxnLog log;
+    ErrorVec errors;
+    std::vector<TypeId> arguments;
+    const FunctionType* fnTy;
+};
 
 bool doesCallError(const AstExprCall* call);
 bool hasBreak(AstStat* node);
@@ -56,12 +64,6 @@ public:
         : InternalCompilerError("Typeinfer failed to complete in allotted time", moduleName)
     {
     }
-};
-
-enum class ValueContext
-{
-    LValue,
-    RValue
 };
 
 struct GlobalTypes
@@ -171,7 +173,7 @@ struct TypeChecker
         const std::vector<OverloadErrorEntry>& errors);
     void reportOverloadResolutionError(const ScopePtr& scope, const AstExprCall& expr, TypePackId retPack, TypePackId argPack,
         const std::vector<Location>& argLocations, const std::vector<TypeId>& overloads, const std::vector<TypeId>& overloadsThatMatchArgCount,
-        const std::vector<OverloadErrorEntry>& errors);
+        std::vector<OverloadErrorEntry>& errors);
 
     WithPredicate<TypePackId> checkExprList(const ScopePtr& scope, const Location& location, const AstArray<AstExpr*>& exprs,
         bool substituteFreeForNil = false, const std::vector<bool>& lhsAnnotations = {},
@@ -372,7 +374,6 @@ public:
 
     ModuleResolver* resolver;
     ModulePtr currentModule;
-    ModuleName currentModuleName;
 
     std::function<void(const ModuleName&, const ScopePtr&)> prepareModuleScope;
     NotNull<BuiltinTypes> builtinTypes;

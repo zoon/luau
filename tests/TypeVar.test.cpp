@@ -2,7 +2,6 @@
 #include "Luau/Scope.h"
 #include "Luau/Type.h"
 #include "Luau/TypeInfer.h"
-#include "Luau/TypeReduction.h"
 #include "Luau/VisitType.h"
 
 #include "Fixture.h"
@@ -118,6 +117,25 @@ TEST_CASE_FIXTURE(Fixture, "iterating_over_nested_UnionTypes")
     std::vector<TypeId> result;
     for (TypeId ty : &utv)
         result.push_back(ty);
+
+    REQUIRE_EQ(result.size(), 3);
+    CHECK_EQ(result[0], builtinTypes->anyType);
+    CHECK_EQ(result[2], builtinTypes->stringType);
+    CHECK_EQ(result[1], builtinTypes->numberType);
+}
+
+TEST_CASE_FIXTURE(Fixture, "iterating_over_nested_UnionTypes_postfix_operator_plus_plus")
+{
+    Type subunion{UnionType{}};
+    UnionType* innerUtv = getMutable<UnionType>(&subunion);
+    innerUtv->options = {builtinTypes->numberType, builtinTypes->stringType};
+
+    UnionType utv;
+    utv.options = {builtinTypes->anyType, &subunion};
+
+    std::vector<TypeId> result;
+    for (auto it = begin(&utv); it != end(&utv); it++)
+        result.push_back(*it);
 
     REQUIRE_EQ(result.size(), 3);
     CHECK_EQ(result[0], builtinTypes->anyType);

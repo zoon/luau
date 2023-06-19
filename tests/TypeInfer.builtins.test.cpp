@@ -132,6 +132,8 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "sort_with_predicate")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "sort_with_bad_predicate")
 {
+    ScopedFastFlag sff{"LuauAlwaysCommitInferencesOfFunctionCalls", true};
+
     CheckResult result = check(R"(
         --!strict
         local t = {'one', 'two', 'three'}
@@ -140,9 +142,9 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "sort_with_bad_predicate")
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(R"(Type '(number, number) -> boolean' could not be converted into '((a, a) -> boolean)?'
+    CHECK_EQ(R"(Type '(number, number) -> boolean' could not be converted into '((string, string) -> boolean)?'
 caused by:
-  None of the union options are compatible. For example: Type '(number, number) -> boolean' could not be converted into '(a, a) -> boolean'
+  None of the union options are compatible. For example: Type '(number, number) -> boolean' could not be converted into '(string, string) -> boolean'
 caused by:
   Argument #1 type is not compatible. Type 'string' could not be converted into 'number')",
         toString(result.errors[0]));
@@ -1031,7 +1033,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "no_persistent_typelevel_change")
     REQUIRE(mathTy);
     TableType* ttv = getMutable<TableType>(mathTy);
     REQUIRE(ttv);
-    const FunctionType* ftv = get<FunctionType>(ttv->props["frexp"].type);
+    const FunctionType* ftv = get<FunctionType>(ttv->props["frexp"].type());
     REQUIRE(ftv);
     auto original = ftv->level;
 

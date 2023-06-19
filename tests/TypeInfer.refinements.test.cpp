@@ -8,7 +8,6 @@
 #include "doctest.h"
 
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
-LUAU_FASTFLAG(LuauNegatedClassTypes)
 
 using namespace Luau;
 
@@ -64,7 +63,7 @@ struct RefinementClassFixture : BuiltinsFixture
         TypeArena& arena = frontend.globals.globalTypes;
         NotNull<Scope> scope{frontend.globals.globalScope.get()};
 
-        std::optional<TypeId> rootSuper = FFlag::LuauNegatedClassTypes ? std::make_optional(builtinTypes->classType) : std::nullopt;
+        std::optional<TypeId> rootSuper = std::make_optional(builtinTypes->classType);
 
         unfreeze(arena);
         TypeId vec3 = arena.addType(ClassType{"Vector3", {}, rootSuper, std::nullopt, {}, nullptr, "Test"});
@@ -1021,16 +1020,8 @@ TEST_CASE_FIXTURE(Fixture, "discriminate_tag")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
-    {
-        CHECK_EQ(R"({| catfood: string, name: string, tag: "Cat" |})", toString(requireTypeAtPosition({7, 33})));
-        CHECK_EQ(R"({| dogfood: string, name: string, tag: "Dog" |})", toString(requireTypeAtPosition({9, 33})));
-    }
-    else
-    {
-        CHECK_EQ("Cat", toString(requireTypeAtPosition({7, 33})));
-        CHECK_EQ("Dog", toString(requireTypeAtPosition({9, 33})));
-    }
+    CHECK_EQ("Cat", toString(requireTypeAtPosition({7, 33})));
+    CHECK_EQ("Dog", toString(requireTypeAtPosition({9, 33})));
 }
 
 TEST_CASE_FIXTURE(Fixture, "discriminate_tag_with_implicit_else")
@@ -1051,16 +1042,8 @@ TEST_CASE_FIXTURE(Fixture, "discriminate_tag_with_implicit_else")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
-    {
-        CHECK_EQ(R"({| catfood: string, name: string, tag: "Cat" |})", toString(requireTypeAtPosition({7, 33})));
-        CHECK_EQ(R"({| dogfood: string, name: string, tag: "Dog" |})", toString(requireTypeAtPosition({9, 33})));
-    }
-    else
-    {
-        CHECK_EQ("Cat", toString(requireTypeAtPosition({7, 33})));
-        CHECK_EQ("Dog", toString(requireTypeAtPosition({9, 33})));
-    }
+    CHECK_EQ("Cat", toString(requireTypeAtPosition({7, 33})));
+    CHECK_EQ("Dog", toString(requireTypeAtPosition({9, 33})));
 }
 
 TEST_CASE_FIXTURE(Fixture, "and_or_peephole_refinement")
@@ -1404,7 +1387,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "refine_unknowns")
     if (FFlag::DebugLuauDeferredConstraintResolution)
     {
         CHECK_EQ("string", toString(requireTypeAtPosition({3, 28})));
-        CHECK_EQ("~string", toString(requireTypeAtPosition({5, 28})));
+        CHECK_EQ("unknown & ~string", toString(requireTypeAtPosition({5, 28})));
     }
     else
     {
@@ -1509,14 +1492,7 @@ local _ = _ ~= _ or _ or _
 end
     )");
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
-    {
-        // Without a realistic motivating case, it's hard to tell if it's important for this to work without errors.
-        LUAU_REQUIRE_ERROR_COUNT(1, result);
-        CHECK(get<NormalizationTooComplex>(result.errors[0]));
-    }
-    else
-        LUAU_REQUIRE_NO_ERRORS(result);
+    LUAU_REQUIRE_NO_ERRORS(result);
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "refine_unknown_to_table_then_take_the_length")
@@ -1616,7 +1592,7 @@ TEST_CASE_FIXTURE(Fixture, "refine_a_property_of_some_global")
 
     LUAU_REQUIRE_ERROR_COUNT(3, result);
 
-    CHECK_EQ("~false & ~nil", toString(requireTypeAtPosition({4, 30})));
+    CHECK_EQ("~(false?)", toString(requireTypeAtPosition({4, 30})));
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "dataflow_analysis_can_tell_refinements_when_its_appropriate_to_refine_into_nil_or_never")
@@ -1747,6 +1723,38 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "type_annotations_arent_relevant_when_doing_d
         CHECK_EQ("never", toString(requireTypeAtPosition({9, 28})));
     else
         CHECK_EQ("nil", toString(requireTypeAtPosition({9, 28})));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "function_call_with_colon_after_refining_not_to_be_nil")
+{
+    ScopedFastFlag sff{"DebugLuauDeferredConstraintResolution", true};
+
+    CheckResult result = check(R"(
+        --!strict
+        export type Observer<T> = {
+            complete: ((self: Observer<T>) -> ())?,
+        }
+
+        local function _f(handler: Observer<any>)
+            assert(handler.complete ~= nil)
+            handler:complete() -- incorrectly gives Value of type '((Observer<any>) -> ())?' could be nil
+            handler.complete(handler) -- works fine, both forms should avoid the error
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "refinements_should_not_affect_assignment")
+{
+    CheckResult result = check(R"(
+        local a: unknown = true
+        if a == true then
+            a = 'not even remotely similar to a boolean'
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
 }
 
 TEST_SUITE_END();

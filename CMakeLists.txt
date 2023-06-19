@@ -36,12 +36,14 @@ if(LUAU_BUILD_CLI)
     add_executable(Luau.Analyze.CLI)
     add_executable(Luau.Ast.CLI)
     add_executable(Luau.Reduce.CLI)
+    add_executable(Luau.Compile.CLI)
 
     # This also adds target `name` on Linux/macOS and `name.exe` on Windows
     set_target_properties(Luau.Repl.CLI PROPERTIES OUTPUT_NAME luau)
     set_target_properties(Luau.Analyze.CLI PROPERTIES OUTPUT_NAME luau-analyze)
     set_target_properties(Luau.Ast.CLI PROPERTIES OUTPUT_NAME luau-ast)
     set_target_properties(Luau.Reduce.CLI PROPERTIES OUTPUT_NAME luau-reduce)
+    set_target_properties(Luau.Compile.CLI PROPERTIES OUTPUT_NAME luau-compile)
 endif()
 
 if(LUAU_BUILD_TESTS)
@@ -143,6 +145,9 @@ endif()
 
 if(LUAU_NATIVE)
     target_compile_definitions(Luau.VM PUBLIC LUA_CUSTOM_EXECUTION=1)
+    if(LUAU_EXTERN_C)
+        target_compile_definitions(Luau.CodeGen PUBLIC LUACODEGEN_API=extern\"C\")
+    endif()
 endif()
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" AND MSVC_VERSION GREATER_EQUAL 1924)
@@ -183,6 +188,7 @@ if(LUAU_BUILD_CLI)
     target_compile_options(Luau.Reduce.CLI PRIVATE ${LUAU_OPTIONS})
     target_compile_options(Luau.Analyze.CLI PRIVATE ${LUAU_OPTIONS})
     target_compile_options(Luau.Ast.CLI PRIVATE ${LUAU_OPTIONS})
+    target_compile_options(Luau.Compile.CLI PRIVATE ${LUAU_OPTIONS})
 
     target_include_directories(Luau.Repl.CLI PRIVATE extern extern/isocline/include)
 
@@ -192,6 +198,7 @@ if(LUAU_BUILD_CLI)
         find_library(LIBPTHREAD pthread)
         if (LIBPTHREAD)
             target_link_libraries(Luau.Repl.CLI PRIVATE pthread)
+            target_link_libraries(Luau.Analyze.CLI PRIVATE pthread)
         endif()
     endif()
 
@@ -202,6 +209,8 @@ if(LUAU_BUILD_CLI)
     target_compile_features(Luau.Reduce.CLI PRIVATE cxx_std_17)
     target_include_directories(Luau.Reduce.CLI PUBLIC Reduce/include)
     target_link_libraries(Luau.Reduce.CLI PRIVATE Luau.Common Luau.Ast Luau.Analysis)
+
+    target_link_libraries(Luau.Compile.CLI PRIVATE Luau.Compiler Luau.VM Luau.CodeGen)
 endif()
 
 if(LUAU_BUILD_TESTS)
