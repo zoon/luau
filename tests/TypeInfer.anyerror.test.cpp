@@ -13,6 +13,8 @@
 
 using namespace Luau;
 
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+
 TEST_SUITE_BEGIN("TypeInferAnyError");
 
 TEST_CASE_FIXTURE(Fixture, "for_in_loop_iterator_returns_any")
@@ -108,10 +110,7 @@ TEST_CASE_FIXTURE(Fixture, "for_in_loop_iterator_is_error2")
         end
     )");
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
-        LUAU_REQUIRE_ERROR_COUNT(2, result);
-    else
-        LUAU_REQUIRE_ERROR_COUNT(1, result);
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
 
     CHECK_EQ("*error-type*", toString(requireType("a")));
 }

@@ -28,6 +28,7 @@ void IrValueLocationTracking::beforeInstLowering(IrInst& inst)
     case IrCmd::STORE_INT:
     case IrCmd::STORE_VECTOR:
     case IrCmd::STORE_TVALUE:
+    case IrCmd::STORE_SPLIT_TVALUE:
         invalidateRestoreOp(inst.a);
         break;
     case IrCmd::ADJUST_STACK_TO_REG:
@@ -53,11 +54,6 @@ void IrValueLocationTracking::beforeInstLowering(IrInst& inst)
     case IrCmd::GET_UPVALUE:
         invalidateRestoreOp(inst.a);
         break;
-    case IrCmd::PREPARE_FORN:
-        invalidateRestoreOp(inst.a);
-        invalidateRestoreOp(inst.b);
-        invalidateRestoreOp(inst.c);
-        break;
     case IrCmd::CALL:
         // Even if result count is limited, all registers starting from function (ra) might be modified
         invalidateRestoreVmRegs(vmRegOp(inst.a), -1);
@@ -77,7 +73,6 @@ void IrValueLocationTracking::beforeInstLowering(IrInst& inst)
     case IrCmd::FALLBACK_GETVARARGS:
         invalidateRestoreVmRegs(vmRegOp(inst.b), function.intOp(inst.c));
         break;
-    case IrCmd::FALLBACK_NEWCLOSURE:
     case IrCmd::FALLBACK_DUPCLOSURE:
         invalidateRestoreOp(inst.b);
         break;
@@ -91,9 +86,9 @@ void IrValueLocationTracking::beforeInstLowering(IrInst& inst)
     case IrCmd::LOAD_DOUBLE:
     case IrCmd::LOAD_INT:
     case IrCmd::LOAD_TVALUE:
+    case IrCmd::CMP_ANY:
     case IrCmd::JUMP_IF_TRUTHY:
     case IrCmd::JUMP_IF_FALSY:
-    case IrCmd::JUMP_CMP_ANY:
     case IrCmd::SET_TABLE:
     case IrCmd::SET_UPVALUE:
     case IrCmd::INTERRUPT:
@@ -108,14 +103,19 @@ void IrValueLocationTracking::beforeInstLowering(IrInst& inst)
     case IrCmd::FALLBACK_SETTABLEKS:
     case IrCmd::FALLBACK_PREPVARARGS:
     case IrCmd::ADJUST_STACK_TO_TOP:
+    case IrCmd::GET_TYPEOF:
+    case IrCmd::NEWCLOSURE:
+    case IrCmd::FINDUPVAL:
         break;
 
-        // These instrucitons read VmReg only after optimizeMemoryOperandsX64
+        // These instructions read VmReg only after optimizeMemoryOperandsX64
     case IrCmd::CHECK_TAG:
+    case IrCmd::CHECK_TRUTHY:
     case IrCmd::ADD_NUM:
     case IrCmd::SUB_NUM:
     case IrCmd::MUL_NUM:
     case IrCmd::DIV_NUM:
+    case IrCmd::IDIV_NUM:
     case IrCmd::MOD_NUM:
     case IrCmd::MIN_NUM:
     case IrCmd::MAX_NUM:

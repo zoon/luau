@@ -9,8 +9,8 @@
 
 #include "doctest.h"
 
-LUAU_FASTFLAG(LuauInstantiateInSubtyping)
-LUAU_FASTFLAG(LuauTypeMismatchInvarianceInError)
+LUAU_FASTFLAG(LuauInstantiateInSubtyping);
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
 
 using namespace Luau;
 
@@ -725,24 +725,14 @@ y.a.c = y
     )");
 
     LUAU_REQUIRE_ERRORS(result);
-    if (FFlag::LuauTypeMismatchInvarianceInError)
-    {
-        CHECK_EQ(toString(result.errors[0]),
-            R"(Type 'y' could not be converted into 'T<string>'
+    const std::string expected = R"(Type 'y' could not be converted into 'T<string>'
 caused by:
-  Property 'a' is not compatible. Type '{ c: T<string>?, d: number }' could not be converted into 'U<string>'
+  Property 'a' is not compatible. 
+Type '{ c: T<string>?, d: number }' could not be converted into 'U<string>'
 caused by:
-  Property 'd' is not compatible. Type 'number' could not be converted into 'string' in an invariant context)");
-    }
-    else
-    {
-        CHECK_EQ(toString(result.errors[0]),
-            R"(Type 'y' could not be converted into 'T<string>'
-caused by:
-  Property 'a' is not compatible. Type '{ c: T<string>?, d: number }' could not be converted into 'U<string>'
-caused by:
-  Property 'd' is not compatible. Type 'number' could not be converted into 'string')");
-    }
+  Property 'd' is not compatible. 
+Type 'number' could not be converted into 'string' in an invariant context)";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "generic_type_pack_unification1")
@@ -947,7 +937,7 @@ TEST_CASE_FIXTURE(Fixture, "instantiate_cyclic_generic_function")
     std::optional<Property> methodProp = get(argTable->props, "method");
     REQUIRE(bool(methodProp));
 
-    const FunctionType* methodFunction = get<FunctionType>(methodProp->type());
+    const FunctionType* methodFunction = get<FunctionType>(follow(methodProp->type()));
     REQUIRE(methodFunction != nullptr);
 
     std::optional<TypeId> methodArg = first(methodFunction->argTypes);

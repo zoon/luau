@@ -44,6 +44,7 @@
 // Version 1: Baseline version for the open-source release. Supported until 0.521.
 // Version 2: Adds Proto::linedefined. Supported until 0.544.
 // Version 3: Adds FORGPREP/JUMPXEQK* and enhances AUX encoding for FORGLOOP. Removes FORGLOOP_NEXT/INEXT and JUMPIFEQK/JUMPIFNOTEQK. Currently supported.
+// Version 4: Adds Proto::flags, typeinfo, and floor division opcodes IDIV/IDIVK. Currently supported.
 
 // Bytecode opcode, part of the instruction header
 enum LuauOpcode
@@ -389,6 +390,18 @@ enum LuauOpcode
     LOP_JUMPXEQKN,
     LOP_JUMPXEQKS,
 
+    // IDIV: compute floor division between two source registers and put the result into target register
+    // A: target register
+    // B: source register 1
+    // C: source register 2
+    LOP_IDIV,
+
+    // IDIVK compute floor division between the source register and a constant and put the result into target register
+    // A: target register
+    // B: source register
+    // C: constant table index (0..255)
+    LOP_IDIVK,
+
     // Enum entry for number of opcodes, not a valid opcode by itself!
     LOP__COUNT
 };
@@ -428,7 +441,7 @@ enum LuauBytecodeTag
 };
 
 // Type table tags
-enum LuauBytecodeEncodedType
+enum LuauBytecodeType
 {
     LBC_TYPE_NIL = 0,
     LBC_TYPE_BOOLEAN,
@@ -543,6 +556,10 @@ enum LuauBuiltinFunction
     // get/setmetatable
     LBF_GETMETATABLE,
     LBF_SETMETATABLE,
+
+    // tonumber/tostring
+    LBF_TONUMBER,
+    LBF_TOSTRING,
 };
 
 // Capture type, used in LOP_CAPTURE
@@ -551,4 +568,11 @@ enum LuauCaptureType
     LCT_VAL = 0,
     LCT_REF,
     LCT_UPVAL,
+};
+
+// Proto flag bitmask, stored in Proto::flags
+enum LuauProtoFlag
+{
+    // used to tag main proto for modules with --!native
+    LPF_NATIVE_MODULE = 1 << 0,
 };

@@ -1,5 +1,6 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/TypeInfer.h"
+#include "Luau/RecursionCounter.h"
 
 #include "Fixture.h"
 
@@ -9,7 +10,7 @@
 
 using namespace Luau;
 
-LUAU_FASTFLAG(LuauTypeMismatchInvarianceInError)
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
 
 TEST_SUITE_BEGIN("ProvisionalTests");
 
@@ -504,6 +505,9 @@ TEST_CASE_FIXTURE(Fixture, "free_options_cannot_be_unified_together")
     Normalizer normalizer{&arena, builtinTypes, NotNull{&sharedState}};
     Unifier u{NotNull{&normalizer}, NotNull{scope.get()}, Location{}, Variance::Covariant};
 
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        u.enableNewSolver();
+
     u.tryUnify(option1, option2);
 
     CHECK(!u.failure);
@@ -567,7 +571,7 @@ return wrapStrictTable(Constants, "Constants")
     std::optional<TypeId> result = first(m->returnType);
     REQUIRE(result);
     if (FFlag::DebugLuauDeferredConstraintResolution)
-        CHECK_EQ("(any & ~table)?", toString(*result));
+        CHECK_EQ("(any & ~(*error-type* | table))?", toString(*result));
     else
         CHECK_MESSAGE(get<AnyType>(*result), *result);
 }
@@ -792,21 +796,14 @@ TEST_CASE_FIXTURE(Fixture, "assign_table_with_refined_property_with_a_similar_ty
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-
-    if (FFlag::LuauTypeMismatchInvarianceInError)
-    {
-        CHECK_EQ(R"(Type '{| x: number? |}' could not be converted into '{| x: number |}'
+    const std::string expected = R"(Type
+    '{| x: number? |}'
+could not be converted into
+    '{| x: number |}'
 caused by:
-  Property 'x' is not compatible. Type 'number?' could not be converted into 'number' in an invariant context)",
-            toString(result.errors[0]));
-    }
-    else
-    {
-        CHECK_EQ(R"(Type '{| x: number? |}' could not be converted into '{| x: number |}'
-caused by:
-  Property 'x' is not compatible. Type 'number?' could not be converted into 'number')",
-            toString(result.errors[0]));
-    }
+  Property 'x' is not compatible. 
+Type 'number?' could not be converted into 'number' in an invariant context)";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "table_insert_with_a_singleton_argument")
@@ -856,10 +853,6 @@ TEST_CASE_FIXTURE(Fixture, "lookup_prop_of_intersection_containing_unions_of_tab
 
 TEST_CASE_FIXTURE(Fixture, "expected_type_should_be_a_helpful_deduction_guide_for_function_calls")
 {
-    ScopedFastFlag sffs[]{
-        {"LuauTypeMismatchInvarianceInError", true},
-    };
-
     CheckResult result = check(R"(
         type Ref<T> = { val: T }
 
@@ -921,6 +914,9 @@ TEST_CASE_FIXTURE(Fixture, "free_options_can_be_unified_together")
     Normalizer normalizer{&arena, builtinTypes, NotNull{&sharedState}};
     Unifier u{NotNull{&normalizer}, NotNull{scope.get()}, Location{}, Variance::Covariant};
 
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        u.enableNewSolver();
+
     u.tryUnify(option1, option2);
 
     CHECK(!u.failure);
@@ -947,10 +943,6 @@ TEST_CASE_FIXTURE(Fixture, "unify_more_complex_unions_that_include_nil")
 
 TEST_CASE_FIXTURE(Fixture, "optional_class_instances_are_invariant")
 {
-    ScopedFastFlag sff[] = {
-        {"LuauTypeMismatchInvarianceInError", true}
-    };
-
     createSomeClasses(&frontend);
 
     CheckResult result = check(R"(
@@ -1009,6 +1001,88 @@ end
     CheckResult result = frontend.check("Module/Map");
 
     LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+// We would prefer this unification to be able to complete, but at least it should not crash
+TEST_CASE_FIXTURE(BuiltinsFixture, "table_unification_infinite_recursion")
+{
+    ScopedFastFlag luauTableUnifyRecursionLimit{"LuauTableUnifyRecursionLimit", true};
+
+#if defined(_NOOPT) || defined(_DEBUG)
+    ScopedFastInt LuauTypeInferRecursionLimit{"LuauTypeInferRecursionLimit", 100};
+#endif
+
+    fileResolver.source["game/A"] = R"(
+local tbl = {}
+
+function tbl:f1(state)
+    self.someNonExistentvalue2 = state
+end
+
+function tbl:f2()
+    self.someNonExistentvalue:Dc()
+end
+
+function tbl:f3()
+    self:f2()
+    self:f1(false)
+end
+return tbl
+    )";
+
+    fileResolver.source["game/B"] = R"(
+local tbl = require(game.A)
+tbl:f3()
+    )";
+
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        // TODO: DCR should transform RecursionLimitException into a CodeTooComplex error (currently it rethows it as InternalCompilerError)
+        CHECK_THROWS_AS(frontend.check("game/B"), Luau::InternalCompilerError);
+    }
+    else
+    {
+        CheckResult result = frontend.check("game/B");
+        LUAU_REQUIRE_ERROR_COUNT(1, result);
+    }
+}
+
+// Ideally, unification with any will not cause a 2^n normalization of a function overload
+TEST_CASE_FIXTURE(BuiltinsFixture, "normalization_limit_in_unify_with_any")
+{
+    ScopedFastFlag sff[] = {
+        {"LuauTransitiveSubtyping", true},
+        {"DebugLuauDeferredConstraintResolution", true},
+    };
+
+    // With default limit, this test will take 10 seconds in NoOpt
+    ScopedFastInt luauNormalizeCacheLimit{"LuauNormalizeCacheLimit", 1000};
+
+    // Build a function type with a large overload set
+    const int parts = 100;
+    std::string source;
+
+    for (int i = 0; i < parts; i++)
+        formatAppend(source, "type T%d = { f%d: number }\n", i, i);
+
+    source += "type Instance = { new: (('s0', extra: Instance?) -> T0)";
+
+    for (int i = 1; i < parts; i++)
+        formatAppend(source, " & (('s%d', extra: Instance?) -> T%d)", i, i);
+
+    source += " }\n";
+
+    source += R"(
+local Instance: Instance = {} :: any
+
+local function foo(a: typeof(Instance.new)) return if a then 2 else 3 end
+
+foo(1 :: any)
+)";
+
+    CheckResult result = check(source);
+
+    LUAU_REQUIRE_ERRORS(result);
 }
 
 TEST_SUITE_END();

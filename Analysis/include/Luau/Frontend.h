@@ -6,6 +6,7 @@
 #include "Luau/ModuleResolver.h"
 #include "Luau/RequireTracer.h"
 #include "Luau/Scope.h"
+#include "Luau/TypeCheckLimits.h"
 #include "Luau/TypeInfer.h"
 #include "Luau/Variant.h"
 
@@ -29,6 +30,7 @@ struct ModuleResolver;
 struct ParseResult;
 struct HotComment;
 struct BuildQueueItem;
+struct FrontendCancellationToken;
 
 struct LoadDefinitionFileResult
 {
@@ -96,6 +98,14 @@ struct FrontendOptions
     std::optional<unsigned> randomizeConstraintResolutionSeed;
 
     std::optional<LintOptions> enabledLintWarnings;
+
+    std::shared_ptr<FrontendCancellationToken> cancellationToken;
+
+    // Time limit for typechecking a single module
+    std::optional<double> moduleTimeLimitSec;
+
+    // When true, some internal complexity limits will be scaled down for modules that miss the limit set by moduleTimeLimitSec
+    bool applyInternalLimitScaling = false;
 };
 
 struct CheckResult
@@ -144,6 +154,10 @@ struct Frontend
 
     Frontend(FileResolver* fileResolver, ConfigResolver* configResolver, const FrontendOptions& options = {});
 
+    // Parse module graph and prepare SourceNode/SourceModule data, including required dependencies without running typechecking
+    void parse(const ModuleName& name);
+
+    // Parse and typecheck module graph
     CheckResult check(const ModuleName& name, std::optional<FrontendOptions> optionOverride = {}); // new shininess
 
     bool isDirty(const ModuleName& name, bool forAutocomplete = false) const;
@@ -182,13 +196,6 @@ struct Frontend
     std::optional<CheckResult> getCheckResult(const ModuleName& name, bool accumulateNested, bool forAutocomplete = false);
 
 private:
-    struct TypeCheckLimits
-    {
-        std::optional<double> finishTime;
-        std::optional<int> instantiationChildLimit;
-        std::optional<int> unifierIterationLimit;
-    };
-
     ModulePtr check(const SourceModule& sourceModule, Mode mode, std::vector<RequireCycle> requireCycles, std::optional<ScopePtr> environmentScope,
         bool forAutocomplete, bool recordJsonLog, TypeCheckLimits typeCheckLimits);
 
@@ -240,11 +247,12 @@ public:
 
 ModulePtr check(const SourceModule& sourceModule, const std::vector<RequireCycle>& requireCycles, NotNull<BuiltinTypes> builtinTypes,
     NotNull<InternalErrorReporter> iceHandler, NotNull<ModuleResolver> moduleResolver, NotNull<FileResolver> fileResolver,
-    const ScopePtr& globalScope, std::function<void(const ModuleName&, const ScopePtr&)> prepareModuleScope, FrontendOptions options);
+    const ScopePtr& globalScope, std::function<void(const ModuleName&, const ScopePtr&)> prepareModuleScope, FrontendOptions options,
+    TypeCheckLimits limits);
 
 ModulePtr check(const SourceModule& sourceModule, const std::vector<RequireCycle>& requireCycles, NotNull<BuiltinTypes> builtinTypes,
     NotNull<InternalErrorReporter> iceHandler, NotNull<ModuleResolver> moduleResolver, NotNull<FileResolver> fileResolver,
     const ScopePtr& globalScope, std::function<void(const ModuleName&, const ScopePtr&)> prepareModuleScope, FrontendOptions options,
-    bool recordJsonLog);
+    TypeCheckLimits limits, bool recordJsonLog);
 
 } // namespace Luau

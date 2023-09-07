@@ -43,8 +43,6 @@ struct IrRegAllocA64
     // Restores register for a single instruction; may not assign the previously used register!
     void restoreReg(AssemblyBuilderA64& build, IrInst& inst);
 
-    void assertNoSpills() const;
-
     struct Set
     {
         // which registers are in the set that the allocator manages (initialized at construction)
@@ -77,6 +75,8 @@ struct IrRegAllocA64
 
     // which 8-byte slots are free
     uint32_t freeSpillSlots = 0;
+
+    bool error = false;
 };
 
 } // namespace A64

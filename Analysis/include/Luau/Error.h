@@ -2,6 +2,7 @@
 #pragma once
 
 #include "Luau/Location.h"
+#include "Luau/NotNull.h"
 #include "Luau/Type.h"
 #include "Luau/Variant.h"
 
@@ -357,13 +358,13 @@ struct PackWhereClauseNeeded
     bool operator==(const PackWhereClauseNeeded& rhs) const;
 };
 
-using TypeErrorData =
-    Variant<TypeMismatch, UnknownSymbol, UnknownProperty, NotATable, CannotExtendTable, OnlyTablesCanHaveMethods, DuplicateTypeDefinition,
-        CountMismatch, FunctionDoesNotTakeSelf, FunctionRequiresSelf, OccursCheckFailed, UnknownRequire, IncorrectGenericParameterCount, SyntaxError,
-        CodeTooComplex, UnificationTooComplex, UnknownPropButFoundLikeProp, GenericError, InternalError, CannotCallNonFunction, ExtraInformation,
-        DeprecatedApiUsed, ModuleHasCyclicDependency, IllegalRequire, FunctionExitsWithoutReturning, DuplicateGenericParameter,
-        CannotInferBinaryOperation, MissingProperties, SwappedGenericTypeParameter, OptionalValueAccess, MissingUnionProperty, TypesAreUnrelated,
-        NormalizationTooComplex, TypePackMismatch, DynamicPropertyLookupOnClassesUnsafe, UninhabitedTypeFamily, UninhabitedTypePackFamily, WhereClauseNeeded, PackWhereClauseNeeded>;
+using TypeErrorData = Variant<TypeMismatch, UnknownSymbol, UnknownProperty, NotATable, CannotExtendTable, OnlyTablesCanHaveMethods,
+    DuplicateTypeDefinition, CountMismatch, FunctionDoesNotTakeSelf, FunctionRequiresSelf, OccursCheckFailed, UnknownRequire,
+    IncorrectGenericParameterCount, SyntaxError, CodeTooComplex, UnificationTooComplex, UnknownPropButFoundLikeProp, GenericError, InternalError,
+    CannotCallNonFunction, ExtraInformation, DeprecatedApiUsed, ModuleHasCyclicDependency, IllegalRequire, FunctionExitsWithoutReturning,
+    DuplicateGenericParameter, CannotInferBinaryOperation, MissingProperties, SwappedGenericTypeParameter, OptionalValueAccess, MissingUnionProperty,
+    TypesAreUnrelated, NormalizationTooComplex, TypePackMismatch, DynamicPropertyLookupOnClassesUnsafe, UninhabitedTypeFamily,
+    UninhabitedTypePackFamily, WhereClauseNeeded, PackWhereClauseNeeded>;
 
 struct TypeErrorSummary
 {
@@ -432,7 +433,7 @@ std::string toString(const TypeError& error, TypeErrorToStringOptions options);
 bool containsParseErrorName(const TypeError& error);
 
 // Copy any types named in the error into destArena.
-void copyErrors(ErrorVec& errors, struct TypeArena& destArena);
+void copyErrors(ErrorVec& errors, struct TypeArena& destArena, NotNull<BuiltinTypes> builtinTypes);
 
 // Internal Compiler Error
 struct InternalErrorReporter

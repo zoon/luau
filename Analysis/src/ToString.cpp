@@ -13,8 +13,10 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
+LUAU_FASTFLAGVARIABLE(LuauToStringPrettifyLocation, false)
 
 /*
  * Enables increasing levels of verbosity for Luau type names when stringifying.
@@ -71,6 +73,20 @@ struct FindCyclicTypes final : TypeVisitor
     bool visit(TypePackId tp) override
     {
         return visitedPacks.insert(tp).second;
+    }
+
+    bool visit(TypeId ty, const FreeType& ft) override
+    {
+        if (!visited.insert(ty).second)
+            return false;
+
+        if (FFlag::DebugLuauDeferredConstraintResolution)
+        {
+            traverse(ft.lowerBound);
+            traverse(ft.upperBound);
+        }
+
+        return false;
     }
 
     bool visit(TypeId ty, const TableType& ttv) override
@@ -425,6 +441,36 @@ struct TypeStringifier
     void operator()(TypeId ty, const FreeType& ftv)
     {
         state.result.invalid = true;
+
+        if (FFlag::DebugLuauDeferredConstraintResolution)
+        {
+            const TypeId lowerBound = follow(ftv.lowerBound);
+            const TypeId upperBound = follow(ftv.upperBound);
+            if (get<NeverType>(lowerBound) && get<UnknownType>(upperBound))
+            {
+                state.emit("'");
+                state.emit(state.getName(ty));
+            }
+            else
+            {
+                state.emit("(");
+                if (!get<NeverType>(lowerBound))
+                {
+                    stringify(lowerBound);
+                    state.emit(" <: ");
+                }
+                state.emit("'");
+                state.emit(state.getName(ty));
+
+                if (!get<UnknownType>(upperBound))
+                {
+                    state.emit(" <: ");
+                    stringify(upperBound);
+                }
+                state.emit(")");
+            }
+            return;
+        }
 
         if (FInt::DebugLuauVerboseTypeNames >= 1)
             state.emit("free-");
@@ -1739,9 +1785,17 @@ std::string toString(const Position& position)
     return "{ line = " + std::to_string(position.line) + ", col = " + std::to_string(position.column) + " }";
 }
 
-std::string toString(const Location& location)
+std::string toString(const Location& location, int offset, bool useBegin)
 {
-    return "Location { " + toString(location.begin) + ", " + toString(location.end) + " }";
+    if (FFlag::LuauToStringPrettifyLocation)
+    {
+        return "(" + std::to_string(location.begin.line + offset) + ", " + std::to_string(location.begin.column + offset) + ") - (" +
+               std::to_string(location.end.line + offset) + ", " + std::to_string(location.end.column + offset) + ")";
+    }
+    else
+    {
+        return "Location { " + toString(location.begin) + ", " + toString(location.end) + " }";
+    }
 }
 
 } // namespace Luau

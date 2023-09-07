@@ -18,8 +18,7 @@ LUAU_FASTFLAGVARIABLE(DebugLuauCheckNormalizeInvariant, false)
 LUAU_FASTINTVARIABLE(LuauNormalizeIterationLimit, 1200);
 LUAU_FASTINTVARIABLE(LuauNormalizeCacheLimit, 100000);
 LUAU_FASTFLAGVARIABLE(LuauNormalizeBlockedTypes, false);
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
-LUAU_FASTFLAG(LuauUninhabitedSubAnything2)
+LUAU_FASTFLAGVARIABLE(LuauNormalizeCyclicUnions, false);
 LUAU_FASTFLAG(LuauTransitiveSubtyping)
 LUAU_FASTFLAG(DebugLuauReadWriteProperties)
 
@@ -248,6 +247,19 @@ bool NormalizedType::isSubtypeOfString() const
            !hasTables() && !hasFunctions() && !hasTyvars();
 }
 
+bool NormalizedType::shouldSuppressErrors() const
+{
+    return hasErrors() || get<AnyType>(tops);
+}
+
+bool NormalizedType::hasTopTable() const
+{
+    return hasTables() && std::any_of(tables.begin(), tables.end(), [&](TypeId ty) {
+        auto primTy = get<PrimitiveType>(ty);
+        return primTy && primTy->type == PrimitiveType::Type::Table;
+    });
+}
+
 bool NormalizedType::hasTops() const
 {
     return !get<NeverType>(tops);
@@ -310,12 +322,6 @@ static bool isShallowInhabited(const NormalizedType& norm)
     return !get<NeverType>(norm.tops) || !get<NeverType>(norm.booleans) || !norm.classes.isNever() || !get<NeverType>(norm.errors) ||
            !get<NeverType>(norm.nils) || !get<NeverType>(norm.numbers) || !norm.strings.isNever() || !get<NeverType>(norm.threads) ||
            !norm.functions.isNever() || !norm.tables.empty() || !norm.tyvars.empty();
-}
-
-bool isInhabited_DEPRECATED(const NormalizedType& norm)
-{
-    LUAU_ASSERT(!FFlag::LuauUninhabitedSubAnything2);
-    return isShallowInhabited(norm);
 }
 
 bool Normalizer::isInhabited(const NormalizedType* norm, std::unordered_set<TypeId> seen)
@@ -697,7 +703,8 @@ const NormalizedType* Normalizer::normalize(TypeId ty)
         return found->second.get();
 
     NormalizedType norm{builtinTypes};
-    if (!unionNormalWithTy(norm, ty))
+    std::unordered_set<TypeId> seenSetTypes;
+    if (!unionNormalWithTy(norm, ty, seenSetTypes))
         return nullptr;
     std::unique_ptr<NormalizedType> uniq = std::make_unique<NormalizedType>(std::move(norm));
     const NormalizedType* result = uniq.get();
@@ -712,9 +719,12 @@ bool Normalizer::normalizeIntersections(const std::vector<TypeId>& intersections
     NormalizedType norm{builtinTypes};
     norm.tops = builtinTypes->anyType;
     // Now we need to intersect the two types
+    std::unordered_set<TypeId> seenSetTypes;
     for (auto ty : intersections)
-        if (!intersectNormalWithTy(norm, ty))
+    {
+        if (!intersectNormalWithTy(norm, ty, seenSetTypes))
             return false;
+    }
 
     if (!unionNormals(outType, norm))
         return false;
@@ -1445,13 +1455,14 @@ bool Normalizer::withinResourceLimits()
 }
 
 // See above for an explaination of `ignoreSmallerTyvars`.
-bool Normalizer::unionNormalWithTy(NormalizedType& here, TypeId there, int ignoreSmallerTyvars)
+bool Normalizer::unionNormalWithTy(NormalizedType& here, TypeId there, std::unordered_set<TypeId>& seenSetTypes, int ignoreSmallerTyvars)
 {
     RecursionCounter _rc(&sharedState->counters.recursionCount);
     if (!withinResourceLimits())
         return false;
 
     there = follow(there);
+
     if (get<AnyType>(there) || get<UnknownType>(there))
     {
         TypeId tops = unionOfTops(here.tops, there);
@@ -1472,9 +1483,23 @@ bool Normalizer::unionNormalWithTy(NormalizedType& here, TypeId there, int ignor
     }
     else if (const UnionType* utv = get<UnionType>(there))
     {
+        if (FFlag::LuauNormalizeCyclicUnions)
+        {
+            if (seenSetTypes.count(there))
+                return true;
+            seenSetTypes.insert(there);
+        }
+
         for (UnionTypeIterator it = begin(utv); it != end(utv); ++it)
-            if (!unionNormalWithTy(here, *it))
+        {
+            if (!unionNormalWithTy(here, *it, seenSetTypes))
+            {
+                seenSetTypes.erase(there);
                 return false;
+            }
+        }
+
+        seenSetTypes.erase(there);
         return true;
     }
     else if (const IntersectionType* itv = get<IntersectionType>(there))
@@ -1482,8 +1507,10 @@ bool Normalizer::unionNormalWithTy(NormalizedType& here, TypeId there, int ignor
         NormalizedType norm{builtinTypes};
         norm.tops = builtinTypes->anyType;
         for (IntersectionTypeIterator it = begin(itv); it != end(itv); ++it)
-            if (!intersectNormalWithTy(norm, *it))
+        {
+            if (!intersectNormalWithTy(norm, *it, seenSetTypes))
                 return false;
+        }
         return unionNormals(here, norm);
     }
     else if (FFlag::LuauTransitiveSubtyping && get<UnknownType>(here.tops))
@@ -1567,7 +1594,7 @@ bool Normalizer::unionNormalWithTy(NormalizedType& here, TypeId there, int ignor
         LUAU_ASSERT(!"Unreachable");
 
     for (auto& [tyvar, intersect] : here.tyvars)
-        if (!unionNormalWithTy(*intersect, there, tyvarIndex(tyvar)))
+        if (!unionNormalWithTy(*intersect, there, seenSetTypes, tyvarIndex(tyvar)))
             return false;
 
     assertInvariant(here);
@@ -2470,12 +2497,12 @@ void Normalizer::intersectFunctions(NormalizedFunctionType& heres, const Normali
     }
 }
 
-bool Normalizer::intersectTyvarsWithTy(NormalizedTyvars& here, TypeId there)
+bool Normalizer::intersectTyvarsWithTy(NormalizedTyvars& here, TypeId there, std::unordered_set<TypeId>& seenSetTypes)
 {
     for (auto it = here.begin(); it != here.end();)
     {
         NormalizedType& inter = *it->second;
-        if (!intersectNormalWithTy(inter, there))
+        if (!intersectNormalWithTy(inter, there, seenSetTypes))
             return false;
         if (isShallowInhabited(inter))
             ++it;
@@ -2548,13 +2575,14 @@ bool Normalizer::intersectNormals(NormalizedType& here, const NormalizedType& th
     return true;
 }
 
-bool Normalizer::intersectNormalWithTy(NormalizedType& here, TypeId there)
+bool Normalizer::intersectNormalWithTy(NormalizedType& here, TypeId there, std::unordered_set<TypeId>& seenSetTypes)
 {
     RecursionCounter _rc(&sharedState->counters.recursionCount);
     if (!withinResourceLimits())
         return false;
 
     there = follow(there);
+
     if (get<AnyType>(there) || get<UnknownType>(there))
     {
         here.tops = intersectionOfTops(here.tops, there);
@@ -2563,20 +2591,20 @@ bool Normalizer::intersectNormalWithTy(NormalizedType& here, TypeId there)
     else if (!get<NeverType>(here.tops))
     {
         clearNormal(here);
-        return unionNormalWithTy(here, there);
+        return unionNormalWithTy(here, there, seenSetTypes);
     }
     else if (const UnionType* utv = get<UnionType>(there))
     {
         NormalizedType norm{builtinTypes};
         for (UnionTypeIterator it = begin(utv); it != end(utv); ++it)
-            if (!unionNormalWithTy(norm, *it))
+            if (!unionNormalWithTy(norm, *it, seenSetTypes))
                 return false;
         return intersectNormals(here, norm);
     }
     else if (const IntersectionType* itv = get<IntersectionType>(there))
     {
         for (IntersectionTypeIterator it = begin(itv); it != end(itv); ++it)
-            if (!intersectNormalWithTy(here, *it))
+            if (!intersectNormalWithTy(here, *it, seenSetTypes))
                 return false;
         return true;
     }
@@ -2698,7 +2726,7 @@ bool Normalizer::intersectNormalWithTy(NormalizedType& here, TypeId there)
             return true;
         }
         else if (auto nt = get<NegationType>(t))
-            return intersectNormalWithTy(here, nt->ty);
+            return intersectNormalWithTy(here, nt->ty, seenSetTypes);
         else
         {
             // TODO negated unions, intersections, table, and function.
@@ -2713,7 +2741,7 @@ bool Normalizer::intersectNormalWithTy(NormalizedType& here, TypeId there)
     else
         LUAU_ASSERT(!"Unreachable");
 
-    if (!intersectTyvarsWithTy(tyvars, there))
+    if (!intersectTyvarsWithTy(tyvars, there, seenSetTypes))
         return false;
     here.tyvars = std::move(tyvars);
 

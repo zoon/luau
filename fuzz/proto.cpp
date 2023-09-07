@@ -7,6 +7,7 @@
 #include "Luau/CodeGen.h"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
+#include "Luau/Config.h"
 #include "Luau/Frontend.h"
 #include "Luau/Linter.h"
 #include "Luau/ModuleResolver.h"
@@ -26,13 +27,17 @@ const bool kFuzzLinter = true;
 const bool kFuzzTypeck = true;
 const bool kFuzzVM = true;
 const bool kFuzzTranspile = true;
-const bool kFuzzCodegen = true;
+const bool kFuzzCodegenVM = true;
+const bool kFuzzCodegenAssembly = true;
 
 // Should we generate type annotations?
 const bool kFuzzTypes = true;
 
+const Luau::CodeGen::AssemblyOptions::Target kFuzzCodegenTarget = Luau::CodeGen::AssemblyOptions::A64;
+
 static_assert(!(kFuzzVM && !kFuzzCompiler), "VM requires the compiler!");
-static_assert(!(kFuzzCodegen && !kFuzzVM), "Codegen requires the VM!");
+static_assert(!(kFuzzCodegenVM && !kFuzzCompiler), "Codegen requires the compiler!");
+static_assert(!(kFuzzCodegenAssembly && !kFuzzCompiler), "Codegen requires the compiler!");
 
 std::vector<std::string> protoprint(const luau::ModuleSet& stat, bool types);
 
@@ -43,6 +48,7 @@ LUAU_FASTINT(LuauTableTypeMaximumStringifierLength)
 LUAU_FASTINT(LuauTypeInferIterationLimit)
 LUAU_FASTINT(LuauTarjanChildLimit)
 LUAU_FASTFLAG(DebugLuauFreezeArena)
+LUAU_FASTFLAG(DebugLuauAbortingChecks)
 
 std::chrono::milliseconds kInterruptTimeout(10);
 std::chrono::time_point<std::chrono::system_clock> interruptDeadline;
@@ -86,7 +92,7 @@ lua_State* createGlobalState()
 {
     lua_State* L = lua_newstate(allocate, NULL);
 
-    if (kFuzzCodegen && Luau::CodeGen::isSupported())
+    if (kFuzzCodegenVM && Luau::CodeGen::isSupported())
         Luau::CodeGen::create(L);
 
     lua_callbacks(L)->interrupt = interrupt;
@@ -224,6 +230,7 @@ DEFINE_PROTO_FUZZER(const luau::ModuleSet& message)
             flag->value = true;
 
     FFlag::DebugLuauFreezeArena.value = true;
+    FFlag::DebugLuauAbortingChecks.value = true;
 
     std::vector<std::string> sources = protoprint(message, kFuzzTypes);
 
@@ -348,8 +355,25 @@ DEFINE_PROTO_FUZZER(const luau::ModuleSet& message)
         }
     }
 
+    // run codegen on resulting bytecode (in separate state)
+    if (kFuzzCodegenAssembly && bytecode.size())
+    {
+        static lua_State* globalState = luaL_newstate();
+
+        if (luau_load(globalState, "=fuzz", bytecode.data(), bytecode.size(), 0) == 0)
+        {
+            Luau::CodeGen::AssemblyOptions options;
+            options.outputBinary = true;
+            options.target = kFuzzCodegenTarget;
+            Luau::CodeGen::getAssembly(globalState, -1, options);
+        }
+
+        lua_pop(globalState, 1);
+        lua_gc(globalState, LUA_GCCOLLECT, 0);
+    }
+
     // run resulting bytecode (from last successfully compiler module)
-    if (kFuzzVM && bytecode.size())
+    if ((kFuzzVM || kFuzzCodegenVM) && bytecode.size())
     {
         static lua_State* globalState = createGlobalState();
 
@@ -374,9 +398,10 @@ DEFINE_PROTO_FUZZER(const luau::ModuleSet& message)
             LUAU_ASSERT(heapSize < 256 * 1024);
         };
 
-        runCode(bytecode, false);
+        if (kFuzzVM)
+            runCode(bytecode, false);
 
-        if (kFuzzCodegen && Luau::CodeGen::isSupported())
+        if (kFuzzCodegenVM && Luau::CodeGen::isSupported())
             runCode(bytecode, true);
     }
 }

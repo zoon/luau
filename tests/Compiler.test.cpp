@@ -49,16 +49,48 @@ static std::string compileFunction0Coverage(const char* source, int level)
     return bcb.dumpFunction(0);
 }
 
-static std::string compileFunction0TypeTable(const char* source)
+static std::string compileTypeTable(const char* source)
 {
     Luau::BytecodeBuilder bcb;
     bcb.setDumpFlags(Luau::BytecodeBuilder::Dump_Code);
-    Luau::compileOrThrow(bcb, source);
+
+    Luau::CompileOptions opts;
+    opts.vectorType = "Vector3";
+    Luau::compileOrThrow(bcb, source, opts);
 
     return bcb.dumpTypeInfo();
 }
 
 TEST_SUITE_BEGIN("Compiler");
+
+TEST_CASE("BytecodeIsStable")
+{
+    // As noted in Bytecode.h, all enums used for bytecode storage and serialization are order-sensitive
+    // Adding entries in the middle will typically pass the tests but break compatibility
+    // This test codifies this by validating that in each enum, the last (or close-to-last) entry has a fixed encoding
+
+    // This test will need to get occasionally revised to "move" the checked enum entries forward as we ship newer versions
+    // When doing so, please add *new* checks for more recent bytecode versions and keep existing checks in place.
+
+    // Bytecode ops (serialized & in-memory)
+    CHECK(LOP_FASTCALL2K == 75); // bytecode v1
+    CHECK(LOP_JUMPXEQKS == 80); // bytecode v3
+
+    // Bytecode fastcall ids (serialized & in-memory)
+    // Note: these aren't strictly bound to specific bytecode versions, but must monotonically increase to keep backwards compat
+    CHECK(LBF_VECTOR == 54);
+    CHECK(LBF_TOSTRING == 63);
+
+    // Bytecode capture type (serialized & in-memory)
+    CHECK(LCT_UPVAL == 2); // bytecode v1
+
+    // Bytecode constants (serialized)
+    CHECK(LBC_CONSTANT_CLOSURE == 6); // bytecode v1
+
+    // Bytecode type encoding (serialized & in-memory)
+    // Note: these *can* change retroactively *if* type version is bumped, but probably shouldn't
+    LUAU_ASSERT(LBC_TYPE_VECTOR == 8); // type version 1
+}
 
 TEST_CASE("CompileToBytecode")
 {
@@ -4210,7 +4242,7 @@ RETURN R0 0
     bcb.setDumpFlags(Luau::BytecodeBuilder::Dump_Code);
     Luau::CompileOptions options;
     const char* mutableGlobals[] = {"Game", "Workspace", "game", "plugin", "script", "shared", "workspace", NULL};
-    options.mutableGlobals = &mutableGlobals[0];
+    options.mutableGlobals = mutableGlobals;
     Luau::compileOrThrow(bcb, source, options);
 
     CHECK_EQ("\n" + bcb.dumpFunction(0), R"(
@@ -5082,7 +5114,7 @@ RETURN R1 1
 )");
 }
 
-TEST_CASE("InlineBasicProhibited")
+TEST_CASE("InlineProhibited")
 {
     // we can't inline variadic functions
     CHECK_EQ("\n" + compileFunction(R"(
@@ -5118,6 +5150,66 @@ MOVE R1 R0
 CALL R1 0 1
 GETIMPORT R2 2 [getfenv]
 CALL R2 0 0
+RETURN R1 1
+)");
+}
+
+TEST_CASE("InlineProhibitedRecursion")
+{
+    // we can't inline recursive invocations of functions in the functions
+    // this is actually profitable in certain cases, but it complicates the compiler as it means a local has multiple registers/values
+
+    // in this example, inlining is blocked because we're compiling fact() and we don't yet have the cost model / profitability data for fact()
+    CHECK_EQ("\n" + compileFunction(R"(
+local function fact(n)
+    return if n <= 1 then 1 else fact(n-1)*n
+end
+
+return fact
+)",
+                        0, 2),
+        R"(
+LOADN R2 1
+JUMPIFNOTLE R0 R2 L0
+LOADN R1 1
+RETURN R1 1
+L0: GETUPVAL R2 0
+SUBK R3 R0 K0 [1]
+CALL R2 1 1
+MUL R1 R2 R0
+RETURN R1 1
+)");
+
+    // in this example, inlining of fact() succeeds, but the nested call to fact() fails since fact is already on the inline stack
+    CHECK_EQ("\n" + compileFunction(R"(
+local function fact(n)
+    return if n <= 1 then 1 else fact(n-1)*n
+end
+
+local function factsafe(n)
+    assert(n >= 1)
+    return fact(n)
+end
+
+return factsafe
+)",
+                        1, 2),
+        R"(
+LOADN R3 1
+JUMPIFLE R3 R0 L0
+LOADB R2 0 +1
+L0: LOADB R2 1
+L1: FASTCALL1 1 R2 L2
+GETIMPORT R1 1 [assert]
+CALL R1 1 0
+L2: LOADN R2 1
+JUMPIFNOTLE R0 R2 L3
+LOADN R1 1
+RETURN R1 1
+L3: GETUPVAL R2 0
+SUBK R3 R0 K2 [1]
+CALL R2 1 1
+MUL R1 R2 R0
 RETURN R1 1
 )");
 }
@@ -7036,6 +7128,21 @@ CALL R0 -1 1
 L0: RETURN R0 1
 )");
 
+    // some builtins are not variadic and have a fixed number of arguments but are not none-safe, meaning that we can't replace calls that may
+    // return none with calls that will return nil
+    CHECK_EQ("\n" + compileFunction(R"(
+return type(unknown())
+)",
+                        0, 2),
+        R"(
+GETIMPORT R1 1 [unknown]
+CALL R1 0 -1
+FASTCALL 40 L0
+GETIMPORT R0 3 [type]
+CALL R0 -1 1
+L0: RETURN R0 1
+)");
+
     // importantly, this optimization also helps us get around the multret inlining restriction for builtin wrappers
     CHECK_EQ("\n" + compileFunction(R"(
 local function new()
@@ -7080,12 +7187,7 @@ L1: RETURN R3 1
 
 TEST_CASE("EncodedTypeTable")
 {
-    ScopedFastFlag sffs[] = {
-        {"BytecodeVersion4", true},
-        {"CompileFunctionType", true},
-    };
-
-    CHECK_EQ("\n" + compileFunction0TypeTable(R"(
+    CHECK_EQ("\n" + compileTypeTable(R"(
 function myfunc(test: string, num: number)
     print(test)
 end
@@ -7104,6 +7206,9 @@ end
 function myfunc5(test: string | number, n: number | boolean)
 end
 
+function myfunc6(test: (number) -> string)
+end
+
 myfunc('test')
 )"),
         R"(
@@ -7111,9 +7216,10 @@ myfunc('test')
 1: function(number?)
 2: function(string, number)
 3: function(any, number)
+5: function(function)
 )");
 
-    CHECK_EQ("\n" + compileFunction0TypeTable(R"(
+    CHECK_EQ("\n" + compileTypeTable(R"(
 local Str = {
     a = 1
 }
@@ -7126,7 +7232,176 @@ end
 Str:test(234)
 )"),
         R"(
-0: function({ }, number)
+0: function(table, number)
+)");
+}
+
+TEST_CASE("HostTypesAreUserdata")
+{
+    CHECK_EQ("\n" + compileTypeTable(R"(
+function myfunc(test: string, num: number)
+    print(test)
+end
+
+function myfunc2(test: Instance, num: number)
+end
+
+type Foo = string
+
+function myfunc3(test: string, n: Foo)
+end
+
+function myfunc4<Bar>(test: Bar, n: Part)
+end
+)"),
+        R"(
+0: function(string, number)
+1: function(userdata, number)
+2: function(string, string)
+3: function(any, userdata)
+)");
+}
+
+TEST_CASE("HostTypesVector")
+{
+    CHECK_EQ("\n" + compileTypeTable(R"(
+function myfunc(test: Instance, pos: Vector3)
+end
+
+function myfunc2<Vector3>(test: Instance, pos: Vector3)
+end
+
+do
+    type Vector3 = number
+
+    function myfunc3(test: Instance, pos: Vector3)
+    end
+end
+)"),
+        R"(
+0: function(userdata, vector)
+1: function(userdata, any)
+2: function(userdata, number)
+)");
+}
+
+TEST_CASE("TypeAliasScoping")
+{
+    CHECK_EQ("\n" + compileTypeTable(R"(
+do
+    type Part = number
+end
+
+function myfunc1(test: Part, num: number)
+end
+
+do
+    type Part = number
+
+    function myfunc2(test: Part, num: number)
+    end
+end
+
+repeat
+    type Part = number
+until (function(test: Part, num: number) end)()
+
+function myfunc4(test: Instance, num: number)
+end
+
+type Instance = string
+)"),
+        R"(
+0: function(userdata, number)
+1: function(number, number)
+2: function(number, number)
+3: function(string, number)
+)");
+}
+
+TEST_CASE("TypeAliasResolve")
+{
+    CHECK_EQ("\n" + compileTypeTable(R"(
+type Foo1 = number
+type Foo2 = { number }
+type Foo3 = Part
+type Foo4 = Foo1 -- we do not resolve aliases within aliases
+type Foo5<X> = X
+
+function myfunc(f1: Foo1, f2: Foo2, f3: Foo3, f4: Foo4, f5: Foo5<number>)
+end
+
+function myfuncerr(f1: Foo1<string>, f2: Foo5)
+end
+
+)"),
+        R"(
+0: function(number, table, userdata, any, any)
+1: function(number, any)
+)");
+}
+
+TEST_CASE("TypeUnionIntersection")
+{
+    CHECK_EQ("\n" + compileTypeTable(R"(
+function myfunc(test: string | nil, foo: nil)
+end
+
+function myfunc2(test: string & nil, foo: nil)
+end
+
+function myfunc3(test: string | number, foo: nil)
+end
+
+function myfunc4(test: string & number, foo: nil)
+end
+)"),
+        R"(
+0: function(string?, nil)
+1: function(any, nil)
+2: function(any, nil)
+3: function(any, nil)
+)");
+}
+
+TEST_CASE("BuiltinFoldMathK")
+{
+    // we can fold math.pi at optimization level 2
+    CHECK_EQ("\n" + compileFunction(R"(
+function test()
+    return math.pi * 2
+end
+)", 0, 2),
+        R"(
+LOADK R0 K0 [6.2831853071795862]
+RETURN R0 1
+)");
+
+    // we don't do this at optimization level 1 because it may interfere with environment substitution
+    CHECK_EQ("\n" + compileFunction(R"(
+function test()
+    return math.pi * 2
+end
+)", 0, 1),
+        R"(
+GETIMPORT R1 3 [math.pi]
+MULK R0 R1 K0 [2]
+RETURN R0 1
+)");
+
+    // we also don't do it if math global is assigned to
+    CHECK_EQ("\n" + compileFunction(R"(
+function test()
+    return math.pi * 2
+end
+
+math = { pi = 4 }
+)", 0, 2),
+        R"(
+GETGLOBAL R2 K1 ['math']
+GETTABLEKS R1 R2 K2 ['pi']
+MULK R0 R1 K0 [2]
+RETURN R0 1
 )");
 }
 

@@ -10,6 +10,7 @@
 #include "Luau/Symbol.h"
 #include "Luau/TxnLog.h"
 #include "Luau/Type.h"
+#include "Luau/TypeCheckLimits.h"
 #include "Luau/TypePack.h"
 #include "Luau/TypeUtils.h"
 #include "Luau/Unifier.h"
@@ -19,14 +20,13 @@
 #include <unordered_map>
 #include <unordered_set>
 
-LUAU_FASTFLAG(LuauClassTypeVarsInSubstitution)
-
 namespace Luau
 {
 
 struct Scope;
 struct TypeChecker;
 struct ModuleResolver;
+struct FrontendCancellationToken;
 
 using Name = std::string;
 using ScopePtr = std::shared_ptr<Scope>;
@@ -55,15 +55,6 @@ struct GenericTypeDefinitions
 struct HashBoolNamePair
 {
     size_t operator()(const std::pair<bool, Name>& pair) const;
-};
-
-class TimeLimitError : public InternalCompilerError
-{
-public:
-    explicit TimeLimitError(const std::string& moduleName)
-        : InternalCompilerError("Typeinfer failed to complete in allotted time", moduleName)
-    {
-    }
 };
 
 struct GlobalTypes
@@ -264,6 +255,7 @@ public:
     [[noreturn]] void ice(const std::string& message, const Location& location);
     [[noreturn]] void ice(const std::string& message);
     [[noreturn]] void throwTimeLimitError();
+    [[noreturn]] void throwUserCancelError();
 
     ScopePtr childFunctionScope(const ScopePtr& parent, const Location& location, int subLevel = 0);
     ScopePtr childScope(const ScopePtr& parent, const Location& location);
@@ -388,6 +380,8 @@ public:
     std::optional<double> finishTime;
     std::optional<int> instantiationChildLimit;
     std::optional<int> unifierIterationLimit;
+
+    std::shared_ptr<FrontendCancellationToken> cancellationToken;
 
 public:
     const TypeId nilType;

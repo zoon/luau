@@ -39,6 +39,8 @@ struct IrRegAllocX64
     RegisterX64 allocRegOrReuse(SizeX64 size, uint32_t instIdx, std::initializer_list<IrOp> oprefs);
     RegisterX64 takeReg(RegisterX64 reg, uint32_t instIdx);
 
+    bool canTakeReg(RegisterX64 reg) const;
+
     void freeReg(RegisterX64 reg);
     void freeLastUseReg(IrInst& target, uint32_t instIdx);
     void freeLastUseRegs(const IrInst& inst, uint32_t instIdx);
@@ -75,6 +77,7 @@ struct IrRegAllocX64
     std::array<uint32_t, 16> gprInstUsers;
     std::array<bool, 16> freeXmmMap;
     std::array<uint32_t, 16> xmmInstUsers;
+    uint8_t usableXmmRegCount = 0;
 
     std::bitset<256> usedSpillSlots;
     unsigned maxUsedSlot = 0;

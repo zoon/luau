@@ -5,9 +5,9 @@
 #include "luacodegen.h"
 
 #include "Luau/BuiltinDefinitions.h"
+#include "Luau/DenseHash.h"
 #include "Luau/ModuleResolver.h"
 #include "Luau/TypeInfer.h"
-#include "Luau/StringUtils.h"
 #include "Luau/BytecodeBuilder.h"
 #include "Luau/Frontend.h"
 
@@ -15,12 +15,16 @@
 #include "ScopedFlags.h"
 
 #include <fstream>
+#include <string>
 #include <vector>
 #include <math.h>
 
 extern bool verbose;
 extern bool codegen;
 extern int optimizationLevel;
+
+LUAU_FASTFLAG(LuauPCallDebuggerFix);
+LUAU_FASTFLAG(LuauFloorDivision);
 
 static lua_CompileOptions defaultOptions()
 {
@@ -264,6 +268,12 @@ static void* limitedRealloc(void* ud, void* ptr, size_t osize, size_t nsize)
 
 TEST_SUITE_BEGIN("Conformance");
 
+TEST_CASE("CodegenSupported")
+{
+    if (codegen && !luau_codegen_supported())
+        MESSAGE("Native code generation is not supported by the current configuration and will be disabled");
+}
+
 TEST_CASE("Assert")
 {
     runConformance("assert.lua");
@@ -271,6 +281,7 @@ TEST_CASE("Assert")
 
 TEST_CASE("Basic")
 {
+    ScopedFastFlag sffs{"LuauFloorDivision", true};
     runConformance("basic.lua");
 }
 
@@ -354,6 +365,7 @@ TEST_CASE("Errors")
 
 TEST_CASE("Events")
 {
+    ScopedFastFlag sffs{"LuauFloorDivision", true};
     runConformance("events.lua");
 }
 
@@ -435,6 +447,8 @@ TEST_CASE("Pack")
 
 TEST_CASE("Vector")
 {
+    ScopedFastFlag sffs{"LuauFloorDivision", true};
+
     lua_CompileOptions copts = defaultOptions();
     copts.vectorCtor = "vector";
 
@@ -1110,6 +1124,34 @@ static bool endsWith(const std::string& str, const std::string& suffix)
     return suffix == std::string_view(str.c_str() + str.length() - suffix.length(), suffix.length());
 }
 
+TEST_CASE("ApiType")
+{
+    StateRef globalState(luaL_newstate(), lua_close);
+    lua_State* L = globalState.get();
+
+    lua_pushnumber(L, 2);
+    CHECK(strcmp(luaL_typename(L, -1), "number") == 0);
+    CHECK(strcmp(luaL_typename(L, 1), "number") == 0);
+    CHECK(lua_type(L, -1) == LUA_TNUMBER);
+    CHECK(lua_type(L, 1) == LUA_TNUMBER);
+
+    CHECK(strcmp(luaL_typename(L, 2), "no value") == 0);
+    CHECK(lua_type(L, 2) == LUA_TNONE);
+    CHECK(strcmp(lua_typename(L, lua_type(L, 2)), "no value") == 0);
+
+    lua_newuserdata(L, 0);
+    CHECK(strcmp(luaL_typename(L, -1), "userdata") == 0);
+    CHECK(lua_type(L, -1) == LUA_TUSERDATA);
+
+    lua_newtable(L);
+    lua_pushstring(L, "hello");
+    lua_setfield(L, -2, "__type");
+    lua_setmetatable(L, -2);
+
+    CHECK(strcmp(luaL_typename(L, -1), "hello") == 0);
+    CHECK(lua_type(L, -1) == LUA_TUSERDATA);
+}
+
 #if !LUA_USE_LONGJMP
 TEST_CASE("ExceptionObject")
 {
@@ -1177,15 +1219,90 @@ TEST_CASE("IfElseExpression")
     runConformance("ifelseexpr.lua");
 }
 
+// Optionally returns debug info for the first Luau stack frame that is encountered on the callstack.
+static std::optional<lua_Debug> getFirstLuauFrameDebugInfo(lua_State* L)
+{
+    static std::string_view kLua = "Lua";
+    lua_Debug ar;
+    for (int i = 0; lua_getinfo(L, i, "sl", &ar); i++)
+    {
+        if (kLua == ar.what)
+            return ar;
+    }
+    return std::nullopt;
+}
+
 TEST_CASE("TagMethodError")
 {
-    runConformance("tmerror.lua", [](lua_State* L) {
-        auto* cb = lua_callbacks(L);
+    static std::vector<int> expectedHits;
 
-        cb->debugprotectederror = [](lua_State* L) {
-            CHECK(lua_isyieldable(L));
-        };
-    });
+    // Loop over two modes:
+    //   when doLuaBreak is false the test only verifies that callbacks occur on the expected lines in the Luau source
+    //   when doLuaBreak is true the test additionally calls lua_break to ensure breaking the debugger doesn't cause the VM to crash
+    for (bool doLuaBreak : {false, true})
+    {
+        std::optional<ScopedFastFlag> sff;
+        if (doLuaBreak)
+        {
+            // If doLuaBreak is true then LuauPCallDebuggerFix must be enabled to avoid crashing the tests.
+            sff = {"LuauPCallDebuggerFix", true};
+        }
+
+        if (FFlag::LuauPCallDebuggerFix)
+        {
+            expectedHits = {22, 32};
+        }
+        else
+        {
+            expectedHits = {
+                9,
+                17,
+                17,
+                22,
+                27,
+                27,
+                32,
+                37,
+            };
+        }
+
+        static int index;
+        static bool luaBreak;
+        index = 0;
+        luaBreak = doLuaBreak;
+
+        // 'yieldCallback' doesn't do anything, but providing the callback to runConformance
+        // ensures that the call to lua_break doesn't cause an error to be generated because
+        // runConformance doesn't expect the VM to be in the state LUA_BREAK.
+        auto yieldCallback = [](lua_State* L) {};
+
+        runConformance(
+            "tmerror.lua",
+            [](lua_State* L) {
+                auto* cb = lua_callbacks(L);
+
+                cb->debugprotectederror = [](lua_State* L) {
+                    std::optional<lua_Debug> ar = getFirstLuauFrameDebugInfo(L);
+
+                    CHECK(lua_isyieldable(L));
+                    REQUIRE(ar.has_value());
+                    REQUIRE(index < int(std::size(expectedHits)));
+                    CHECK(ar->currentline == expectedHits[index++]);
+
+                    if (luaBreak)
+                    {
+                        // Cause luau execution to break when 'error' is called via 'pcall'
+                        // This call to lua_break is a regression test for an issue where debugprotectederror
+                        // was called on a thread that couldn't be yielded even though lua_isyieldable was true.
+                        lua_break(L);
+                    }
+                };
+            },
+            yieldCallback);
+
+        // Make sure the number of break points hit was the expected number
+        CHECK(index == std::size(expectedHits));
+    }
 }
 
 TEST_CASE("Coverage")
@@ -1244,6 +1361,8 @@ TEST_CASE("GCDump")
 {
     // internal function, declared in lgc.h - not exposed via lua.h
     extern void luaC_dump(lua_State * L, void* file, const char* (*categoryName)(lua_State * L, uint8_t memcat));
+    extern void luaC_enumheap(lua_State * L, void* context, void (*node)(void* context, void* ptr, uint8_t tt, uint8_t memcat, const char* name),
+        void (*edge)(void* context, void* from, void* to, const char* name));
 
     StateRef globalState(luaL_newstate(), lua_close);
     lua_State* L = globalState.get();
@@ -1287,6 +1406,40 @@ TEST_CASE("GCDump")
     luaC_dump(L, f, nullptr);
 
     fclose(f);
+
+    struct Node
+    {
+        void* ptr;
+        uint8_t tag;
+        uint8_t memcat;
+        std::string name;
+    };
+
+    struct EnumContext
+    {
+        EnumContext()
+            : nodes{nullptr}
+            , edges{nullptr}
+        {
+        }
+
+        Luau::DenseHashMap<void*, Node> nodes;
+        Luau::DenseHashMap<void*, void*> edges;
+    } ctx;
+
+    luaC_enumheap(
+        L, &ctx,
+        [](void* ctx, void* gco, uint8_t tt, uint8_t memcat, const char* name) {
+            EnumContext& context = *(EnumContext*)ctx;
+            context.nodes[gco] = {gco, tt, memcat, name ? name : ""};
+        },
+        [](void* ctx, void* s, void* t, const char*) {
+            EnumContext& context = *(EnumContext*)ctx;
+            context.edges[s] = t;
+        });
+
+    CHECK(!ctx.nodes.empty());
+    CHECK(!ctx.edges.empty());
 }
 
 TEST_CASE("Interrupt")
@@ -1468,6 +1621,9 @@ static void pushInt64(lua_State* L, int64_t value)
 
 TEST_CASE("Userdata")
 {
+
+    ScopedFastFlag sffs{"LuauFloorDivision", true};
+
     runConformance("userdata.lua", [](lua_State* L) {
         // create metatable with all the metamethods
         lua_newtable(L);
@@ -1587,6 +1743,19 @@ TEST_CASE("Userdata")
             nullptr);
         lua_setfield(L, -2, "__div");
 
+        // __idiv
+        lua_pushcfunction(
+            L,
+            [](lua_State* L) {
+                // for testing we use different semantics here compared to __div: __idiv rounds to negative inf, __div truncates (rounds to zero)
+                // additionally, division loses precision here outside of 2^53 range
+                // we do not necessarily recommend this behavior in production code!
+                pushInt64(L, int64_t(floor(double(getInt64(L, 1)) / double(getInt64(L, 2)))));
+                return 1;
+            },
+            nullptr);
+        lua_setfield(L, -2, "__idiv");
+
         // __mod
         lua_pushcfunction(
             L,
@@ -1651,6 +1820,51 @@ TEST_CASE("SafeEnv")
 TEST_CASE("Native")
 {
     runConformance("native.lua");
+}
+
+TEST_CASE("NativeTypeAnnotations")
+{
+    ScopedFastFlag bytecodeVersion4("BytecodeVersion4", true);
+
+    // This tests requires code to run natively, otherwise all 'is_native' checks will fail
+    if (!codegen || !luau_codegen_supported())
+        return;
+
+    lua_CompileOptions copts = defaultOptions();
+    copts.vectorCtor = "vector";
+    copts.vectorType = "vector";
+
+    runConformance(
+        "native_types.lua",
+        [](lua_State* L) {
+            // add is_native() function
+            lua_pushcclosurek(
+                L,
+                [](lua_State* L) -> int {
+                    extern int luaG_isnative(lua_State * L, int level);
+
+                    lua_pushboolean(L, luaG_isnative(L, 1));
+                    return 1;
+                },
+                "is_native", 0, nullptr);
+            lua_setglobal(L, "is_native");
+
+            // for vector tests
+            lua_pushcfunction(L, lua_vector, "vector");
+            lua_setglobal(L, "vector");
+
+#if LUA_VECTOR_SIZE == 4
+            lua_pushvector(L, 0.0f, 0.0f, 0.0f, 0.0f);
+#else
+            lua_pushvector(L, 0.0f, 0.0f, 0.0f);
+#endif
+            luaL_newmetatable(L, "vector");
+
+            lua_setreadonly(L, -1, true);
+            lua_setmetatable(L, -2);
+            lua_pop(L, 1);
+        },
+        nullptr, nullptr, &copts);
 }
 
 TEST_CASE("HugeFunction")

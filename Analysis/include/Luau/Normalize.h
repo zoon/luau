@@ -207,8 +207,6 @@ struct NormalizedFunctionType
 struct NormalizedType;
 using NormalizedTyvars = std::unordered_map<TypeId, std::unique_ptr<NormalizedType>>;
 
-bool isInhabited_DEPRECATED(const NormalizedType& norm);
-
 // A normalized type is either any, unknown, or one of the form P | T | F | G where
 // * P is a union of primitive types (including singletons, classes and the error type)
 // * T is a union of table types
@@ -275,6 +273,12 @@ struct NormalizedType
 
     /// Returns true if the type is a subtype of string(it could be a singleton). Behaves like Type::isString()
     bool isSubtypeOfString() const;
+
+    /// Returns true if this type should result in error suppressing behavior.
+    bool shouldSuppressErrors() const;
+
+    /// Returns true if this type contains the primitve top table type, `table`.
+    bool hasTopTable() const;
 
     // Helpers that improve readability of the above (they just say if the component is present)
     bool hasTops() const;
@@ -345,7 +349,7 @@ public:
     void unionTablesWithTable(TypeIds& heres, TypeId there);
     void unionTables(TypeIds& heres, const TypeIds& theres);
     bool unionNormals(NormalizedType& here, const NormalizedType& there, int ignoreSmallerTyvars = -1);
-    bool unionNormalWithTy(NormalizedType& here, TypeId there, int ignoreSmallerTyvars = -1);
+    bool unionNormalWithTy(NormalizedType& here, TypeId there, std::unordered_set<TypeId>& seenSetTypes, int ignoreSmallerTyvars = -1);
 
     // ------- Negations
     std::optional<NormalizedType> negateNormal(const NormalizedType& here);
@@ -367,9 +371,9 @@ public:
     std::optional<TypeId> intersectionOfFunctions(TypeId here, TypeId there);
     void intersectFunctionsWithFunction(NormalizedFunctionType& heress, TypeId there);
     void intersectFunctions(NormalizedFunctionType& heress, const NormalizedFunctionType& theress);
-    bool intersectTyvarsWithTy(NormalizedTyvars& here, TypeId there);
+    bool intersectTyvarsWithTy(NormalizedTyvars& here, TypeId there, std::unordered_set<TypeId>& seenSetTypes);
     bool intersectNormals(NormalizedType& here, const NormalizedType& there, int ignoreSmallerTyvars = -1);
-    bool intersectNormalWithTy(NormalizedType& here, TypeId there);
+    bool intersectNormalWithTy(NormalizedType& here, TypeId there, std::unordered_set<TypeId>& seenSetTypes);
     bool normalizeIntersections(const std::vector<TypeId>& intersections, NormalizedType& outType);
 
     // Check for inhabitance

@@ -82,6 +82,7 @@ assert(not(1>1) and not(1>2) and (2>1))
 assert(not('a'>'a') and not('a'>'b') and ('b'>'a'))
 assert((1>=1) and not(1>=2) and (2>=1))
 assert(('a'>='a') and not('a'>='b') and ('b'>='a'))
+assert((unk and unk > 0) == nil) -- validate precedence between and and >
 
 -- testing mod operator
 assert(-4%3 == 2)
@@ -235,6 +236,12 @@ assert(flag);
 
 assert(select(2, pcall(math.random, 1, 2, 3)):match("wrong number of arguments"))
 
+-- argument count
+function nothing() end
+
+assert(pcall(math.abs) == false)
+assert(pcall(function() return math.abs(nothing()) end) == false)
+
 -- min/max
 assert(math.min(1) == 1)
 assert(math.min(1, 2) == 1)
@@ -249,6 +256,7 @@ assert(math.max(1, -1, 2) == 2)
 assert(math.noise(0.5) == 0)
 assert(math.noise(0.5, 0.5) == -0.25)
 assert(math.noise(0.5, 0.5, -0.5) == 0.125)
+assert(math.noise(455.7204209769105, 340.80410508750134, 121.80087666537628) == 0.5010709762573242)
 
 local inf = math.huge * 2
 local nan = 0 / 0

@@ -4,6 +4,7 @@ if(NOT ${CMAKE_VERSION} VERSION_LESS "3.19")
     target_sources(Luau.Common PRIVATE
         Common/include/Luau/Common.h
         Common/include/Luau/Bytecode.h
+        Common/include/Luau/BytecodeUtils.h
         Common/include/Luau/DenseHash.h
         Common/include/Luau/ExperimentalFlags.h
     )
@@ -55,6 +56,15 @@ target_sources(Luau.Compiler PRIVATE
     Compiler/src/ValueTracking.h
 )
 
+# Luau.Config Sources
+target_sources(Luau.Config PRIVATE
+    Config/include/Luau/Config.h
+    Config/include/Luau/LinterConfig.h
+
+    Config/src/Config.cpp
+    Config/src/LinterConfig.cpp
+)
+
 # Luau.CodeGen Sources
 target_sources(Luau.CodeGen PRIVATE
     CodeGen/include/Luau/AddressA64.h
@@ -88,6 +98,7 @@ target_sources(Luau.CodeGen PRIVATE
     CodeGen/src/CodeAllocator.cpp
     CodeGen/src/CodeBlockUnwind.cpp
     CodeGen/src/CodeGen.cpp
+    CodeGen/src/CodeGenAssembly.cpp
     CodeGen/src/CodeGenUtils.cpp
     CodeGen/src/CodeGenA64.cpp
     CodeGen/src/CodeGenX64.cpp
@@ -115,6 +126,7 @@ target_sources(Luau.CodeGen PRIVATE
 
     CodeGen/src/BitUtils.h
     CodeGen/src/ByteUtils.h
+    CodeGen/src/CodeGenLower.h
     CodeGen/src/CodeGenUtils.h
     CodeGen/src/CodeGenA64.h
     CodeGen/src/CodeGenX64.h
@@ -141,8 +153,8 @@ target_sources(Luau.Analysis PRIVATE
     Analysis/include/Luau/Autocomplete.h
     Analysis/include/Luau/Breadcrumb.h
     Analysis/include/Luau/BuiltinDefinitions.h
+    Analysis/include/Luau/Cancellation.h
     Analysis/include/Luau/Clone.h
-    Analysis/include/Luau/Config.h
     Analysis/include/Luau/Constraint.h
     Analysis/include/Luau/ConstraintGraphBuilder.h
     Analysis/include/Luau/ConstraintSolver.h
@@ -150,6 +162,7 @@ target_sources(Luau.Analysis PRIVATE
     Analysis/include/Luau/DataFlowGraph.h
     Analysis/include/Luau/DcrLogger.h
     Analysis/include/Luau/Def.h
+    Analysis/include/Luau/Differ.h
     Analysis/include/Luau/Documentation.h
     Analysis/include/Luau/Error.h
     Analysis/include/Luau/FileResolver.h
@@ -172,6 +185,7 @@ target_sources(Luau.Analysis PRIVATE
     Analysis/include/Luau/Scope.h
     Analysis/include/Luau/Simplify.h
     Analysis/include/Luau/Substitution.h
+    Analysis/include/Luau/Subtyping.h
     Analysis/include/Luau/Symbol.h
     Analysis/include/Luau/ToDot.h
     Analysis/include/Luau/TopoSortStatements.h
@@ -182,6 +196,7 @@ target_sources(Luau.Analysis PRIVATE
     Analysis/include/Luau/TypeArena.h
     Analysis/include/Luau/TypeAttach.h
     Analysis/include/Luau/TypeChecker2.h
+    Analysis/include/Luau/TypeCheckLimits.h
     Analysis/include/Luau/TypedAllocator.h
     Analysis/include/Luau/TypeFamily.h
     Analysis/include/Luau/TypeInfer.h
@@ -189,6 +204,7 @@ target_sources(Luau.Analysis PRIVATE
     Analysis/include/Luau/TypeUtils.h
     Analysis/include/Luau/Unifiable.h
     Analysis/include/Luau/Unifier.h
+    Analysis/include/Luau/Unifier2.h
     Analysis/include/Luau/UnifierSharedState.h
     Analysis/include/Luau/Variant.h
     Analysis/include/Luau/VisitType.h
@@ -200,13 +216,13 @@ target_sources(Luau.Analysis PRIVATE
     Analysis/src/Autocomplete.cpp
     Analysis/src/BuiltinDefinitions.cpp
     Analysis/src/Clone.cpp
-    Analysis/src/Config.cpp
     Analysis/src/Constraint.cpp
     Analysis/src/ConstraintGraphBuilder.cpp
     Analysis/src/ConstraintSolver.cpp
     Analysis/src/DataFlowGraph.cpp
     Analysis/src/DcrLogger.cpp
     Analysis/src/Def.cpp
+    Analysis/src/Differ.cpp
     Analysis/src/EmbeddedBuiltinDefinitions.cpp
     Analysis/src/Error.cpp
     Analysis/src/Frontend.cpp
@@ -223,6 +239,7 @@ target_sources(Luau.Analysis PRIVATE
     Analysis/src/Scope.cpp
     Analysis/src/Simplify.cpp
     Analysis/src/Substitution.cpp
+    Analysis/src/Subtyping.cpp
     Analysis/src/Symbol.cpp
     Analysis/src/ToDot.cpp
     Analysis/src/TopoSortStatements.cpp
@@ -240,6 +257,7 @@ target_sources(Luau.Analysis PRIVATE
     Analysis/src/TypeUtils.cpp
     Analysis/src/Unifiable.cpp
     Analysis/src/Unifier.cpp
+    Analysis/src/Unifier2.cpp
 )
 
 # Luau.VM Sources
@@ -340,32 +358,32 @@ endif()
 if(TARGET Luau.UnitTest)
     # Luau.UnitTest Sources
     target_sources(Luau.UnitTest PRIVATE
-        tests/AstQueryDsl.cpp
-        tests/AstQueryDsl.h
-        tests/ClassFixture.cpp
-        tests/ClassFixture.h
-        tests/ConstraintGraphBuilderFixture.cpp
-        tests/ConstraintGraphBuilderFixture.h
-        tests/Fixture.cpp
-        tests/Fixture.h
-        tests/IostreamOptional.h
-        tests/ScopedFlags.h
         tests/AssemblyBuilderA64.test.cpp
         tests/AssemblyBuilderX64.test.cpp
         tests/AstJsonEncoder.test.cpp
         tests/AstQuery.test.cpp
+        tests/AstQueryDsl.cpp
+        tests/AstQueryDsl.h
         tests/AstVisitor.test.cpp
         tests/Autocomplete.test.cpp
         tests/BuiltinDefinitions.test.cpp
+        tests/ClassFixture.cpp
+        tests/ClassFixture.h
         tests/CodeAllocator.test.cpp
         tests/Compiler.test.cpp
         tests/Config.test.cpp
+        tests/ConstraintGraphBuilderFixture.cpp
+        tests/ConstraintGraphBuilderFixture.h
         tests/ConstraintSolver.test.cpp
         tests/CostModel.test.cpp
         tests/DataFlowGraph.test.cpp
         tests/DenseHash.test.cpp
+        tests/Differ.test.cpp
         tests/Error.test.cpp
+        tests/Fixture.cpp
+        tests/Fixture.h
         tests/Frontend.test.cpp
+        tests/IostreamOptional.h
         tests/IrBuilder.test.cpp
         tests/IrCallWrapperX64.test.cpp
         tests/IrRegAllocX64.test.cpp
@@ -380,8 +398,10 @@ if(TARGET Luau.UnitTest)
         tests/Parser.test.cpp
         tests/RequireTracer.test.cpp
         tests/RuntimeLimits.test.cpp
+        tests/ScopedFlags.h
         tests/Simplify.test.cpp
         tests/StringUtils.test.cpp
+        tests/Subtyping.test.cpp
         tests/Symbol.test.cpp
         tests/ToDot.test.cpp
         tests/TopoSort.test.cpp
@@ -417,6 +437,7 @@ if(TARGET Luau.UnitTest)
         tests/TypeInfer.unknownnever.test.cpp
         tests/TypePack.test.cpp
         tests/TypeVar.test.cpp
+        tests/Unifier2.test.cpp
         tests/Variant.test.cpp
         tests/VisitType.test.cpp
         tests/InsertionOrderedMap.test.cpp

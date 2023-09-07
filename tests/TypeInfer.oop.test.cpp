@@ -9,6 +9,7 @@
 
 #include "Fixture.h"
 
+#include "ScopedFlags.h"
 #include "doctest.h"
 
 using namespace Luau;
@@ -26,17 +27,8 @@ TEST_CASE_FIXTURE(Fixture, "dont_suggest_using_colon_rather_than_dot_if_not_defi
         someTable.Function1() -- Argument count mismatch
     )");
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
-    {
-        LUAU_REQUIRE_ERROR_COUNT(2, result);
-        CHECK(toString(result.errors[0]) == "No overload for function accepts 0 arguments.");
-        CHECK(toString(result.errors[1]) == "Available overloads: <a>(a) -> ()");
-    }
-    else
-    {
-        LUAU_REQUIRE_ERROR_COUNT(1, result);
-        REQUIRE(get<CountMismatch>(result.errors[0]));
-    }
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    REQUIRE(get<CountMismatch>(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "dont_suggest_using_colon_rather_than_dot_if_it_wont_help_2")
@@ -50,17 +42,8 @@ TEST_CASE_FIXTURE(Fixture, "dont_suggest_using_colon_rather_than_dot_if_it_wont_
         someTable.Function2() -- Argument count mismatch
     )");
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
-    {
-        LUAU_REQUIRE_ERROR_COUNT(2, result);
-        CHECK(toString(result.errors[0]) == "No overload for function accepts 0 arguments.");
-        CHECK(toString(result.errors[1]) == "Available overloads: <a, b>(a, b) -> ()");
-    }
-    else
-    {
-        LUAU_REQUIRE_ERROR_COUNT(1, result);
-        REQUIRE(get<CountMismatch>(result.errors[0]));
-    }
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    REQUIRE(get<CountMismatch>(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "dont_suggest_using_colon_rather_than_dot_if_another_overload_works")
@@ -420,6 +403,94 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "cycle_between_object_constructor_and_alias")
 
     TypeId aliasType = module->exportedTypeBindings["T"].type;
     CHECK_MESSAGE(get<MetatableType>(follow(aliasType)), "Expected metatable type but got: " << toString(aliasType));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "promise_type_error_too_complex")
+{
+    ScopedFastFlag sff{"LuauStacklessTypeClone2", true};
+
+    frontend.options.retainFullTypeGraphs = false;
+
+    // Used `luau-reduce` tool to extract a minimal reproduction.
+    // Credit: https://github.com/evaera/roblox-lua-promise/blob/v4.0.0/lib/init.lua
+    CheckResult result = check(R"(
+        --!strict
+
+        local Promise = {}
+        Promise.prototype = {}
+        Promise.__index = Promise.prototype
+
+        function Promise._new(traceback, callback, parent)
+            if parent ~= nil and not Promise.is(parent)then
+            end
+
+            local self = {
+                _parent = parent,
+            }
+
+            parent._consumers[self] = true
+            setmetatable(self, Promise)
+            self:_reject()
+
+            return self
+        end
+
+        function Promise.resolve(...)
+            return Promise._new(debug.traceback(nil, 2), function(resolve)
+            end)
+        end
+
+        function Promise.reject(...)
+            return Promise._new(debug.traceback(nil, 2), function(_, reject)
+            end)
+        end
+
+        function Promise._try(traceback, callback, ...)
+            return Promise._new(traceback, function(resolve)
+            end)
+        end
+
+        function Promise.try(callback, ...)
+            return Promise._try(debug.traceback(nil, 2), callback, ...)
+        end
+
+        function Promise._all(traceback, promises, amount)
+            if #promises == 0 or amount == 0 then
+                return Promise.resolve({})
+            end
+            return Promise._new(traceback, function(resolve, reject, onCancel)
+            end)
+        end
+
+        function Promise.all(promises)
+            return Promise._all(debug.traceback(nil, 2), promises)
+        end
+
+        function Promise.allSettled(promises)
+            return Promise.resolve({})
+        end
+
+        function Promise.race(promises)
+            return Promise._new(debug.traceback(nil, 2), function(resolve, reject, onCancel)
+            end)
+        end
+
+        function Promise.each(list, predicate)
+            return Promise._new(debug.traceback(nil, 2), function(resolve, reject, onCancel)
+                local predicatePromise = Promise.resolve(predicate(value, index))
+                local success, result = predicatePromise:await()
+            end)
+        end
+
+        function Promise.is(object)
+        end
+
+        function Promise.prototype:_reject(...)
+            self:_finalize()
+        end
+    )");
+
+    LUAU_REQUIRE_ERRORS(result);
 }
 
 TEST_SUITE_END();

@@ -33,7 +33,7 @@ public:
     class const_iterator;
     class iterator;
 
-    DenseHashTable(const Key& empty_key, size_t buckets = 0)
+    explicit DenseHashTable(const Key& empty_key, size_t buckets = 0)
         : data(nullptr)
         , capacity(0)
         , count(0)
@@ -282,6 +282,13 @@ public:
     class const_iterator
     {
     public:
+        using value_type = Item;
+        using reference = Item&;
+        using pointer = Item*;
+        using iterator = pointer;
+        using difference_type = size_t;
+        using iterator_category = std::input_iterator_tag;
+
         const_iterator()
             : set(0)
             , index(0)
@@ -477,7 +484,7 @@ public:
     typedef typename Impl::const_iterator const_iterator;
     typedef typename Impl::iterator iterator;
 
-    DenseHashSet(const Key& empty_key, size_t buckets = 0)
+    explicit DenseHashSet(const Key& empty_key, size_t buckets = 0)
         : impl(empty_key, buckets)
     {
     }
@@ -546,7 +553,7 @@ public:
     typedef typename Impl::const_iterator const_iterator;
     typedef typename Impl::iterator iterator;
 
-    DenseHashMap(const Key& empty_key, size_t buckets = 0)
+    explicit DenseHashMap(const Key& empty_key, size_t buckets = 0)
         : impl(empty_key, buckets)
     {
     }
@@ -582,6 +589,22 @@ public:
     bool contains(const Key& key) const
     {
         return impl.find(key) != 0;
+    }
+
+    std::pair<Value&, bool> try_insert(const Key& key, const Value& value)
+    {
+        impl.rehash_if_full(key);
+
+        size_t before = impl.size();
+        std::pair<Key, Value>* slot = impl.insert_unsafe(key);
+
+        // Value is fresh if container count has increased
+        bool fresh = impl.size() > before;
+
+        if (fresh)
+            slot->second = value;
+
+        return std::make_pair(std::ref(slot->second), fresh);
     }
 
     size_t size() const

@@ -8,6 +8,7 @@
 #include "Luau/Normalize.h"
 #include "Luau/ToString.h"
 #include "Luau/Type.h"
+#include "Luau/TypeCheckLimits.h"
 #include "Luau/Variant.h"
 
 #include <vector>
@@ -81,9 +82,11 @@ struct ConstraintSolver
     std::vector<RequireCycle> requireCycles;
 
     DcrLogger* logger;
+    TypeCheckLimits limits;
 
     explicit ConstraintSolver(NotNull<Normalizer> normalizer, NotNull<Scope> rootScope, std::vector<NotNull<Constraint>> constraints,
-        ModuleName moduleName, NotNull<ModuleResolver> moduleResolver, std::vector<RequireCycle> requireCycles, DcrLogger* logger);
+        ModuleName moduleName, NotNull<ModuleResolver> moduleResolver, std::vector<RequireCycle> requireCycles, DcrLogger* logger,
+        TypeCheckLimits limits);
 
     // Randomize the order in which to dispatch constraints
     void randomize(unsigned seed);
@@ -201,7 +204,7 @@ struct ConstraintSolver
      * @param subType the sub-type to unify.
      * @param superType the super-type to unify.
      */
-    ErrorVec unify(TypeId subType, TypeId superType, NotNull<Scope> scope);
+    ErrorVec unify(NotNull<Scope> scope, Location location, TypeId subType, TypeId superType);
 
     /**
      * Creates a new Unifier and performs a single unification operation. Commits
@@ -209,7 +212,7 @@ struct ConstraintSolver
      * @param subPack the sub-type pack to unify.
      * @param superPack the super-type pack to unify.
      */
-    ErrorVec unify(TypePackId subPack, TypePackId superPack, NotNull<Scope> scope);
+    ErrorVec unify(NotNull<Scope> scope, Location location, TypePackId subPack, TypePackId superPack);
 
     /** Pushes a new solver constraint to the solver.
      * @param cv the body of the constraint.
@@ -246,6 +249,17 @@ private:
     bool tryUnify(NotNull<const Constraint> constraint, TID subTy, TID superTy);
 
     /**
+     * Bind a BlockedType to another type while taking care not to bind it to
+     * itself in the case that resultTy == blockedTy.  This can happen if we
+     * have a tautological constraint.  When it does, we must instead bind
+     * blockedTy to a fresh type belonging to an appropriate scope.
+     *
+     * To determine which scope is appropriate, we also accept rootTy, which is
+     * to be the type that contains blockedTy.
+     */
+    void bindBlockedType(TypeId blockedTy, TypeId resultTy, TypeId rootTy, Location location);
+
+    /**
      * Marks a constraint as being blocked on a type or type pack. The constraint
      * solver will not attempt to dispatch blocked constraints until their
      * dependencies have made progress.
@@ -265,9 +279,10 @@ private:
     TypeId errorRecoveryType() const;
     TypePackId errorRecoveryTypePack() const;
 
-    TypeId unionOfTypes(TypeId a, TypeId b, NotNull<Scope> scope, bool unifyFreeTypes);
-
     TypePackId anyifyModuleReturnTypePackGenerics(TypePackId tp);
+
+    void throwTimeLimitError();
+    void throwUserCancelError();
 
     ToStringOptions opts;
 };

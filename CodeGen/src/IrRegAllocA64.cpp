@@ -18,6 +18,8 @@ namespace CodeGen
 namespace A64
 {
 
+static const int8_t kInvalidSpill = 64;
+
 static int allocSpill(uint32_t& free, KindA64 kind)
 {
     LUAU_ASSERT(kStackSize <= 256); // to support larger stack frames, we need to ensure qN is allocated at 16b boundary to fit in ldr/str encoding
@@ -68,9 +70,9 @@ static int getReloadOffset(IrCmd cmd)
     LUAU_UNREACHABLE();
 }
 
-static AddressA64 getReloadAddress(const IrFunction& function, const IrInst& inst)
+static AddressA64 getReloadAddress(const IrFunction& function, const IrInst& inst, bool limitToCurrentBlock)
 {
-    IrOp location = function.findRestoreOp(inst);
+    IrOp location = function.findRestoreOp(inst, limitToCurrentBlock);
 
     if (location.kind == IrOpKind::VmReg)
         return mem(rBase, vmRegOp(location) * sizeof(TValue) + getReloadOffset(inst.cmd));
@@ -91,12 +93,13 @@ static void restoreInst(AssemblyBuilderA64& build, uint32_t& freeSpillSlots, IrF
     {
         build.ldr(reg, mem(sp, sSpillArea.data + s.slot * 8));
 
-        freeSpill(freeSpillSlots, reg.kind, s.slot);
+        if (s.slot != kInvalidSpill)
+            freeSpill(freeSpillSlots, reg.kind, s.slot);
     }
     else
     {
         LUAU_ASSERT(!inst.spilled && inst.needsReload);
-        AddressA64 addr = getReloadAddress(function, function.instructions[s.inst]);
+        AddressA64 addr = getReloadAddress(function, function.instructions[s.inst], /*limitToCurrentBlock*/ false);
         LUAU_ASSERT(addr.base != xzr);
         build.ldr(reg, addr);
     }
@@ -135,9 +138,8 @@ RegisterA64 IrRegAllocA64::allocReg(KindA64 kind, uint32_t index)
 
     if (set.free == 0)
     {
-        // TODO: remember the error and fail lowering
-        LUAU_ASSERT(!"Out of registers to allocate");
-        return noreg;
+        error = true;
+        return RegisterA64{kind, 0};
     }
 
     int reg = 31 - countlz(set.free);
@@ -157,9 +159,8 @@ RegisterA64 IrRegAllocA64::allocTemp(KindA64 kind)
 
     if (set.free == 0)
     {
-        // TODO: remember the error and fail lowering
-        LUAU_ASSERT(!"Out of registers to allocate");
-        return noreg;
+        error = true;
+        return RegisterA64{kind, 0};
     }
 
     int reg = 31 - countlz(set.free);
@@ -320,7 +321,7 @@ size_t IrRegAllocA64::spill(AssemblyBuilderA64& build, uint32_t index, std::init
             {
                 // instead of spilling the register to never reload it, we assume the register is not needed anymore
             }
-            else if (getReloadAddress(function, def).base != xzr)
+            else if (getReloadAddress(function, def, /*limitToCurrentBlock*/ true).base != xzr)
             {
                 // instead of spilling the register to stack, we can reload it from VM stack/constants
                 // we still need to record the spill for restore(start) to work
@@ -332,7 +333,11 @@ size_t IrRegAllocA64::spill(AssemblyBuilderA64& build, uint32_t index, std::init
             else
             {
                 int slot = allocSpill(freeSpillSlots, def.regA64.kind);
-                LUAU_ASSERT(slot >= 0); // TODO: remember the error and fail lowering
+                if (slot < 0)
+                {
+                    slot = kInvalidSpill;
+                    error = true;
+                }
 
                 build.str(def.regA64, mem(sp, sSpillArea.data + slot * 8));
 
@@ -404,11 +409,6 @@ void IrRegAllocA64::restoreReg(AssemblyBuilderA64& build, IrInst& inst)
     }
 
     LUAU_ASSERT(!"Expected to find a spill record");
-}
-
-void IrRegAllocA64::assertNoSpills() const
-{
-    LUAU_ASSERT(spills.empty());
 }
 
 IrRegAllocA64::Set& IrRegAllocA64::getSet(KindA64 kind)

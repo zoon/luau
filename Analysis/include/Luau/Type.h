@@ -23,7 +23,6 @@
 
 LUAU_FASTINT(LuauTableTypeMaximumStringifierLength)
 LUAU_FASTINT(LuauTypeMaximumStringifierLength)
-LUAU_FASTFLAG(LuauTypecheckClassTypeIndexers)
 
 namespace Luau
 {
@@ -78,12 +77,14 @@ using TypeId = const Type*;
 
 using Name = std::string;
 
-// A free type var is one whose exact shape has yet to be fully determined.
+// A free type is one whose exact shape has yet to be fully determined.
 struct FreeType
 {
     explicit FreeType(TypeLevel level);
     explicit FreeType(Scope* scope);
     FreeType(Scope* scope, TypeLevel level);
+
+    FreeType(Scope* scope, TypeId lowerBound, TypeId upperBound);
 
     int index;
     TypeLevel level;
@@ -93,6 +94,10 @@ struct FreeType
     // recursive type alias whose definitions haven't been
     // resolved yet.
     bool forwardedTypeAlias = false;
+
+    // Only used under local type inference
+    TypeId lowerBound = nullptr;
+    TypeId upperBound = nullptr;
 };
 
 struct GenericType
@@ -527,7 +532,6 @@ struct ClassType
         , definitionModuleName(definitionModuleName)
         , indexer(indexer)
     {
-        LUAU_ASSERT(FFlag::LuauTypecheckClassTypeIndexers);
     }
 };
 
@@ -729,9 +733,17 @@ struct Type final
 using SeenSet = std::set<std::pair<const void*, const void*>>;
 bool areEqual(SeenSet& seen, const Type& lhs, const Type& rhs);
 
+enum class FollowOption
+{
+    Normal,
+    DisableLazyTypeThunks,
+};
+
 // Follow BoundTypes until we get to something real
 TypeId follow(TypeId t);
+TypeId follow(TypeId t, FollowOption followOption);
 TypeId follow(TypeId t, const void* context, TypeId (*mapper)(const void*, TypeId));
+TypeId follow(TypeId t, FollowOption followOption, const void* context, TypeId (*mapper)(const void*, TypeId));
 
 std::vector<TypeId> flattenIntersection(TypeId ty);
 
@@ -814,6 +826,7 @@ public:
     const TypeId optionalNumberType;
     const TypeId optionalStringType;
 
+    const TypePackId emptyTypePack;
     const TypePackId anyTypePack;
     const TypePackId neverTypePack;
     const TypePackId uninhabitableTypePack;
@@ -995,6 +1008,8 @@ private:
         }
     }
 };
+
+TypeId freshType(NotNull<TypeArena> arena, NotNull<BuiltinTypes> builtinTypes, Scope* scope);
 
 using TypeIdPredicate = std::function<std::optional<TypeId>(TypeId)>;
 std::vector<TypeId> filterMap(TypeId type, TypeIdPredicate predicate);

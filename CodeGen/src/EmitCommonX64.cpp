@@ -5,6 +5,7 @@
 #include "Luau/IrCallWrapperX64.h"
 #include "Luau/IrData.h"
 #include "Luau/IrRegAllocX64.h"
+#include "Luau/IrUtils.h"
 
 #include "NativeState.h"
 
@@ -65,29 +66,6 @@ void jumpOnNumberCmp(AssemblyBuilderX64& build, RegisterX64 tmp, OperandX64 lhs,
     }
 }
 
-void jumpOnAnyCmpFallback(IrRegAllocX64& regs, AssemblyBuilderX64& build, int ra, int rb, IrCondition cond, Label& label)
-{
-    IrCallWrapperX64 callWrap(regs, build);
-    callWrap.addArgument(SizeX64::qword, rState);
-    callWrap.addArgument(SizeX64::qword, luauRegAddress(ra));
-    callWrap.addArgument(SizeX64::qword, luauRegAddress(rb));
-
-    if (cond == IrCondition::NotLessEqual || cond == IrCondition::LessEqual)
-        callWrap.call(qword[rNativeContext + offsetof(NativeContext, luaV_lessequal)]);
-    else if (cond == IrCondition::NotLess || cond == IrCondition::Less)
-        callWrap.call(qword[rNativeContext + offsetof(NativeContext, luaV_lessthan)]);
-    else if (cond == IrCondition::NotEqual || cond == IrCondition::Equal)
-        callWrap.call(qword[rNativeContext + offsetof(NativeContext, luaV_equalval)]);
-    else
-        LUAU_ASSERT(!"Unsupported condition");
-
-    emitUpdateBase(build);
-    build.test(eax, eax);
-    build.jcc(cond == IrCondition::NotLessEqual || cond == IrCondition::NotLess || cond == IrCondition::NotEqual ? ConditionX64::Zero
-                                                                                                                 : ConditionX64::NotZero,
-        label);
-}
-
 void getTableNodeAtCachedSlot(AssemblyBuilderX64& build, RegisterX64 tmp, RegisterX64 node, RegisterX64 table, int pcpos)
 {
     LUAU_ASSERT(tmp != node);
@@ -145,16 +123,6 @@ void callLengthHelper(IrRegAllocX64& regs, AssemblyBuilderX64& build, int ra, in
     emitUpdateBase(build);
 }
 
-void callPrepareForN(IrRegAllocX64& regs, AssemblyBuilderX64& build, int limit, int step, int init)
-{
-    IrCallWrapperX64 callWrap(regs, build);
-    callWrap.addArgument(SizeX64::qword, rState);
-    callWrap.addArgument(SizeX64::qword, luauRegAddress(limit));
-    callWrap.addArgument(SizeX64::qword, luauRegAddress(step));
-    callWrap.addArgument(SizeX64::qword, luauRegAddress(init));
-    callWrap.call(qword[rNativeContext + offsetof(NativeContext, luaV_prepareFORN)]);
-}
-
 void callGetTable(IrRegAllocX64& regs, AssemblyBuilderX64& build, int rb, OperandX64 c, int ra)
 {
     IrCallWrapperX64 callWrap(regs, build);
@@ -179,28 +147,35 @@ void callSetTable(IrRegAllocX64& regs, AssemblyBuilderX64& build, int rb, Operan
     emitUpdateBase(build);
 }
 
-void checkObjectBarrierConditions(AssemblyBuilderX64& build, RegisterX64 tmp, RegisterX64 object, int ra, Label& skip)
+void checkObjectBarrierConditions(AssemblyBuilderX64& build, RegisterX64 tmp, RegisterX64 object, IrOp ra, int ratag, Label& skip)
 {
-    // iscollectable(ra)
-    build.cmp(luauRegTag(ra), LUA_TSTRING);
-    build.jcc(ConditionX64::Less, skip);
+    // Barrier should've been optimized away if we know that it's not collectable, checking for correctness
+    if (ratag == -1 || !isGCO(ratag))
+    {
+        // iscollectable(ra)
+        OperandX64 tag = (ra.kind == IrOpKind::VmReg) ? luauRegTag(vmRegOp(ra)) : luauConstantTag(vmConstOp(ra));
+        build.cmp(tag, LUA_TSTRING);
+        build.jcc(ConditionX64::Less, skip);
+    }
 
     // isblack(obj2gco(o))
     build.test(byte[object + offsetof(GCheader, marked)], bitmask(BLACKBIT));
     build.jcc(ConditionX64::Zero, skip);
 
     // iswhite(gcvalue(ra))
-    build.mov(tmp, luauRegValue(ra));
+    OperandX64 value = (ra.kind == IrOpKind::VmReg) ? luauRegValue(vmRegOp(ra)) : luauConstantValue(vmConstOp(ra));
+    build.mov(tmp, value);
     build.test(byte[tmp + offsetof(GCheader, marked)], bit2mask(WHITE0BIT, WHITE1BIT));
     build.jcc(ConditionX64::Zero, skip);
 }
 
-void callBarrierObject(IrRegAllocX64& regs, AssemblyBuilderX64& build, RegisterX64 object, IrOp objectOp, int ra)
+
+void callBarrierObject(IrRegAllocX64& regs, AssemblyBuilderX64& build, RegisterX64 object, IrOp objectOp, IrOp ra, int ratag)
 {
     Label skip;
 
     ScopedRegX64 tmp{regs, SizeX64::qword};
-    checkObjectBarrierConditions(build, tmp.reg, object, ra, skip);
+    checkObjectBarrierConditions(build, tmp.reg, object, ra, ratag, skip);
 
     {
         ScopedSpills spillGuard(regs);
@@ -261,6 +236,12 @@ void callStepGc(IrRegAllocX64& regs, AssemblyBuilderX64& build)
     }
 
     build.setLabel(skip);
+}
+
+void emitClearNativeFlag(AssemblyBuilderX64& build)
+{
+    build.mov(rax, qword[rState + offsetof(lua_State, ci)]);
+    build.and_(dword[rax + offsetof(CallInfo, flags)], ~LUA_CALLINFO_NATIVE);
 }
 
 void emitExit(AssemblyBuilderX64& build, bool continueInVm)
@@ -338,6 +319,14 @@ void emitFallback(IrRegAllocX64& regs, AssemblyBuilderX64& build, int offset, in
     callWrap.call(qword[rNativeContext + offset]);
 
     emitUpdateBase(build);
+}
+
+void emitUpdatePcForExit(AssemblyBuilderX64& build)
+{
+    // edx = pcpos * sizeof(Instruction)
+    build.add(rdx, sCode);
+    build.mov(rax, qword[rState + offsetof(lua_State, ci)]);
+    build.mov(qword[rax + offsetof(CallInfo, savedpc)], rdx);
 }
 
 void emitContinueCallInVm(AssemblyBuilderX64& build)
