@@ -234,6 +234,18 @@ static int lua_vector_dot(lua_State* L)
     return 1;
 }
 
+static int lua_vector_cross(lua_State* L)
+{
+    const float* a = luaL_checkvector(L, 1);
+    const float* b = luaL_checkvector(L, 2);
+    lua_pushvector(L,
+        a[1]*b[2] - a[2]*b[1],
+        a[2]*b[0] - a[0]*b[2],
+        a[0]*b[1] - a[1]*b[0]);
+    return 1;
+}
+
+
 static int lua_vector_index(lua_State* L)
 {
     const float* v = luaL_checkvector(L, 1);
@@ -251,6 +263,27 @@ static int lua_vector_index(lua_State* L)
         return 1;
     }
 
+    if (strcmp(name, "Cross") == 0)
+    {
+        lua_pushcfunction(L, lua_vector_cross, "Cross");
+        return 1;
+    }
+
+    if (strcmp(name, "Unit") == 0)
+    {
+        const float* v = luaL_checkvector(L, 1);
+        const float mag_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+
+        if (mag_sq < 1e-8)
+        {
+            lua_pushvector(L, NAN, NAN, NAN);
+            return 1;
+        }
+        const float scale = 1.0f / sqrtf(mag_sq);
+        lua_pushvector(L, scale*v[0], scale*v[1], scale*v[2]);
+        return 1;
+    }
+
     luaL_error(L, "%s is not a valid member of vector", name);
 }
 
@@ -260,6 +293,9 @@ static int lua_vector_namecall(lua_State* L)
     {
         if (strcmp(str, "Dot") == 0)
             return lua_vector_dot(L);
+
+        if (strcmp(str, "Cross") == 0)
+            return lua_vector_cross(L);
     }
 
     luaL_error(L, "%s is not a valid method of vector", luaL_checkstring(L, 1));
