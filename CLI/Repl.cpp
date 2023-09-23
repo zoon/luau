@@ -225,12 +225,37 @@ static int lua_collectgarbage(lua_State* L)
     luaL_error(L, "collectgarbage must be called with 'stop', 'restart', 'collect' or 'count[b]'");
 }
 
+inline float lerp(float t, float a, float b)
+{
+    return a + t * (b - a);
+}
+
+inline float mag_sq(const float* v)
+{
+    return v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+}
+
+inline float dot(const float* a, const float*b)
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+inline float clamp(float v, float min, float max)
+{
+    float r = v < min ? min : v;
+    return r > max ? max : r;
+}
+
+inline float signf(float v)
+{
+    return v > 0.0f ? 1.0f : (v < 0.0f ? -1.0f : 0.0f);
+}
+
 static int lua_vector_dot(lua_State* L)
 {
     const float* a = luaL_checkvector(L, 1);
     const float* b = luaL_checkvector(L, 2);
-
-    lua_pushnumber(L, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]);
+    lua_pushnumber(L, dot(a, b));
     return 1;
 }
 
@@ -245,18 +270,68 @@ static int lua_vector_cross(lua_State* L)
     return 1;
 }
 
+static int lua_vector_lerp(lua_State* L)
+{
+    const float* a = luaL_checkvector(L, 1);
+    const float* b = luaL_checkvector(L, 2);
+    const float t  = (float)luaL_checknumber(L, 3);
+    lua_pushvector(L,
+        lerp(t, a[0], b[0]),
+        lerp(t, a[1], b[1]),
+        lerp(t, a[2], b[2])
+    );
+    return 1;
+}
+
+static int lua_vector_angle(lua_State *L) {
+    const float* a = luaL_checkvector(L, 1);
+    const float* b = luaL_checkvector(L, 2);
+    const float* axis = lua_tovector(L, 3);
+    const float denom = sqrtf(mag_sq(a) * mag_sq(b));
+    if (denom < 1e-15) {
+        lua_pushnumber(L, 0.0f);
+        return 1;
+    }
+    float angle = acosf(clamp(dot(a, b) / denom, -1.0f, 1.0f));
+    float sign = 1.0f;
+    if (!!axis)
+    {
+        float cx = a[1]*b[2] - a[2]*b[1];
+        float cy = a[2]*b[0] - a[0]*b[2];
+        float cz = a[0]*b[1] - a[1]*b[0];
+        sign = signf(axis[0] * cx + axis[1] * cy + axis[2] * cz);
+    }
+    lua_pushnumber(L, sign * angle);
+    return 1;
+}
 
 static int lua_vector_index(lua_State* L)
 {
     const float* v = luaL_checkvector(L, 1);
     const char* name = luaL_checkstring(L, 2);
-
+    // properties:
     if (strcmp(name, "Magnitude") == 0)
     {
-        lua_pushnumber(L, sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]));
+        lua_pushnumber(L, sqrtf(mag_sq(v)));
         return 1;
     }
 
+    if (strcmp(name, "Unit") == 0)
+    {
+        const float* v = luaL_checkvector(L, 1);
+        const float msq = mag_sq(v);
+
+        if (msq < 1e-8)
+        {
+            lua_pushvector(L, NAN, NAN, NAN);
+            return 1;
+        }
+        const float scale = 1.0f / sqrtf(msq);
+        lua_pushvector(L, scale*v[0], scale*v[1], scale*v[2]);
+        return 1;
+    }
+
+    // methods:
     if (strcmp(name, "Dot") == 0)
     {
         lua_pushcfunction(L, lua_vector_dot, "Dot");
@@ -269,18 +344,15 @@ static int lua_vector_index(lua_State* L)
         return 1;
     }
 
-    if (strcmp(name, "Unit") == 0)
+    if (strcmp(name, "Lerp") == 0)
     {
-        const float* v = luaL_checkvector(L, 1);
-        const float mag_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+        lua_pushcfunction(L, lua_vector_lerp, "Lerp");
+        return 1;
+    }
 
-        if (mag_sq < 1e-8)
-        {
-            lua_pushvector(L, NAN, NAN, NAN);
-            return 1;
-        }
-        const float scale = 1.0f / sqrtf(mag_sq);
-        lua_pushvector(L, scale*v[0], scale*v[1], scale*v[2]);
+    if (strcmp(name, "Angle") == 0)
+    {
+        lua_pushcfunction(L, lua_vector_angle, "Angle");
         return 1;
     }
 
@@ -296,7 +368,18 @@ static int lua_vector_namecall(lua_State* L)
 
         if (strcmp(str, "Cross") == 0)
             return lua_vector_cross(L);
+
+        if (strcmp(str, "Lerp") == 0)
+            return lua_vector_lerp(L);
+
+        if (strcmp(str, "Angle") == 0)
+            return lua_vector_angle(L);
     }
+
+    // TODO:
+    // -- FuzzyEq(other, epsilon?)-> bool
+    // -- Max(other) -> Vector3
+    // -- MIn(other) -> Vector3
 
     luaL_error(L, "%s is not a valid method of vector", luaL_checkstring(L, 1));
 }
