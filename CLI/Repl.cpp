@@ -283,7 +283,8 @@ static int lua_vector_lerp(lua_State* L)
     return 1;
 }
 
-static int lua_vector_angle(lua_State *L) {
+static int lua_vector_angle(lua_State *L)
+{
     const float* a = luaL_checkvector(L, 1);
     const float* b = luaL_checkvector(L, 2);
     const float* axis = lua_tovector(L, 3);
@@ -305,10 +306,39 @@ static int lua_vector_angle(lua_State *L) {
     return 1;
 }
 
+static int lua_vector_eq(lua_State* L)
+{
+    const float* a = luaL_checkvector(L, 1);
+    const float* b = luaL_checkvector(L, 2);
+    float eps = (float)luaL_optnumber(L, 3, 1e-5);
+    float dx = a[0] - b[0];
+    float dy = a[1] - b[1];
+    float dz = a[2] - b[2];
+    lua_pushboolean(L, dx*dx + dy*dy + dz*dz < eps*eps);
+    return 1;
+}
+
+static int lua_vector_min(lua_State* L)
+{
+    const float* a = luaL_checkvector(L, 1);
+    const float* b = luaL_checkvector(L, 2);
+    lua_pushvector(L, std::min<float>(a[0], b[0]), std::min<float>(a[1], b[1]), std::min<float>(a[2], b[2]));
+    return 1;
+}
+
+static int lua_vector_max(lua_State* L)
+{
+    const float* a = luaL_checkvector(L, 1);
+    const float* b = luaL_checkvector(L, 2);
+    lua_pushvector(L, std::max<float>(a[0], b[0]), std::max<float>(a[1], b[1]), std::max<float>(a[2], b[2]));
+    return 1;
+}
+
 static int lua_vector_index(lua_State* L)
 {
     const float* v = luaL_checkvector(L, 1);
     const char* name = luaL_checkstring(L, 2);
+
     // properties:
     if (strcmp(name, "Magnitude") == 0)
     {
@@ -356,6 +386,24 @@ static int lua_vector_index(lua_State* L)
         return 1;
     }
 
+    if (strcmp(name, "FuzzyEq") == 0)
+    {
+        lua_pushcfunction(L, lua_vector_eq, "FuzzyEq");
+        return 1;
+    }
+
+    if (strcmp(name, "Min") == 0)
+    {
+        lua_pushcfunction(L, lua_vector_min, "Min");
+        return 1;
+    }
+
+    if (strcmp(name, "Max") == 0)
+    {
+        lua_pushcfunction(L, lua_vector_max, "Max");
+        return 1;
+    }
+
     luaL_error(L, "%s is not a valid member of vector", name);
 }
 
@@ -374,12 +422,16 @@ static int lua_vector_namecall(lua_State* L)
 
         if (strcmp(str, "Angle") == 0)
             return lua_vector_angle(L);
-    }
 
-    // TODO:
-    // -- FuzzyEq(other, epsilon?)-> bool
-    // -- Max(other) -> Vector3
-    // -- MIn(other) -> Vector3
+        if (strcmp(str, "FuzzyEq") == 0)
+            return lua_vector_eq(L);
+
+        if (strcmp(str, "Min") == 0)
+            return lua_vector_min(L);
+
+        if (strcmp(str, "Max") == 0)
+            return lua_vector_max(L);
+    }
 
     luaL_error(L, "%s is not a valid method of vector", luaL_checkstring(L, 1));
 }
