@@ -42,6 +42,9 @@
 LUAU_FASTFLAGVARIABLE(DebugCodegenNoOpt, false)
 LUAU_FASTFLAGVARIABLE(DebugCodegenOptSize, false)
 LUAU_FASTFLAGVARIABLE(DebugCodegenSkipNumbering, false)
+LUAU_FASTINTVARIABLE(CodegenHeuristicsInstructionLimit, 1'048'576)   // 1 M
+LUAU_FASTINTVARIABLE(CodegenHeuristicsBlockLimit, 65'536)            // 64 K
+LUAU_FASTINTVARIABLE(CodegenHeuristicsBlockInstructionLimit, 65'536) // 64 K
 
 namespace Luau
 {
@@ -106,7 +109,7 @@ static std::optional<NativeProto> createNativeFunction(AssemblyBuilder& build, M
     IrBuilder ir;
     ir.buildFunctionIr(proto);
 
-    if (!lowerFunction(ir, build, helpers, proto, {}))
+    if (!lowerFunction(ir, build, helpers, proto, {}, /* stats */ nullptr))
         return std::nullopt;
 
     return createNativeProto(proto, ir);
@@ -259,7 +262,7 @@ CodeGenCompilationResult compile(lua_State* L, int idx, unsigned int flags, Comp
         return CodeGenCompilationResult::CodeGenNotInitialized;
 
     std::vector<Proto*> protos;
-    gatherFunctions(protos, root);
+    gatherFunctions(protos, root, flags);
 
     // Skip protos that have been compiled during previous invocations of CodeGen::compile
     protos.erase(std::remove_if(protos.begin(), protos.end(),

@@ -45,6 +45,7 @@
 // Version 2: Adds Proto::linedefined. Supported until 0.544.
 // Version 3: Adds FORGPREP/JUMPXEQK* and enhances AUX encoding for FORGLOOP. Removes FORGLOOP_NEXT/INEXT and JUMPIFEQK/JUMPIFNOTEQK. Currently supported.
 // Version 4: Adds Proto::flags, typeinfo, and floor division opcodes IDIV/IDIVK. Currently supported.
+// Version 5: Adds SUBRK/DIVRK and vector constants. Currently supported.
 
 // Bytecode opcode, part of the instruction header
 enum LuauOpcode
@@ -70,7 +71,7 @@ enum LuauOpcode
     // D: value (-32768..32767)
     LOP_LOADN,
 
-    // LOADK: sets register to an entry from the constant table from the proto (number/string)
+    // LOADK: sets register to an entry from the constant table from the proto (number/vector/string)
     // A: target register
     // D: constant table index (0..32767)
     LOP_LOADK,
@@ -218,7 +219,7 @@ enum LuauOpcode
     // ADDK, SUBK, MULK, DIVK, MODK, POWK: compute arithmetic operation between the source register and a constant and put the result into target register
     // A: target register
     // B: source register
-    // C: constant table index (0..255)
+    // C: constant table index (0..255); must refer to a number
     LOP_ADDK,
     LOP_SUBK,
     LOP_MULK,
@@ -347,9 +348,12 @@ enum LuauOpcode
     // B: source register (for VAL/REF) or upvalue index (for UPVAL/UPREF)
     LOP_CAPTURE,
 
-    // removed in v3
-    LOP_DEP_JUMPIFEQK,
-    LOP_DEP_JUMPIFNOTEQK,
+    // SUBRK, DIVRK: compute arithmetic operation between the constant and a source register and put the result into target register
+    // A: target register
+    // B: source register
+    // C: constant table index (0..255); must refer to a number
+    LOP_SUBRK,
+    LOP_DIVRK,
 
     // FASTCALL1: perform a fast call of a built-in function using 1 register argument
     // A: builtin function id (see LuauBuiltinFunction)
@@ -426,8 +430,8 @@ enum LuauBytecodeTag
 {
     // Bytecode version; runtime supports [MIN, MAX], compiler emits TARGET by default but may emit a higher version when flags are enabled
     LBC_VERSION_MIN = 3,
-    LBC_VERSION_MAX = 4,
-    LBC_VERSION_TARGET = 3,
+    LBC_VERSION_MAX = 5,
+    LBC_VERSION_TARGET = 4,
     // Type encoding version
     LBC_TYPE_VERSION = 1,
     // Types of constant table entries
@@ -438,6 +442,7 @@ enum LuauBytecodeTag
     LBC_CONSTANT_IMPORT,
     LBC_CONSTANT_TABLE,
     LBC_CONSTANT_CLOSURE,
+    LBC_CONSTANT_VECTOR,
 };
 
 // Type table tags
@@ -452,6 +457,7 @@ enum LuauBytecodeType
     LBC_TYPE_THREAD,
     LBC_TYPE_USERDATA,
     LBC_TYPE_VECTOR,
+    LBC_TYPE_BUFFER,
 
     LBC_TYPE_ANY = 15,
     LBC_TYPE_OPTIONAL_BIT = 1 << 7,
@@ -560,6 +566,24 @@ enum LuauBuiltinFunction
     // tonumber/tostring
     LBF_TONUMBER,
     LBF_TOSTRING,
+
+    // bit32.byteswap(n)
+    LBF_BIT32_BYTESWAP,
+
+    // buffer.
+    LBF_BUFFER_READI8,
+    LBF_BUFFER_READU8,
+    LBF_BUFFER_WRITEU8,
+    LBF_BUFFER_READI16,
+    LBF_BUFFER_READU16,
+    LBF_BUFFER_WRITEU16,
+    LBF_BUFFER_READI32,
+    LBF_BUFFER_READU32,
+    LBF_BUFFER_WRITEU32,
+    LBF_BUFFER_READF32,
+    LBF_BUFFER_WRITEF32,
+    LBF_BUFFER_READF64,
+    LBF_BUFFER_WRITEF64,
 };
 
 // Capture type, used in LOP_CAPTURE
@@ -575,4 +599,6 @@ enum LuauProtoFlag
 {
     // used to tag main proto for modules with --!native
     LPF_NATIVE_MODULE = 1 << 0,
+    // used to tag individual protos as not profitable to compile natively
+    LPF_NATIVE_COLD = 1 << 1,
 };

@@ -13,12 +13,14 @@
 
 #include "doctest.h"
 
+#include <algorithm>
+
 using namespace Luau;
 
 struct LimitFixture : BuiltinsFixture
 {
 #if defined(_NOOPT) || defined(_DEBUG)
-    ScopedFastInt LuauTypeInferRecursionLimit{"LuauTypeInferRecursionLimit", 100};
+    ScopedFastInt LuauTypeInferRecursionLimit{"LuauTypeInferRecursionLimit", 90};
 #endif
 };
 

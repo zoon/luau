@@ -254,6 +254,14 @@ void AssemblyBuilderA64::rbit(RegisterA64 dst, RegisterA64 src)
     placeR1("rbit", dst, src, 0b10'11010110'00000'0000'00);
 }
 
+void AssemblyBuilderA64::rev(RegisterA64 dst, RegisterA64 src)
+{
+    LUAU_ASSERT(dst.kind == KindA64::w || dst.kind == KindA64::x);
+    LUAU_ASSERT(dst.kind == src.kind);
+
+    placeR1("rev", dst, src, 0b10'11010110'00000'0000'10 | int(dst.kind == KindA64::x));
+}
+
 void AssemblyBuilderA64::lsl(RegisterA64 dst, RegisterA64 src1, uint8_t src2)
 {
     int size = dst.kind == KindA64::x ? 64 : 32;
@@ -1091,7 +1099,7 @@ void AssemblyBuilderA64::placeER(const char* name, RegisterA64 dst, RegisterA64 
     LUAU_ASSERT(shift >= 0 && shift <= 4);
 
     uint32_t sf = (dst.kind == KindA64::x) ? 0x80000000 : 0; // could be useful in the future for byte->word extends
-    int option = 0b010; // UXTW
+    int option = 0b010;                                      // UXTW
 
     place(dst.index | (src1.index << 5) | (shift << 10) | (option << 13) | (src2.index << 16) | (1 << 21) | (op << 24) | sf);
     commit();

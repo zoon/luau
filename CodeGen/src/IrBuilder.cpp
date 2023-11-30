@@ -85,6 +85,9 @@ static void buildArgumentTypeChecks(IrBuilder& build, Proto* proto)
         case LBC_TYPE_VECTOR:
             build.inst(IrCmd::CHECK_TAG, load, build.constTag(LUA_TVECTOR), build.vmExit(kVmExitEntryGuardPc));
             break;
+        case LBC_TYPE_BUFFER:
+            build.inst(IrCmd::CHECK_TAG, load, build.constTag(LUA_TBUFFER), build.vmExit(kVmExitEntryGuardPc));
+            break;
         }
 
         if (optional)
@@ -146,9 +149,20 @@ void IrBuilder::buildFunctionIr(Proto* proto)
         if (instIndexToBlock[i] != kNoAssociatedBlockIndex)
             beginBlock(blockAtInst(i));
 
+        // Numeric for loops require additional processing to maintain loop stack
+        // Notably, this must be performed even when the block is dead so that we maintain the pairing FORNPREP-FORNLOOP
+        if (op == LOP_FORNPREP)
+            beforeInstForNPrep(*this, pc);
+
         // We skip dead bytecode instructions when they appear after block was already terminated
         if (!inTerminatedBlock)
         {
+            if (interruptRequested)
+            {
+                interruptRequested = false;
+                inst(IrCmd::INTERRUPT, constUint(i));
+            }
+
             translateInst(op, pc, i);
 
             if (fastcallSkipTarget != -1)
@@ -157,6 +171,10 @@ void IrBuilder::buildFunctionIr(Proto* proto)
                 fastcallSkipTarget = -1;
             }
         }
+
+        // See above for FORNPREP..FORNLOOP processing
+        if (op == LOP_FORNLOOP)
+            afterInstForNLoop(*this, pc);
 
         i = nexti;
         LUAU_ASSERT(i <= proto->sizecode);
@@ -363,6 +381,12 @@ void IrBuilder::translateInst(LuauOpcode op, const Instruction* pc, int i)
     case LOP_POWK:
         translateInstBinaryK(*this, pc, i, TM_POW);
         break;
+    case LOP_SUBRK:
+        translateInstBinaryRK(*this, pc, i, TM_SUB);
+        break;
+    case LOP_DIVRK:
+        translateInstBinaryRK(*this, pc, i, TM_DIV);
+        break;
     case LOP_NOT:
         translateInstNot(*this, pc);
         break;
@@ -379,7 +403,8 @@ void IrBuilder::translateInst(LuauOpcode op, const Instruction* pc, int i)
         translateInstDupTable(*this, pc, i);
         break;
     case LOP_SETLIST:
-        inst(IrCmd::SETLIST, constUint(i), vmReg(LUAU_INSN_A(*pc)), vmReg(LUAU_INSN_B(*pc)), constInt(LUAU_INSN_C(*pc) - 1), constUint(pc[1]), undef());
+        inst(IrCmd::SETLIST, constUint(i), vmReg(LUAU_INSN_A(*pc)), vmReg(LUAU_INSN_B(*pc)), constInt(LUAU_INSN_C(*pc) - 1), constUint(pc[1]),
+            undef());
         break;
     case LOP_GETUPVAL:
         translateInstGetUpval(*this, pc, i);

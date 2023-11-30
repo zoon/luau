@@ -130,6 +130,49 @@ end
 
 assert(pcall(fuzzfail13) == true)
 
+local function fuzzfail14()
+  for l0=771751936,_ do
+    for l0=771751936,0 do
+      while 538970624 do
+      end
+    end
+  end
+end
+
+assert(pcall(fuzzfail14) == false)
+
+local function fuzzfail15()
+  local a
+  if a then
+    repeat until a
+  else
+    local b = `{a}`
+    a = nil
+  end
+end
+
+assert(pcall(fuzzfail15) == true)
+
+local function fuzzfail16()
+  _ = {[{[2]=77,_=_,[2]=_,}]=not _,}
+  _ = {77,[2]=11008,[2]=_,[0]=_,}
+end
+
+assert(pcall(fuzzfail16) == true)
+
+local function fuzzfail17()
+  return bit32.extract(1293942816,1293942816)
+end
+
+assert(pcall(fuzzfail17) == false)
+
+local function fuzzfail18()
+	return bit32.extract(7890276,0)
+end
+
+assert(pcall(fuzzfail18) == true)
+assert(fuzzfail18() == 0)
+
 local function arraySizeInv1()
   local t = {1, 2, nil, nil, nil, nil, nil, nil, nil, true}
 
@@ -170,5 +213,84 @@ local function nilInvalidatesSlot()
 end
 
 nilInvalidatesSlot()
+
+local function arraySizeOpt1(a)
+  a[1] += 2
+  a[1] *= 3
+
+  table.insert(a, 3)
+  table.insert(a, 4)
+  table.insert(a, 5)
+  table.insert(a, 6)
+
+  a[1] += 4
+  a[1] *= 5
+
+  return a[1] + a[5]
+end
+
+assert(arraySizeOpt1({1}) == 71)
+
+local function arraySizeOpt2(a, i)
+  a[i] += 2
+  a[i] *= 3
+
+  table.insert(a, 3)
+  table.insert(a, 4)
+  table.insert(a, 5)
+  table.insert(a, 6)
+
+  a[i] += 4
+  a[i] *= 5
+
+  return a[i] + a[5]
+end
+
+assert(arraySizeOpt2({1}, 1) == 71)
+
+function deadLoopBody(n)
+  local r = 0
+  if n and false then
+    for i = 1, n do
+      r += 1
+    end
+  end
+  return r
+end
+
+assert(deadLoopBody(5) == 0)
+
+function arrayIndexingSpecialNumbers1(a, b, c)
+  local arr = table.create(100000)
+  arr[a] = 9
+  arr[b-1] = 80
+  arr[b] = 700
+  arr[b+1] = 6000
+  arr[c-1] = 50000
+  arr[c] = 400000
+  arr[c+1] = 3000000
+
+  return arr[1] + arr[255] + arr[256] + arr[257] + arr[65535] + arr[65536] + arr[65537]
+end
+
+assert(arrayIndexingSpecialNumbers1(1, 256, 65536) == 3456789)
+
+function loopIteratorProtocol(a, t)
+  local sum = 0
+
+  do
+    local a, b, c, d, e, f, g = {}, {}, {}, {}, {}, {}, {}
+  end
+
+  for k, v in ipairs(t) do
+    if k == 10 then sum += math.abs('-8') end
+
+    sum += k
+  end
+
+  return sum
+end
+
+assert(loopIteratorProtocol(0, table.create(100, 5)) == 5058)
 
 return('OK')

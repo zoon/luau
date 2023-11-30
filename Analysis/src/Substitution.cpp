@@ -19,7 +19,11 @@ static TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool a
     auto go = [ty, &dest, alwaysClone](auto&& a) {
         using T = std::decay_t<decltype(a)>;
 
+        // The pointer identities of free and local types is very important.
+        // We decline to copy them.
         if constexpr (std::is_same_v<T, FreeType>)
+            return ty;
+        else if constexpr (std::is_same_v<T, LocalType>)
             return ty;
         else if constexpr (std::is_same_v<T, BoundType>)
         {
@@ -75,6 +79,7 @@ static TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool a
             clone.dcrMagicRefinement = a.dcrMagicRefinement;
             clone.tags = a.tags;
             clone.argNames = a.argNames;
+            clone.isCheckedFunction = a.isCheckedFunction;
             return dest.addType(std::move(clone));
         }
         else if constexpr (std::is_same_v<T, TableType>)

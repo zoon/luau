@@ -35,12 +35,11 @@ LUAU_FASTFLAG(LuauKnowsTheDataModel3)
 LUAU_FASTFLAGVARIABLE(DebugLuauFreezeDuringUnification, false)
 LUAU_FASTFLAGVARIABLE(DebugLuauSharedSelf, false)
 LUAU_FASTFLAG(LuauInstantiateInSubtyping)
-LUAU_FASTFLAGVARIABLE(LuauAllowIndexClassParameters, false)
-LUAU_FASTFLAG(LuauOccursIsntAlwaysFailure)
 LUAU_FASTFLAGVARIABLE(LuauTinyControlFlowAnalysis, false)
+LUAU_FASTFLAGVARIABLE(LuauLoopControlFlowAnalysis, false)
 LUAU_FASTFLAGVARIABLE(LuauAlwaysCommitInferencesOfFunctionCalls, false)
-LUAU_FASTFLAG(LuauParseDeclareClassIndexer)
-LUAU_FASTFLAG(LuauFloorDivision);
+LUAU_FASTFLAG(LuauBufferTypeck)
+LUAU_FASTFLAGVARIABLE(LuauRemoveBadRelationalOperatorWarning, false)
 
 namespace Luau
 {
@@ -202,27 +201,12 @@ static bool isMetamethod(const Name& name)
     return name == "__index" || name == "__newindex" || name == "__call" || name == "__concat" || name == "__unm" || name == "__add" ||
            name == "__sub" || name == "__mul" || name == "__div" || name == "__mod" || name == "__pow" || name == "__tostring" ||
            name == "__metatable" || name == "__eq" || name == "__lt" || name == "__le" || name == "__mode" || name == "__iter" || name == "__len" ||
-           (FFlag::LuauFloorDivision && name == "__idiv");
+           name == "__idiv";
 }
 
 size_t HashBoolNamePair::operator()(const std::pair<bool, Name>& pair) const
 {
     return std::hash<bool>()(pair.first) ^ std::hash<Name>()(pair.second);
-}
-
-GlobalTypes::GlobalTypes(NotNull<BuiltinTypes> builtinTypes)
-    : builtinTypes(builtinTypes)
-{
-    globalScope = std::make_shared<Scope>(globalTypes.addTypePack(TypePackVar{FreeTypePack{TypeLevel{}}}));
-
-    globalScope->addBuiltinTypeBinding("any", TypeFun{{}, builtinTypes->anyType});
-    globalScope->addBuiltinTypeBinding("nil", TypeFun{{}, builtinTypes->nilType});
-    globalScope->addBuiltinTypeBinding("number", TypeFun{{}, builtinTypes->numberType});
-    globalScope->addBuiltinTypeBinding("string", TypeFun{{}, builtinTypes->stringType});
-    globalScope->addBuiltinTypeBinding("boolean", TypeFun{{}, builtinTypes->booleanType});
-    globalScope->addBuiltinTypeBinding("thread", TypeFun{{}, builtinTypes->threadType});
-    globalScope->addBuiltinTypeBinding("unknown", TypeFun{{}, builtinTypes->unknownType});
-    globalScope->addBuiltinTypeBinding("never", TypeFun{{}, builtinTypes->neverType});
 }
 
 TypeChecker::TypeChecker(const ScopePtr& globalScope, ModuleResolver* resolver, NotNull<BuiltinTypes> builtinTypes, InternalErrorReporter* iceHandler)
@@ -237,6 +221,7 @@ TypeChecker::TypeChecker(const ScopePtr& globalScope, ModuleResolver* resolver, 
     , stringType(builtinTypes->stringType)
     , booleanType(builtinTypes->booleanType)
     , threadType(builtinTypes->threadType)
+    , bufferType(builtinTypes->bufferType)
     , anyType(builtinTypes->anyType)
     , unknownType(builtinTypes->unknownType)
     , neverType(builtinTypes->neverType)
@@ -364,11 +349,10 @@ ControlFlow TypeChecker::check(const ScopePtr& scope, const AstStat& program)
         return check(scope, *while_);
     else if (auto repeat = program.as<AstStatRepeat>())
         return check(scope, *repeat);
-    else if (program.is<AstStatBreak>() || program.is<AstStatContinue>())
-    {
-        // Nothing to do
-        return ControlFlow::None;
-    }
+    else if (program.is<AstStatBreak>())
+        return FFlag::LuauLoopControlFlowAnalysis ? ControlFlow::Breaks : ControlFlow::None;
+    else if (program.is<AstStatContinue>())
+        return FFlag::LuauLoopControlFlowAnalysis ? ControlFlow::Continues : ControlFlow::None;
     else if (auto return_ = program.as<AstStatReturn>())
         return check(scope, *return_);
     else if (auto expr = program.as<AstStatExpr>())
@@ -766,12 +750,14 @@ ControlFlow TypeChecker::check(const ScopePtr& scope, const AstStatIf& statement
         if (statement.elsebody)
             elsecf = check(elseScope, *statement.elsebody);
 
-        if (matches(thencf, ControlFlow::Returns | ControlFlow::Throws) && elsecf == ControlFlow::None)
+        if (thencf != ControlFlow::None && elsecf == ControlFlow::None)
             scope->inheritRefinements(elseScope);
-        else if (thencf == ControlFlow::None && matches(elsecf, ControlFlow::Returns | ControlFlow::Throws))
+        else if (thencf == ControlFlow::None && elsecf != ControlFlow::None)
             scope->inheritRefinements(thenScope);
 
-        if (matches(thencf, ControlFlow::Returns | ControlFlow::Throws) && matches(elsecf, ControlFlow::Returns | ControlFlow::Throws))
+        if (FFlag::LuauLoopControlFlowAnalysis && thencf == elsecf)
+            return thencf;
+        else if (matches(thencf, ControlFlow::Returns | ControlFlow::Throws) && matches(elsecf, ControlFlow::Returns | ControlFlow::Throws))
             return ControlFlow::Returns;
         else
             return ControlFlow::None;
@@ -1640,13 +1626,6 @@ ControlFlow TypeChecker::check(const ScopePtr& scope, const AstStatTypeAlias& ty
 
     TypeId& bindingType = bindingsMap[name].type;
 
-    if (!FFlag::LuauOccursIsntAlwaysFailure)
-    {
-        if (unify(ty, bindingType, aliasScope, typealias.location))
-            bindingType = ty;
-        return ControlFlow::None;
-    }
-
     unify(ty, bindingType, aliasScope, typealias.location);
 
     // It is possible for this unification to succeed but for
@@ -1776,7 +1755,7 @@ ControlFlow TypeChecker::check(const ScopePtr& scope, const AstStatDeclareClass&
     if (!ctv->metatable)
         ice("No metatable for declared class");
 
-    if (const auto& indexer = declaredClass.indexer; FFlag::LuauParseDeclareClassIndexer && indexer)
+    if (const auto& indexer = declaredClass.indexer)
         ctv->indexer = TableIndexer(resolveType(scope, *indexer->indexType), resolveType(scope, *indexer->resultType));
 
     TableType* metatable = getMutable<TableType>(*ctv->metatable);
@@ -2574,7 +2553,6 @@ std::string opToMetaTableEntry(const AstExprBinary::Op& op)
     case AstExprBinary::Div:
         return "__div";
     case AstExprBinary::FloorDiv:
-        LUAU_ASSERT(FFlag::LuauFloorDivision);
         return "__idiv";
     case AstExprBinary::Mod:
         return "__mod";
@@ -2777,10 +2755,26 @@ TypeId TypeChecker::checkRelationalOperation(
         {
             reportErrors(state.errors);
 
-            if (!isEquality && state.errors.empty() && (get<UnionType>(leftType) || isBoolean(leftType)))
+            if (FFlag::LuauRemoveBadRelationalOperatorWarning)
             {
-                reportError(expr.location, GenericError{format("Type '%s' cannot be compared with relational operator %s", toString(leftType).c_str(),
-                                               toString(expr.op).c_str())});
+                // The original version of this check also produced this error when we had a union type.
+                // However, the old solver does not readily have the ability to discern if the union is comparable.
+                // This is the case when the lhs is e.g. a union of singletons and the rhs is the combined type.
+                // The new solver has much more powerful logic for resolving relational operators, but for now,
+                // we need to be conservative in the old solver to deliver a reasonable developer experience.
+                if (!isEquality && state.errors.empty() && isBoolean(leftType))
+                {
+                    reportError(expr.location, GenericError{format("Type '%s' cannot be compared with relational operator %s",
+                                                   toString(leftType).c_str(), toString(expr.op).c_str())});
+                }
+            }
+            else
+            {
+                if (!isEquality && state.errors.empty() && (get<UnionType>(leftType) || isBoolean(leftType)))
+                {
+                    reportError(expr.location, GenericError{format("Type '%s' cannot be compared with relational operator %s",
+                                                   toString(leftType).c_str(), toString(expr.op).c_str())});
+                }
             }
 
             return booleanType;
@@ -3072,8 +3066,6 @@ TypeId TypeChecker::checkBinaryOperation(
     case AstExprBinary::FloorDiv:
     case AstExprBinary::Mod:
     case AstExprBinary::Pow:
-        LUAU_ASSERT(FFlag::LuauFloorDivision || expr.op != AstExprBinary::FloorDiv);
-
         reportErrors(tryUnify(lhsType, numberType, scope, expr.left->location));
         reportErrors(tryUnify(rhsType, numberType, scope, expr.right->location));
         return numberType;
@@ -3424,15 +3416,12 @@ TypeId TypeChecker::checkLValueBinding(const ScopePtr& scope, const AstExprIndex
             }
         }
 
-        if (FFlag::LuauAllowIndexClassParameters)
+        if (const ClassType* exprClass = get<ClassType>(exprType))
         {
-            if (const ClassType* exprClass = get<ClassType>(exprType))
-            {
-                if (isNonstrictMode())
-                    return unknownType;
-                reportError(TypeError{expr.location, DynamicPropertyLookupOnClassesUnsafe{exprType}});
-                return errorRecoveryType(scope);
-            }
+            if (isNonstrictMode())
+                return unknownType;
+            reportError(TypeError{expr.location, DynamicPropertyLookupOnClassesUnsafe{exprType}});
+            return errorRecoveryType(scope);
         }
     }
 
@@ -4038,7 +4027,9 @@ void TypeChecker::checkArgumentList(const ScopePtr& scope, const AstExpr& funNam
                     if (argIndex < argLocations.size())
                         location = argLocations[argIndex];
 
-                    unify(*argIter, vtp->ty, scope, location);
+                    state.location = location;
+                    state.tryUnify(*argIter, vtp->ty);
+
                     ++argIter;
                     ++argIndex;
                 }
@@ -5409,7 +5400,7 @@ TypeId TypeChecker::resolveTypeWorker(const ScopePtr& scope, const AstType& anno
         std::optional<TableIndexer> tableIndexer;
 
         for (const auto& prop : table->props)
-            props[prop.name.value] = {resolveType(scope, *prop.type)};
+            props[prop.name.value] = {resolveType(scope, *prop.type), /* deprecated: */ false, {}, std::nullopt, {}, std::nullopt, prop.location};
 
         if (const auto& indexer = table->indexer)
             tableIndexer = TableIndexer(resolveType(scope, *indexer->indexType), resolveType(scope, *indexer->resultType));
@@ -6031,6 +6022,8 @@ void TypeChecker::resolve(const TypeGuardPredicate& typeguardP, RefinementMap& r
         return refine(isBoolean, booleanType);
     else if (typeguardP.kind == "thread")
         return refine(isThread, threadType);
+    else if (FFlag::LuauBufferTypeck && typeguardP.kind == "buffer")
+        return refine(isBuffer, bufferType);
     else if (typeguardP.kind == "table")
     {
         return refine([](TypeId ty) -> bool {

@@ -10,6 +10,9 @@
 #include "Luau/TypeInfer.h"
 #include "Luau/BytecodeBuilder.h"
 #include "Luau/Frontend.h"
+#include "Luau/Compiler.h"
+#include "Luau/CodeGen.h"
+#include "Luau/BytecodeSummary.h"
 
 #include "doctest.h"
 #include "ScopedFlags.h"
@@ -22,9 +25,6 @@
 extern bool verbose;
 extern bool codegen;
 extern int optimizationLevel;
-
-LUAU_FASTFLAG(LuauPCallDebuggerFix);
-LUAU_FASTFLAG(LuauFloorDivision);
 
 static lua_CompileOptions defaultOptions()
 {
@@ -146,12 +146,19 @@ using StateRef = std::unique_ptr<lua_State, void (*)(lua_State*)>;
 static StateRef runConformance(const char* name, void (*setup)(lua_State* L) = nullptr, void (*yield)(lua_State* L) = nullptr,
     lua_State* initialLuaState = nullptr, lua_CompileOptions* options = nullptr, bool skipCodegen = false)
 {
+#ifdef LUAU_CONFORMANCE_SOURCE_DIR
+    std::string path = LUAU_CONFORMANCE_SOURCE_DIR;
+    path += "/";
+    path += name;
+#else
     std::string path = __FILE__;
     path.erase(path.find_last_of("\\/"));
     path += "/conformance/";
     path += name;
+#endif
 
     std::fstream stream(path, std::ios::in | std::ios::binary);
+    INFO(path);
     REQUIRE(stream);
 
     std::string source(std::istreambuf_iterator<char>(stream), {});
@@ -218,7 +225,7 @@ static StateRef runConformance(const char* name, void (*setup)(lua_State* L) = n
     free(bytecode);
 
     if (result == 0 && codegen && !skipCodegen && luau_codegen_supported())
-        luau_codegen_compile(L, -1);
+        Luau::CodeGen::compile(L, -1, Luau::CodeGen::CodeGen_ColdFunctions);
 
     int status = (result == 0) ? lua_resume(L, nullptr, 0) : LUA_ERRSYNTAX;
 
@@ -266,6 +273,25 @@ static void* limitedRealloc(void* ud, void* ptr, size_t osize, size_t nsize)
     }
 }
 
+static std::vector<Luau::CodeGen::FunctionBytecodeSummary> analyzeFile(const char* source, const unsigned nestingLimit)
+{
+    Luau::BytecodeBuilder bcb;
+
+    Luau::CompileOptions options;
+    options.optimizationLevel = optimizationLevel;
+    options.debugLevel = 1;
+
+    compileOrThrow(bcb, source, options);
+
+    const std::string& bytecode = bcb.getBytecode();
+
+    std::unique_ptr<lua_State, void (*)(lua_State*)> globalState(luaL_newstate(), lua_close);
+    lua_State* L = globalState.get();
+
+    LUAU_ASSERT(luau_load(L, "source", bytecode.data(), bytecode.size(), 0) == 0);
+    return Luau::CodeGen::summarizeBytecode(L, -1, nestingLimit);
+}
+
 TEST_SUITE_BEGIN("Conformance");
 
 TEST_CASE("CodegenSupported")
@@ -281,8 +307,15 @@ TEST_CASE("Assert")
 
 TEST_CASE("Basic")
 {
-    ScopedFastFlag sffs{"LuauFloorDivision", true};
     runConformance("basic.lua");
+}
+
+TEST_CASE("Buffers")
+{
+    ScopedFastFlag luauBufferBetterMsg{"LuauBufferBetterMsg", true};
+    ScopedFastFlag luauCodeGenFixByteLower{"LuauCodeGenFixByteLower", true};
+
+    runConformance("buffers.lua");
 }
 
 TEST_CASE("Math")
@@ -304,6 +337,7 @@ TEST_CASE("Tables")
                 else
                 {
                     const void* p = lua_topointer(L, 1);
+                    LUAU_ASSERT(p); // we expect the test call to only pass GC values here
                     lua_pushlightuserdata(L, const_cast<void*>(p));
                 }
                 return 1;
@@ -365,7 +399,6 @@ TEST_CASE("Errors")
 
 TEST_CASE("Events")
 {
-    ScopedFastFlag sffs{"LuauFloorDivision", true};
     runConformance("events.lua");
 }
 
@@ -396,11 +429,13 @@ TEST_CASE("GC")
 
 TEST_CASE("Bitwise")
 {
+    ScopedFastFlag sffs{"LuauBit32Byteswap", true};
     runConformance("bitwise.lua");
 }
 
 TEST_CASE("UTF8")
 {
+    ScopedFastFlag sff("LuauStricterUtf8", true);
     runConformance("utf8.lua");
 }
 
@@ -447,8 +482,6 @@ TEST_CASE("Pack")
 
 TEST_CASE("Vector")
 {
-    ScopedFastFlag sffs{"LuauFloorDivision", true};
-
     lua_CompileOptions copts = defaultOptions();
     copts.vectorCtor = "vector";
 
@@ -506,6 +539,10 @@ static void populateRTTI(lua_State* L, Luau::TypeId type)
             lua_pushstring(L, "thread");
             break;
 
+        case Luau::PrimitiveType::Buffer:
+            lua_pushstring(L, "buffer");
+            break;
+
         default:
             LUAU_ASSERT(!"Unknown primitive type");
         }
@@ -543,6 +580,8 @@ static void populateRTTI(lua_State* L, Luau::TypeId type)
 
 TEST_CASE("Types")
 {
+    ScopedFastFlag luauBufferDefinitions{"LuauBufferDefinitions", true};
+
     runConformance("types.lua", [](lua_State* L) {
         Luau::NullModuleResolver moduleResolver;
         Luau::NullFileResolver fileResolver;
@@ -1152,6 +1191,63 @@ TEST_CASE("ApiType")
     CHECK(lua_type(L, -1) == LUA_TUSERDATA);
 }
 
+TEST_CASE("ApiBuffer")
+{
+    StateRef globalState(luaL_newstate(), lua_close);
+    lua_State* L = globalState.get();
+
+    lua_newbuffer(L, 1000);
+
+    REQUIRE(lua_type(L, -1) == LUA_TBUFFER);
+
+    CHECK(lua_isbuffer(L, -1));
+    CHECK(lua_objlen(L, -1) == 1000);
+
+    CHECK(strcmp(lua_typename(L, LUA_TBUFFER), "buffer") == 0);
+
+    CHECK(strcmp(luaL_typename(L, -1), "buffer") == 0);
+
+    void* p1 = lua_tobuffer(L, -1, nullptr);
+
+    size_t len = 0;
+    void* p2 = lua_tobuffer(L, -1, &len);
+    CHECK(len == 1000);
+    CHECK(p1 == p2);
+
+    void* p3 = luaL_checkbuffer(L, -1, nullptr);
+    CHECK(p1 == p3);
+
+    len = 0;
+    void* p4 = luaL_checkbuffer(L, -1, &len);
+    CHECK(len == 1000);
+    CHECK(p1 == p4);
+
+    memset(p1, 0xab, 1000);
+
+    CHECK(lua_topointer(L, -1) != nullptr);
+
+    lua_newbuffer(L, 0);
+
+    lua_pushvalue(L, -2);
+
+    CHECK(lua_equal(L, -3, -1));
+    CHECK(!lua_equal(L, -2, -1));
+
+    lua_pop(L, 1);
+}
+
+TEST_CASE("AllocApi")
+{
+    int ud = 0;
+    StateRef globalState(lua_newstate(limitedRealloc, &ud), lua_close);
+    lua_State* L = globalState.get();
+
+    void* udCheck = nullptr;
+    bool allocfIsSet = lua_getallocf(L, &udCheck) == limitedRealloc;
+    CHECK(allocfIsSet);
+    CHECK(udCheck == &ud);
+}
+
 #if !LUA_USE_LONGJMP
 TEST_CASE("ExceptionObject")
 {
@@ -1241,30 +1337,7 @@ TEST_CASE("TagMethodError")
     //   when doLuaBreak is true the test additionally calls lua_break to ensure breaking the debugger doesn't cause the VM to crash
     for (bool doLuaBreak : {false, true})
     {
-        std::optional<ScopedFastFlag> sff;
-        if (doLuaBreak)
-        {
-            // If doLuaBreak is true then LuauPCallDebuggerFix must be enabled to avoid crashing the tests.
-            sff = {"LuauPCallDebuggerFix", true};
-        }
-
-        if (FFlag::LuauPCallDebuggerFix)
-        {
-            expectedHits = {22, 32};
-        }
-        else
-        {
-            expectedHits = {
-                9,
-                17,
-                17,
-                22,
-                27,
-                27,
-                32,
-                37,
-            };
-        }
+        expectedHits = {22, 32};
 
         static int index;
         static bool luaBreak;
@@ -1361,7 +1434,8 @@ TEST_CASE("GCDump")
 {
     // internal function, declared in lgc.h - not exposed via lua.h
     extern void luaC_dump(lua_State * L, void* file, const char* (*categoryName)(lua_State * L, uint8_t memcat));
-    extern void luaC_enumheap(lua_State * L, void* context, void (*node)(void* context, void* ptr, uint8_t tt, uint8_t memcat, const char* name),
+    extern void luaC_enumheap(lua_State * L, void* context,
+        void (*node)(void* context, void* ptr, uint8_t tt, uint8_t memcat, size_t size, const char* name),
         void (*edge)(void* context, void* from, void* to, const char* name));
 
     StateRef globalState(luaL_newstate(), lua_close);
@@ -1371,6 +1445,9 @@ TEST_CASE("GCDump")
     lua_createtable(L, 1, 2);
     lua_pushstring(L, "value");
     lua_setfield(L, -2, "key");
+
+    lua_pushstring(L, "u42");
+    lua_setfield(L, -2, "__type");
 
     lua_pushinteger(L, 42);
     lua_rawseti(L, -2, 1000);
@@ -1387,6 +1464,8 @@ TEST_CASE("GCDump")
 
     lua_pushinteger(L, 1);
     lua_pushcclosure(L, lua_silence, "test", 1);
+
+    lua_newbuffer(L, 100);
 
     lua_State* CL = lua_newthread(L);
 
@@ -1412,6 +1491,7 @@ TEST_CASE("GCDump")
         void* ptr;
         uint8_t tag;
         uint8_t memcat;
+        size_t size;
         std::string name;
     };
 
@@ -1429,9 +1509,13 @@ TEST_CASE("GCDump")
 
     luaC_enumheap(
         L, &ctx,
-        [](void* ctx, void* gco, uint8_t tt, uint8_t memcat, const char* name) {
+        [](void* ctx, void* gco, uint8_t tt, uint8_t memcat, size_t size, const char* name) {
             EnumContext& context = *(EnumContext*)ctx;
-            context.nodes[gco] = {gco, tt, memcat, name ? name : ""};
+
+            if (tt == LUA_TUSERDATA)
+                CHECK(strcmp(name, "u42") == 0);
+
+            context.nodes[gco] = {gco, tt, memcat, size, name ? name : ""};
         },
         [](void* ctx, void* s, void* t, const char*) {
             EnumContext& context = *(EnumContext*)ctx;
@@ -1447,68 +1531,81 @@ TEST_CASE("Interrupt")
     lua_CompileOptions copts = defaultOptions();
     copts.optimizationLevel = 1; // disable loop unrolling to get fixed expected hit results
 
-    static const int expectedhits[] = {
-        2,
-        9,
-        5,
-        5,
-        5,
-        5,
-        5,
-        5,
-        5,
-        5,
-        5,
-        5,
-        5,
-        6,
-        18,
-        13,
-        13,
-        13,
-        13,
-        16,
-        23,
-        21,
-        25,
-    };
     static int index;
 
-    index = 0;
+    StateRef globalState = runConformance("interrupt.lua", nullptr, nullptr, nullptr, &copts);
 
-    runConformance(
-        "interrupt.lua",
-        [](lua_State* L) {
-            auto* cb = lua_callbacks(L);
+    lua_State* L = globalState.get();
 
-            // note: for simplicity here we setup the interrupt callback once
-            // however, this carries a noticeable performance cost. in a real application,
-            // it's advised to set interrupt callback on a timer from a different thread,
-            // and set it back to nullptr once the interrupt triggered.
-            cb->interrupt = [](lua_State* L, int gc) {
-                if (gc >= 0)
-                    return;
+    // note: for simplicity here we setup the interrupt callback when the test starts
+    // however, this carries a noticeable performance cost. in a real application,
+    // it's advised to set interrupt callback on a timer from a different thread,
+    // and set it back to nullptr once the interrupt triggered.
 
-                CHECK(index < int(std::size(expectedhits)));
+    // define the interrupt to check the expected hits
+    static const int expectedhits[] = {11, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 8, 20, 15, 15, 15, 15, 18, 25, 23, 26};
 
-                lua_Debug ar = {};
-                lua_getinfo(L, 0, "l", &ar);
+    lua_callbacks(L)->interrupt = [](lua_State* L, int gc) {
+        if (gc >= 0)
+            return;
 
-                CHECK(ar.currentline == expectedhits[index]);
+        CHECK(index < int(std::size(expectedhits)));
 
-                index++;
+        lua_Debug ar = {};
+        lua_getinfo(L, 0, "l", &ar);
 
-                // check that we can yield inside an interrupt
-                if (index == 5)
-                    lua_yield(L, 0);
-            };
-        },
-        [](lua_State* L) {
-            CHECK(index == 5); // a single yield point
-        },
-        nullptr, &copts);
+        CHECK(ar.currentline == expectedhits[index]);
 
-    CHECK(index == int(std::size(expectedhits)));
+        index++;
+
+        // check that we can yield inside an interrupt
+        if (index == 4)
+            lua_yield(L, 0);
+    };
+
+    {
+        lua_State* T = lua_newthread(L);
+
+        lua_getglobal(T, "test");
+
+        index = 0;
+        int status = lua_resume(T, nullptr, 0);
+        CHECK(status == LUA_YIELD);
+        CHECK(index == 4);
+
+        status = lua_resume(T, nullptr, 0);
+        CHECK(status == LUA_OK);
+        CHECK(index == int(std::size(expectedhits)));
+
+        lua_pop(L, 1);
+    }
+
+    // redefine the interrupt to break after 10 iterations of a loop that would otherwise be infinite
+    // the test exposes a few global functions that we will call; the interrupt will force a yield
+    lua_callbacks(L)->interrupt = [](lua_State* L, int gc) {
+        if (gc >= 0)
+            return;
+
+        CHECK(index < 10);
+        if (++index == 10)
+            lua_yield(L, 0);
+    };
+
+    for (int test = 1; test <= 9; ++test)
+    {
+        lua_State* T = lua_newthread(L);
+
+        std::string name = "infloop" + std::to_string(test);
+        lua_getglobal(T, name.c_str());
+
+        index = 0;
+        int status = lua_resume(T, nullptr, 0);
+        CHECK(status == LUA_YIELD);
+        CHECK(index == 10);
+
+        // abandon the thread
+        lua_pop(L, 1);
+    }
 }
 
 TEST_CASE("UserdataApi")
@@ -1621,9 +1718,6 @@ static void pushInt64(lua_State* L, int64_t value)
 
 TEST_CASE("Userdata")
 {
-
-    ScopedFastFlag sffs{"LuauFloorDivision", true};
-
     runConformance("userdata.lua", [](lua_State* L) {
         // create metatable with all the metamethods
         lua_newtable(L);
@@ -1819,16 +1913,18 @@ TEST_CASE("SafeEnv")
 
 TEST_CASE("Native")
 {
+    ScopedFastFlag luauLowerAltLoopForn{"LuauLowerAltLoopForn", true};
+
     runConformance("native.lua");
 }
 
 TEST_CASE("NativeTypeAnnotations")
 {
-    ScopedFastFlag bytecodeVersion4("BytecodeVersion4", true);
-
     // This tests requires code to run natively, otherwise all 'is_native' checks will fail
     if (!codegen || !luau_codegen_supported())
         return;
+
+    ScopedFastFlag luauCompileBufferAnnotation{"LuauCompileBufferAnnotation", true};
 
     lua_CompileOptions copts = defaultOptions();
     copts.vectorCtor = "vector";
@@ -1906,12 +2002,59 @@ TEST_CASE("HugeFunction")
     REQUIRE(result == 0);
 
     if (codegen && luau_codegen_supported())
-        luau_codegen_compile(L, -1);
+        Luau::CodeGen::compile(L, -1, Luau::CodeGen::CodeGen_ColdFunctions);
 
     int status = lua_resume(L, nullptr, 0);
     REQUIRE(status == 0);
 
     CHECK(lua_tonumber(L, -1) == 42);
+}
+
+TEST_CASE("BytecodeDistributionPerFunctionTest")
+{
+    const char* source = R"(
+local function first(n, p)
+  local t = {}
+  for i=1,p do t[i] = i*10 end
+
+  local function inner(_,n)
+    if n > 0 then
+      n = n-1
+      return n, unpack(t)
+    end
+  end
+  return inner, nil, n
+end
+
+local function second(x)
+ return x[1]
+end
+)";
+
+    std::vector<Luau::CodeGen::FunctionBytecodeSummary> summaries(analyzeFile(source, 0));
+
+    CHECK_EQ(summaries[0].getName(), "inner");
+    CHECK_EQ(summaries[0].getLine(), 6);
+    CHECK_EQ(summaries[0].getCounts(0),
+        std::vector<unsigned>({1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0}));
+
+    CHECK_EQ(summaries[1].getName(), "first");
+    CHECK_EQ(summaries[1].getLine(), 2);
+    CHECK_EQ(summaries[1].getCounts(0),
+        std::vector<unsigned>({1, 0, 1, 0, 2, 0, 3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}));
+
+    CHECK_EQ(summaries[2].getName(), "second");
+    CHECK_EQ(summaries[2].getLine(), 15);
+    CHECK_EQ(summaries[2].getCounts(0),
+        std::vector<unsigned>({0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}));
+
+    CHECK_EQ(summaries[3].getName(), "");
+    CHECK_EQ(summaries[3].getLine(), 1);
+    CHECK_EQ(summaries[3].getCounts(0),
+        std::vector<unsigned>({0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}));
 }
 
 TEST_SUITE_END();

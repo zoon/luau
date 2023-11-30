@@ -2,6 +2,7 @@
 
 #include "Luau/AstQuery.h"
 #include "Luau/BuiltinDefinitions.h"
+#include "Luau/Frontend.h"
 #include "Luau/Scope.h"
 #include "Luau/TypeInfer.h"
 #include "Luau/Type.h"
@@ -27,8 +28,7 @@ TEST_CASE_FIXTURE(Fixture, "tc_hello_world")
     CheckResult result = check("local a = 7");
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    TypeId aType = requireType("a");
-    CHECK_EQ(getPrimitiveType(aType), PrimitiveType::Number);
+    CHECK("number" == toString(requireType("a")));
 }
 
 TEST_CASE_FIXTURE(Fixture, "tc_propagation")
@@ -43,21 +43,39 @@ TEST_CASE_FIXTURE(Fixture, "tc_propagation")
 TEST_CASE_FIXTURE(Fixture, "tc_error")
 {
     CheckResult result = check("local a = 7   local b = 'hi'   a = b");
-    LUAU_REQUIRE_ERROR_COUNT(1, result);
 
-    CHECK_EQ(
-        result.errors[0], (TypeError{Location{Position{0, 35}, Position{0, 36}}, TypeMismatch{builtinTypes->numberType, builtinTypes->stringType}}));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        LUAU_REQUIRE_NO_ERRORS(result);
+        CHECK("number | string" == toString(requireType("a")));
+    }
+    else
+    {
+        LUAU_REQUIRE_ERROR_COUNT(1, result);
+
+        CHECK_EQ(
+            result.errors[0], (TypeError{Location{Position{0, 35}, Position{0, 36}}, TypeMismatch{builtinTypes->numberType, builtinTypes->stringType}}));
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "tc_error_2")
 {
     CheckResult result = check("local a = 7   a = 'hi'");
-    LUAU_REQUIRE_ERROR_COUNT(1, result);
 
-    CHECK_EQ(result.errors[0], (TypeError{Location{Position{0, 18}, Position{0, 22}}, TypeMismatch{
-                                                                                          requireType("a"),
-                                                                                          builtinTypes->stringType,
-                                                                                      }}));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        LUAU_REQUIRE_NO_ERRORS(result);
+        CHECK("number | string" == toString(requireType("a")));
+    }
+    else
+    {
+        LUAU_REQUIRE_ERROR_COUNT(1, result);
+
+        CHECK_EQ(result.errors[0], (TypeError{Location{Position{0, 18}, Position{0, 22}}, TypeMismatch{
+                                                                                            requireType("a"),
+                                                                                            builtinTypes->stringType,
+                                                                                        }}));
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "infer_locals_with_nil_value")
@@ -65,8 +83,27 @@ TEST_CASE_FIXTURE(Fixture, "infer_locals_with_nil_value")
     CheckResult result = check("local f = nil; f = 'hello world'");
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    TypeId ty = requireType("f");
-    CHECK_EQ(getPrimitiveType(ty), PrimitiveType::String);
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        CHECK("string?" == toString(requireType("f")));
+    }
+    else
+    {
+        TypeId ty = requireType("f");
+        CHECK_EQ(getPrimitiveType(ty), PrimitiveType::String);
+    }
+}
+
+TEST_CASE_FIXTURE(Fixture, "infer_locals_with_nil_value_2")
+{
+    CheckResult result = check(R"(
+        local a = 2
+        local b = a,nil
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    CHECK_EQ("number", toString(requireType("a")));
+    CHECK_EQ("number", toString(requireType("b")));
 }
 
 TEST_CASE_FIXTURE(Fixture, "infer_locals_via_assignment_from_its_call_site")
@@ -80,8 +117,8 @@ TEST_CASE_FIXTURE(Fixture, "infer_locals_via_assignment_from_its_call_site")
 
     if (FFlag::DebugLuauDeferredConstraintResolution)
     {
-        CHECK("number | string" == toString(requireType("a")));
-        CHECK("(number | string) -> ()" == toString(requireType("f")));
+        CHECK("unknown" == toString(requireType("a")));
+        CHECK("(unknown) -> ()" == toString(requireType("f")));
 
         LUAU_REQUIRE_NO_ERRORS(result);
     }
@@ -91,24 +128,6 @@ TEST_CASE_FIXTURE(Fixture, "infer_locals_via_assignment_from_its_call_site")
 
         CHECK_EQ("number", toString(requireType("a")));
     }
-}
-TEST_CASE_FIXTURE(Fixture, "interesting_local_type_inference_case")
-{
-    ScopedFastFlag sff[] = {
-        {"DebugLuauDeferredConstraintResolution", true},
-    };
-
-    CheckResult result = check(R"(
-        local a
-        function f(x) a = x end
-        f({x = 5})
-        f({x = 5})
-    )");
-
-    CHECK("{ x: number }" == toString(requireType("a")));
-    CHECK("({ x: number }) -> ()" == toString(requireType("f")));
-
-    LUAU_REQUIRE_NO_ERRORS(result);
 }
 
 TEST_CASE_FIXTURE(Fixture, "infer_in_nocheck_mode")
@@ -162,8 +181,16 @@ TEST_CASE_FIXTURE(Fixture, "if_statement")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ(*builtinTypes->stringType, *requireType("a"));
-    CHECK_EQ(*builtinTypes->numberType, *requireType("b"));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        CHECK("string?" == toString(requireType("a")));
+        CHECK("number?" == toString(requireType("b")));
+    }
+    else
+    {
+        CHECK_EQ(*builtinTypes->stringType, *requireType("a"));
+        CHECK_EQ(*builtinTypes->numberType, *requireType("b"));
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "statements_are_topologically_sorted")
@@ -1030,19 +1057,19 @@ TEST_CASE_FIXTURE(Fixture, "cli_50041_committing_txnlog_in_apollo_client_error")
         LUAU_REQUIRE_ERROR_COUNT(1, result);
         const std::string expected = R"(Type 'Policies' from 'MainModule' could not be converted into 'Policies' from 'MainModule'
 caused by:
-  Property 'getStoreFieldName' is not compatible. 
+  Property 'getStoreFieldName' is not compatible.
 Type
     '(Policies, FieldSpecifier & {| from: number? |}) -> (a, b...)'
 could not be converted into
     '(Policies, FieldSpecifier) -> string'
 caused by:
-  Argument #2 type is not compatible. 
+  Argument #2 type is not compatible.
 Type
     'FieldSpecifier'
 could not be converted into
     'FieldSpecifier & {| from: number? |}'
 caused by:
-  Not all intersection parts are compatible. 
+  Not all intersection parts are compatible.
 Table type 'FieldSpecifier' not compatible with type '{| from: number? |}' because the former has extra field 'fieldName')";
         CHECK_EQ(expected, toString(result.errors[0]));
     }
@@ -1086,7 +1113,7 @@ TEST_CASE_FIXTURE(Fixture, "type_infer_recursion_limit_normalizer")
 
     CHECK(1 == result.errors.size());
     CHECK(Location{{3, 12}, {3, 46}} == result.errors[0].location);
-    CHECK_EQ("Internal error: Code is too complex to typecheck! Consider adding type annotations around this area", toString(result.errors[0]));
+    CHECK_EQ("Code is too complex to typecheck! Consider simplifying the code around this area", toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "type_infer_cache_limit_normalizer")
@@ -1099,7 +1126,7 @@ TEST_CASE_FIXTURE(Fixture, "type_infer_cache_limit_normalizer")
     )");
 
     LUAU_REQUIRE_ERRORS(result);
-    CHECK_EQ("Internal error: Code is too complex to typecheck! Consider adding type annotations around this area", toString(result.errors[0]));
+    CHECK_EQ("Code is too complex to typecheck! Consider simplifying the code around this area", toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "follow_on_new_types_in_substitution")
@@ -1165,6 +1192,28 @@ TEST_CASE_FIXTURE(Fixture, "bidirectional_checking_of_higher_order_function")
     CHECK(location.end.line == 4);
 }
 
+TEST_CASE_FIXTURE(Fixture, "bidirectional_checking_of_callback_property")
+{
+    CheckResult result = check(R"(
+        local print: (number) -> ()
+
+        type Point = {x: number, y: number}
+        local T : {callback: ((Point) -> ())?} = {}
+
+        T.callback = function(p) -- No error here
+            print(p.z)           -- error here.  Point has no property z
+        end
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+
+    CHECK_MESSAGE(get<UnknownProperty>(result.errors[0]), "Expected UnknownProperty but got " << result.errors[0]);
+
+    Location location = result.errors[0].location;
+    CHECK(location.begin.line == 7);
+    CHECK(location.end.line == 7);
+}
+
 TEST_CASE_FIXTURE(BuiltinsFixture, "it_is_ok_to_have_inconsistent_number_of_return_values_in_nonstrict")
 {
     CheckResult result = check(R"(
@@ -1224,8 +1273,6 @@ local b = typeof(foo) ~= 'nil'
 
 TEST_CASE_FIXTURE(Fixture, "occurs_isnt_always_failure")
 {
-    ScopedFastFlag sff{"LuauOccursIsntAlwaysFailure", true};
-
     CheckResult result = check(R"(
 function f(x, c)                   -- x : X
     local y = if c then x else nil -- y : X?
@@ -1402,6 +1449,58 @@ TEST_CASE_FIXTURE(Fixture, "promote_tail_type_packs")
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "lti_must_record_contributing_locations")
+{
+    ScopedFastFlag sff_DebugLuauDeferredConstraintResolution{"DebugLuauDeferredConstraintResolution", true};
+
+    CheckResult result = check(R"(
+        local function f(a)
+            if math.random() > 0.5 then
+                math.abs(a)
+            else
+                string.len(a)
+            end
+        end
+    )");
+
+    // We inspect the actual errors in other tests; this test verifies that we
+    // actually recorded breadcrumbs for a.
+    LUAU_REQUIRE_ERROR_COUNT(3, result);
+    TypeId fnTy = requireType("f");
+    const FunctionType* fn = get<FunctionType>(fnTy);
+    REQUIRE(fn);
+
+    TypeId argTy = *first(fn->argTypes);
+    std::vector<std::pair<Location, TypeId>> locations = getMainModule()->upperBoundContributors[argTy];
+    CHECK(locations.size() == 2);
+}
+
+/*
+ * CLI-49876
+ *
+ * We had a bug where we would not use the correct TxnLog when evaluating a
+ * variadic overload. We could therefore get into a state where the TxnLog has
+ * logged that a generic matches to one type, but the variadic tail has already
+ * been bound to another type outside of that TxnLog.
+ *
+ * This caused type checking to succeed when it should have failed.
+ */
+TEST_CASE_FIXTURE(BuiltinsFixture, "be_sure_to_use_active_txnlog_when_evaluating_a_variadic_overload")
+{
+    CheckResult result = check(R"(
+        local function concat<T>(target: {T}, ...: {T} | T): {T}
+            return (nil :: any) :: {T}
+        end
+
+        local res = concat({"alic"}, 1, 2)
+    )");
+
+    LUAU_REQUIRE_ERRORS(result);
+
+    for (const auto& e : result.errors)
+        CHECK(5 == e.location.begin.line);
 }
 
 TEST_SUITE_END();

@@ -72,11 +72,10 @@ IrValueKind getCmdValueKind(IrCmd cmd)
     case IrCmd::JUMP_IF_TRUTHY:
     case IrCmd::JUMP_IF_FALSY:
     case IrCmd::JUMP_EQ_TAG:
-    case IrCmd::JUMP_EQ_INT:
-    case IrCmd::JUMP_LT_INT:
-    case IrCmd::JUMP_GE_UINT:
+    case IrCmd::JUMP_CMP_INT:
     case IrCmd::JUMP_EQ_POINTER:
     case IrCmd::JUMP_CMP_NUM:
+    case IrCmd::JUMP_FORN_LOOP_COND:
     case IrCmd::JUMP_SLOT_MATCH:
         return IrValueKind::None;
     case IrCmd::TABLE_LEN:
@@ -123,6 +122,7 @@ IrValueKind getCmdValueKind(IrCmd cmd)
     case IrCmd::CHECK_SLOT_MATCH:
     case IrCmd::CHECK_NODE_NO_NEXT:
     case IrCmd::CHECK_NODE_VALUE:
+    case IrCmd::CHECK_BUFFER_LEN:
     case IrCmd::INTERRUPT:
     case IrCmd::CHECK_GC:
     case IrCmd::BARRIER_OBJ:
@@ -164,6 +164,7 @@ IrValueKind getCmdValueKind(IrCmd cmd)
     case IrCmd::BITRROTATE_UINT:
     case IrCmd::BITCOUNTLZ_UINT:
     case IrCmd::BITCOUNTRZ_UINT:
+    case IrCmd::BYTESWAP_UINT:
         return IrValueKind::Int;
     case IrCmd::INVOKE_LIBM:
         return IrValueKind::Double;
@@ -172,6 +173,21 @@ IrValueKind getCmdValueKind(IrCmd cmd)
         return IrValueKind::Pointer;
     case IrCmd::FINDUPVAL:
         return IrValueKind::Pointer;
+    case IrCmd::BUFFER_READI8:
+    case IrCmd::BUFFER_READU8:
+    case IrCmd::BUFFER_READI16:
+    case IrCmd::BUFFER_READU16:
+    case IrCmd::BUFFER_READI32:
+        return IrValueKind::Int;
+    case IrCmd::BUFFER_WRITEI8:
+    case IrCmd::BUFFER_WRITEI16:
+    case IrCmd::BUFFER_WRITEI32:
+    case IrCmd::BUFFER_WRITEF32:
+    case IrCmd::BUFFER_WRITEF64:
+        return IrValueKind::None;
+    case IrCmd::BUFFER_READF32:
+    case IrCmd::BUFFER_READF64:
+        return IrValueKind::Double;
     }
 
     LUAU_UNREACHABLE();
@@ -422,6 +438,45 @@ bool compare(double a, double b, IrCondition cond)
     return false;
 }
 
+bool compare(int a, int b, IrCondition cond)
+{
+    switch (cond)
+    {
+    case IrCondition::Equal:
+        return a == b;
+    case IrCondition::NotEqual:
+        return a != b;
+    case IrCondition::Less:
+        return a < b;
+    case IrCondition::NotLess:
+        return !(a < b);
+    case IrCondition::LessEqual:
+        return a <= b;
+    case IrCondition::NotLessEqual:
+        return !(a <= b);
+    case IrCondition::Greater:
+        return a > b;
+    case IrCondition::NotGreater:
+        return !(a > b);
+    case IrCondition::GreaterEqual:
+        return a >= b;
+    case IrCondition::NotGreaterEqual:
+        return !(a >= b);
+    case IrCondition::UnsignedLess:
+        return unsigned(a) < unsigned(b);
+    case IrCondition::UnsignedLessEqual:
+        return unsigned(a) <= unsigned(b);
+    case IrCondition::UnsignedGreater:
+        return unsigned(a) > unsigned(b);
+    case IrCondition::UnsignedGreaterEqual:
+        return unsigned(a) >= unsigned(b);
+    default:
+        LUAU_ASSERT(!"Unsupported condition");
+    }
+
+    return false;
+}
+
 void foldConstants(IrBuilder& build, IrFunction& function, IrBlock& block, uint32_t index)
 {
     IrInst& inst = function.instructions[index];
@@ -540,31 +595,13 @@ void foldConstants(IrBuilder& build, IrFunction& function, IrBlock& block, uint3
                 replace(function, block, index, {IrCmd::JUMP, inst.d});
         }
         break;
-    case IrCmd::JUMP_EQ_INT:
+    case IrCmd::JUMP_CMP_INT:
         if (inst.a.kind == IrOpKind::Constant && inst.b.kind == IrOpKind::Constant)
         {
-            if (function.intOp(inst.a) == function.intOp(inst.b))
-                replace(function, block, index, {IrCmd::JUMP, inst.c});
-            else
+            if (compare(function.intOp(inst.a), function.intOp(inst.b), conditionOp(inst.c)))
                 replace(function, block, index, {IrCmd::JUMP, inst.d});
-        }
-        break;
-    case IrCmd::JUMP_LT_INT:
-        if (inst.a.kind == IrOpKind::Constant && inst.b.kind == IrOpKind::Constant)
-        {
-            if (function.intOp(inst.a) < function.intOp(inst.b))
-                replace(function, block, index, {IrCmd::JUMP, inst.c});
             else
-                replace(function, block, index, {IrCmd::JUMP, inst.d});
-        }
-        break;
-    case IrCmd::JUMP_GE_UINT:
-        if (inst.a.kind == IrOpKind::Constant && inst.b.kind == IrOpKind::Constant)
-        {
-            if (unsigned(function.intOp(inst.a)) >= unsigned(function.intOp(inst.b)))
-                replace(function, block, index, {IrCmd::JUMP, inst.c});
-            else
-                replace(function, block, index, {IrCmd::JUMP, inst.d});
+                replace(function, block, index, {IrCmd::JUMP, inst.e});
         }
         break;
     case IrCmd::JUMP_CMP_NUM:
@@ -839,6 +876,44 @@ void killUnusedBlocks(IrFunction& function)
         if (block.kind != IrBlockKind::Dead && block.useCount == 0)
             kill(function, block);
     }
+}
+
+std::vector<uint32_t> getSortedBlockOrder(IrFunction& function)
+{
+    std::vector<uint32_t> sortedBlocks;
+    sortedBlocks.reserve(function.blocks.size());
+    for (uint32_t i = 0; i < function.blocks.size(); i++)
+        sortedBlocks.push_back(i);
+
+    std::sort(sortedBlocks.begin(), sortedBlocks.end(), [&](uint32_t idxA, uint32_t idxB) {
+        const IrBlock& a = function.blocks[idxA];
+        const IrBlock& b = function.blocks[idxB];
+
+        // Place fallback blocks at the end
+        if ((a.kind == IrBlockKind::Fallback) != (b.kind == IrBlockKind::Fallback))
+            return (a.kind == IrBlockKind::Fallback) < (b.kind == IrBlockKind::Fallback);
+
+        // Try to order by instruction order
+        if (a.sortkey != b.sortkey)
+            return a.sortkey < b.sortkey;
+
+        // Chains of blocks are merged together by having the same sort key and consecutive chain key
+        return a.chainkey < b.chainkey;
+    });
+
+    return sortedBlocks;
+}
+
+IrBlock& getNextBlock(IrFunction& function, const std::vector<uint32_t>& sortedBlocks, IrBlock& dummy, size_t i)
+{
+    for (size_t j = i + 1; j < sortedBlocks.size(); ++j)
+    {
+        IrBlock& block = function.blocks[sortedBlocks[j]];
+        if (block.kind != IrBlockKind::Dead)
+            return block;
+    }
+
+    return dummy;
 }
 
 } // namespace CodeGen

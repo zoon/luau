@@ -199,24 +199,12 @@ enum class IrCmd : uint8_t
     // D: block (if false)
     JUMP_EQ_TAG,
 
-    // Jump if two int numbers are equal
-    // A, B: int
-    // C: block (if true)
-    // D: block (if false)
-    JUMP_EQ_INT,
-
-    // Jump if A < B
-    // A, B: int
-    // C: block (if true)
-    // D: block (if false)
-    JUMP_LT_INT,
-
-    // Jump if unsigned(A) >= unsigned(B)
+    // Perform a conditional jump based on the result of integer comparison
     // A, B: int
     // C: condition
     // D: block (if true)
     // E: block (if false)
-    JUMP_GE_UINT,
+    JUMP_CMP_INT,
 
     // Jump if pointers are equal
     // A, B: pointer (*)
@@ -230,6 +218,14 @@ enum class IrCmd : uint8_t
     // D: block (if true)
     // E: block (if false)
     JUMP_CMP_NUM,
+
+    // Perform jump based on a numerical loop condition (step > 0 ? idx <= limit : limit <= idx)
+    // A: double (index)
+    // B: double (limit)
+    // C: double (step)
+    // D: block (if true)
+    // E: block (if false)
+    JUMP_FORN_LOOP_COND,
 
     // Perform a conditional jump based on cached table node slot matching the actual table node slot for a key
     // A: pointer (LuaNode)
@@ -255,7 +251,7 @@ enum class IrCmd : uint8_t
     // A: pointer (Table)
     DUP_TABLE,
 
-    // Insert an integer key into a table
+    // Insert an integer key into a table and return the pointer to inserted value (TValue)
     // A: pointer (Table)
     // B: int (key)
     TABLE_SETNUM,
@@ -285,7 +281,7 @@ enum class IrCmd : uint8_t
     NUM_TO_UINT,
 
     // Adjust stack top (L->top) to point at 'B' TValues *after* the specified register
-    // This is used to return muliple values
+    // This is used to return multiple values
     // A: Rn
     // B: int (offset)
     ADJUST_STACK_TO_REG,
@@ -423,6 +419,14 @@ enum class IrCmd : uint8_t
     // B: block/vmexit/undef
     // When undef is specified instead of a block, execution is aborted on check failure
     CHECK_NODE_VALUE,
+
+    // Guard against access at specified offset/size overflowing the buffer length
+    // A: pointer (buffer)
+    // B: int (offset)
+    // C: int (size)
+    // D: block/vmexit/undef
+    // When undef is specified instead of a block, execution is aborted on check failure
+    CHECK_BUFFER_LEN,
 
     // Special operations
 
@@ -604,6 +608,10 @@ enum class IrCmd : uint8_t
     BITCOUNTLZ_UINT,
     BITCOUNTRZ_UINT,
 
+    // Swap byte order in A
+    // A: int
+    BYTESWAP_UINT,
+
     // Calls native libm function with 1 or 2 arguments
     // A: builtin function ID
     // B: double
@@ -621,6 +629,71 @@ enum class IrCmd : uint8_t
     // Find or create an upval at the given level
     // A: Rn (level)
     FINDUPVAL,
+
+    // Read i8 (sign-extended to int) from buffer storage at specified offset
+    // A: pointer (buffer)
+    // B: int (offset)
+    BUFFER_READI8,
+
+    // Read u8 (zero-extended to int) from buffer storage at specified offset
+    // A: pointer (buffer)
+    // B: int (offset)
+    BUFFER_READU8,
+
+    // Write i8/u8 value (int argument is truncated) to buffer storage at specified offset
+    // A: pointer (buffer)
+    // B: int (offset)
+    // C: int (value)
+    BUFFER_WRITEI8,
+
+    // Read i16 (sign-extended to int) from buffer storage at specified offset
+    // A: pointer (buffer)
+    // B: int (offset)
+    BUFFER_READI16,
+
+    // Read u16 (zero-extended to int) from buffer storage at specified offset
+    // A: pointer (buffer)
+    // B: int (offset)
+    BUFFER_READU16,
+
+    // Write i16/u16 value (int argument is truncated) to buffer storage at specified offset
+    // A: pointer (buffer)
+    // B: int (offset)
+    // C: int (value)
+    BUFFER_WRITEI16,
+
+    // Read i32 value from buffer storage at specified offset
+    // A: pointer (buffer)
+    // B: int (offset)
+    BUFFER_READI32,
+
+    // Write i32/u32 value to buffer storage at specified offset
+    // A: pointer (buffer)
+    // B: int (offset)
+    // C: int (value)
+    BUFFER_WRITEI32,
+
+    // Read float value (converted to double) from buffer storage at specified offset
+    // A: pointer (buffer)
+    // B: int (offset)
+    BUFFER_READF32,
+
+    // Write float value (converted from double) to buffer storage at specified offset
+    // A: pointer (buffer)
+    // B: int (offset)
+    // C: double (value)
+    BUFFER_WRITEF32,
+
+    // Read double value from buffer storage at specified offset
+    // A: pointer (buffer)
+    // B: int (offset)
+    BUFFER_READF64,
+
+    // Write double value to buffer storage at specified offset
+    // A: pointer (buffer)
+    // B: int (offset)
+    // C: double (value)
+    BUFFER_WRITEF64,
 };
 
 enum class IrConstKind : uint8_t

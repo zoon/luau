@@ -1317,16 +1317,52 @@ end
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_nested_type_group")
 {
-    ScopedFastInt sfis{"LuauRecursionLimit", 20};
+    ScopedFastInt sfis{"LuauRecursionLimit", 10};
 
     matchParseError(
-        "function f(): (((((((((Fail))))))))) end", "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
+        "function f(): ((((((((((Fail)))))))))) end", "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
 
     matchParseError("function f(): () -> () -> () -> () -> () -> () -> () -> () -> () -> () -> () end",
         "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
 
-    matchParseError(
-        "local t: {a: {b: {c: {d: {e: {f: {}}}}}}}", "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
+    matchParseError("local t: {a: {b: {c: {d: {e: {f: {g: {h: {i: {j: {}}}}}}}}}}}",
+        "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
+
+    matchParseError("local f: ((((((((((Fail))))))))))", "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
+
+    matchParseError("local t: a & (b & (c & (d & (e & (f & (g & (h & (i & (j & nil)))))))))",
+        "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
+}
+
+TEST_CASE_FIXTURE(Fixture, "can_parse_complex_unions_successfully")
+{
+    ScopedFastInt sfis[] = {{"LuauRecursionLimit", 10}, {"LuauTypeLengthLimit", 10}};
+
+    parse(R"(
+local f:
+() -> ()
+|
+() -> ()
+|
+{a: number}
+|
+{b: number}
+|
+((number))
+|
+((number))
+|
+(a & (b & nil))
+|
+(a & (b & nil))
+)");
+
+    parse(R"(
+local f: a? | b? | c? | d? | e? | f? | g? | h?
+)");
+
+    matchParseError("local t: a & b & c & d & e & f & g & h & i & j & nil",
+        "Exceeded allowed type length; simplify your type annotation to make the code compile");
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_nested_if_statements")
@@ -1922,8 +1958,6 @@ TEST_CASE_FIXTURE(Fixture, "class_method_properties")
 
 TEST_CASE_FIXTURE(Fixture, "class_indexer")
 {
-    ScopedFastFlag LuauParseDeclareClassIndexer("LuauParseDeclareClassIndexer", true);
-
     AstStatBlock* stat = parseEx(R"(
         declare class Foo
             prop: boolean
@@ -3004,6 +3038,112 @@ TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_with_lookahead_involved2")
     )");
 
     REQUIRE_MESSAGE(result.errors.empty(), result.errors[0].getMessage());
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_top_level_checked_fn")
+{
+    ParseOptions opts;
+    opts.allowDeclarationSyntax = true;
+    ScopedFastFlag sff{"LuauCheckedFunctionSyntax", true};
+
+    std::string src = R"BUILTIN_SRC(
+declare function @checked abs(n: number): number
+)BUILTIN_SRC";
+
+    ParseResult pr = tryParse(src, opts);
+    LUAU_ASSERT(pr.errors.size() == 0);
+
+    LUAU_ASSERT(pr.root->body.size == 1);
+    AstStat* root = *(pr.root->body.data);
+    auto func = root->as<AstStatDeclareFunction>();
+    LUAU_ASSERT(func);
+    LUAU_ASSERT(func->checkedFunction);
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_declared_table_checked_member")
+{
+    ParseOptions opts;
+    opts.allowDeclarationSyntax = true;
+    ScopedFastFlag sff{"LuauCheckedFunctionSyntax", true};
+
+    const std::string src = R"BUILTIN_SRC(
+    declare math : {
+        abs : @checked (number) -> number
+}
+)BUILTIN_SRC";
+
+    ParseResult pr = tryParse(src, opts);
+    LUAU_ASSERT(pr.errors.size() == 0);
+
+    LUAU_ASSERT(pr.root->body.size == 1);
+    AstStat* root = *(pr.root->body.data);
+    auto glob = root->as<AstStatDeclareGlobal>();
+    LUAU_ASSERT(glob);
+    auto tbl = glob->type->as<AstTypeTable>();
+    LUAU_ASSERT(tbl);
+    LUAU_ASSERT(tbl->props.size == 1);
+    auto prop = *tbl->props.data;
+    auto func = prop.type->as<AstTypeFunction>();
+    LUAU_ASSERT(func);
+    LUAU_ASSERT(func->checkedFunction);
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_checked_outside_decl_fails")
+{
+    ParseOptions opts;
+    opts.allowDeclarationSyntax = true;
+    ScopedFastFlag sff{"LuauCheckedFunctionSyntax", true};
+
+    ParseResult pr = tryParse(R"(
+    local @checked = 3
+)",
+        opts);
+    LUAU_ASSERT(pr.errors.size() > 0);
+    auto ts = pr.errors[1].getMessage();
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_checked_in_and_out_of_decl_fails")
+{
+    ParseOptions opts;
+    opts.allowDeclarationSyntax = true;
+    ScopedFastFlag sff{"LuauCheckedFunctionSyntax", true};
+
+    auto pr = tryParse(R"(
+    local @checked = 3
+    declare function @checked abs(n: number): number
+)",
+        opts);
+    LUAU_ASSERT(pr.errors.size() == 2);
+    LUAU_ASSERT(pr.errors[0].getLocation().begin.line == 1);
+    LUAU_ASSERT(pr.errors[1].getLocation().begin.line == 1);
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_checked_as_function_name_fails")
+{
+    ParseOptions opts;
+    opts.allowDeclarationSyntax = true;
+    ScopedFastFlag sff{"LuauCheckedFunctionSyntax", true};
+
+    auto pr = tryParse(R"(
+    function @checked(x: number) : number
+    end
+)",
+        opts);
+    LUAU_ASSERT(pr.errors.size() > 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "cannot_use_@_as_variable_name")
+{
+    ParseOptions opts;
+    opts.allowDeclarationSyntax = true;
+    ScopedFastFlag sff{"LuauCheckedFunctionSyntax", true};
+
+    auto pr = tryParse(R"(
+    local @blah = 3
+)",
+        opts);
+
+    LUAU_ASSERT(pr.errors.size() > 0);
 }
 
 TEST_SUITE_END();

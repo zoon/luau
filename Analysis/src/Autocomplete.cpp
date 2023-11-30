@@ -5,6 +5,7 @@
 #include "Luau/BuiltinDefinitions.h"
 #include "Luau/Frontend.h"
 #include "Luau/ToString.h"
+#include "Luau/Subtyping.h"
 #include "Luau/TypeInfer.h"
 #include "Luau/TypePack.h"
 
@@ -12,10 +13,10 @@
 #include <unordered_set>
 #include <utility>
 
-LUAU_FASTFLAG(DebugLuauReadWriteProperties)
-LUAU_FASTFLAGVARIABLE(LuauAnonymousAutofilled1, false);
-LUAU_FASTFLAGVARIABLE(LuauAutocompleteLastTypecheck, false)
-LUAU_FASTFLAGVARIABLE(LuauAutocompleteDoEnd, false)
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAG(DebugLuauReadWriteProperties);
+LUAU_FASTFLAG(LuauClipExtraHasEndProps);
+LUAU_FASTFLAGVARIABLE(LuauAutocompleteDoEnd, false);
 LUAU_FASTFLAGVARIABLE(LuauAutocompleteStringLiteralBounds, false);
 
 static const std::unordered_set<std::string> kStatementStartingKeywords = {
@@ -144,13 +145,24 @@ static bool checkTypeMatch(TypeId subTy, TypeId superTy, NotNull<Scope> scope, T
     InternalErrorReporter iceReporter;
     UnifierSharedState unifierState(&iceReporter);
     Normalizer normalizer{typeArena, builtinTypes, NotNull{&unifierState}};
-    Unifier unifier(NotNull<Normalizer>{&normalizer}, scope, Location(), Variance::Covariant);
 
-    // Cost of normalization can be too high for autocomplete response time requirements
-    unifier.normalize = false;
-    unifier.checkInhabited = false;
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        Subtyping subtyping{builtinTypes, NotNull{typeArena}, NotNull{&normalizer}, NotNull{&iceReporter}, scope};
 
-    return unifier.canUnify(subTy, superTy).empty();
+        return subtyping.isSubtype(subTy, superTy).isSubtype;
+    }
+    else
+    {
+        Unifier unifier(NotNull<Normalizer>{&normalizer}, scope, Location(), Variance::Covariant);
+
+        // Cost of normalization can be too high for autocomplete response time requirements
+        unifier.normalize = false;
+        unifier.checkInhabited = false;
+
+        return unifier.canUnify(subTy, superTy).empty();
+    }
+
 }
 
 static TypeCorrectKind checkTypeCorrectKind(
@@ -284,20 +296,8 @@ static void autocompleteProps(const Module& module, TypeArena* typeArena, NotNul
                 ParenthesesRecommendation parens =
                     indexType == PropIndexType::Key ? ParenthesesRecommendation::None : getParenRecommendation(type, nodes, typeCorrect);
 
-                result[name] = AutocompleteEntry{
-                    AutocompleteEntryKind::Property,
-                    type,
-                    prop.deprecated,
-                    isWrongIndexer(type),
-                    typeCorrect,
-                    containingClass,
-                    &prop,
-                    prop.documentationSymbol,
-                    {},
-                    parens,
-                    {},
-                    indexType == PropIndexType::Colon
-                };
+                result[name] = AutocompleteEntry{AutocompleteEntryKind::Property, type, prop.deprecated, isWrongIndexer(type), typeCorrect,
+                    containingClass, &prop, prop.documentationSymbol, {}, parens, {}, indexType == PropIndexType::Colon};
             }
         }
     };
@@ -608,10 +608,9 @@ std::optional<TypeId> getLocalTypeInScopeAt(const Module& module, Position posit
     return {};
 }
 
-template <typename T>
+template<typename T>
 static std::optional<std::string> tryToStringDetailed(const ScopePtr& scope, T ty, bool functionTypeArguments)
 {
-    LUAU_ASSERT(FFlag::LuauAnonymousAutofilled1);
     ToStringOptions opts;
     opts.useLineBreaks = false;
     opts.hideTableKind = true;
@@ -630,23 +629,7 @@ static std::optional<Name> tryGetTypeNameInScope(ScopePtr scope, TypeId ty, bool
     if (!canSuggestInferredType(scope, ty))
         return std::nullopt;
 
-    if (FFlag::LuauAnonymousAutofilled1)
-    {
-        return tryToStringDetailed(scope, ty, functionTypeArguments);
-    }
-    else
-    {
-        ToStringOptions opts;
-        opts.useLineBreaks = false;
-        opts.hideTableKind = true;
-        opts.scope = scope;
-        ToStringResult name = toStringDetailed(ty, opts);
-
-        if (name.error || name.invalid || name.cycle || name.truncated)
-            return std::nullopt;
-
-        return name.name;
-    }
+    return tryToStringDetailed(scope, ty, functionTypeArguments);
 }
 
 static bool tryAddTypeCorrectSuggestion(AutocompleteEntryMap& result, ScopePtr scope, AstType* topType, TypeId inferredType, Position position)
@@ -1086,22 +1069,56 @@ static AutocompleteEntryMap autocompleteStatement(
     for (const auto& kw : kStatementStartingKeywords)
         result.emplace(kw, AutocompleteEntry{AutocompleteEntryKind::Keyword});
 
-    for (auto it = ancestry.rbegin(); it != ancestry.rend(); ++it)
+    if (FFlag::LuauClipExtraHasEndProps)
     {
-        if (AstStatForIn* statForIn = (*it)->as<AstStatForIn>(); statForIn && !statForIn->hasEnd)
-            result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
-        else if (AstStatFor* statFor = (*it)->as<AstStatFor>(); statFor && !statFor->hasEnd)
-            result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
-        else if (AstStatIf* statIf = (*it)->as<AstStatIf>(); statIf && !statIf->hasEnd)
-            result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
-        else if (AstStatWhile* statWhile = (*it)->as<AstStatWhile>(); statWhile && !statWhile->hasEnd)
-            result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
-        else if (AstExprFunction* exprFunction = (*it)->as<AstExprFunction>(); exprFunction && !exprFunction->hasEnd)
-            result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
-        if (FFlag::LuauAutocompleteDoEnd)
+        for (auto it = ancestry.rbegin(); it != ancestry.rend(); ++it)
         {
-            if (AstStatBlock* exprBlock = (*it)->as<AstStatBlock>(); exprBlock && !exprBlock->hasEnd)
+            if (AstStatForIn* statForIn = (*it)->as<AstStatForIn>(); statForIn && !statForIn->body->hasEnd)
                 result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+            else if (AstStatFor* statFor = (*it)->as<AstStatFor>(); statFor && !statFor->body->hasEnd)
+                result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+            else if (AstStatIf* statIf = (*it)->as<AstStatIf>())
+            {
+                bool hasEnd = statIf->thenbody->hasEnd;
+                if (statIf->elsebody)
+                {
+                    if (AstStatBlock* elseBlock = statIf->elsebody->as<AstStatBlock>())
+                        hasEnd = elseBlock->hasEnd;
+                }
+
+                if (!hasEnd)
+                    result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+            }
+            else if (AstStatWhile* statWhile = (*it)->as<AstStatWhile>(); statWhile && !statWhile->body->hasEnd)
+                result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+            else if (AstExprFunction* exprFunction = (*it)->as<AstExprFunction>(); exprFunction && !exprFunction->body->hasEnd)
+                result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+            if (FFlag::LuauAutocompleteDoEnd)
+            {
+                if (AstStatBlock* exprBlock = (*it)->as<AstStatBlock>(); exprBlock && !exprBlock->hasEnd)
+                    result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+            }
+        }
+    }
+    else
+    {
+        for (auto it = ancestry.rbegin(); it != ancestry.rend(); ++it)
+        {
+            if (AstStatForIn* statForIn = (*it)->as<AstStatForIn>(); statForIn && !statForIn->DEPRECATED_hasEnd)
+                result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+            else if (AstStatFor* statFor = (*it)->as<AstStatFor>(); statFor && !statFor->DEPRECATED_hasEnd)
+                result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+            else if (AstStatIf* statIf = (*it)->as<AstStatIf>(); statIf && !statIf->DEPRECATED_hasEnd)
+                result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+            else if (AstStatWhile* statWhile = (*it)->as<AstStatWhile>(); statWhile && !statWhile->DEPRECATED_hasEnd)
+                result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+            else if (AstExprFunction* exprFunction = (*it)->as<AstExprFunction>(); exprFunction && !exprFunction->DEPRECATED_hasEnd)
+                result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+            if (FFlag::LuauAutocompleteDoEnd)
+            {
+                if (AstStatBlock* exprBlock = (*it)->as<AstStatBlock>(); exprBlock && !exprBlock->hasEnd)
+                    result.emplace("end", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+            }
         }
     }
 
@@ -1117,8 +1134,16 @@ static AutocompleteEntryMap autocompleteStatement(
             }
         }
 
-        if (AstStatRepeat* statRepeat = parent->as<AstStatRepeat>(); statRepeat && !statRepeat->hasUntil)
-            result.emplace("until", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+        if (FFlag::LuauClipExtraHasEndProps)
+        {
+            if (AstStatRepeat* statRepeat = parent->as<AstStatRepeat>(); statRepeat && !statRepeat->body->hasEnd)
+                result.emplace("until", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+        }
+        else
+        {
+            if (AstStatRepeat* statRepeat = parent->as<AstStatRepeat>(); statRepeat && !statRepeat->DEPRECATED_hasUntil)
+                result.emplace("until", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+        }
     }
 
     if (ancestry.size() >= 4)
@@ -1132,8 +1157,16 @@ static AutocompleteEntryMap autocompleteStatement(
         }
     }
 
-    if (AstStatRepeat* statRepeat = extractStat<AstStatRepeat>(ancestry); statRepeat && !statRepeat->hasUntil)
-        result.emplace("until", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+    if (FFlag::LuauClipExtraHasEndProps)
+    {
+        if (AstStatRepeat* statRepeat = extractStat<AstStatRepeat>(ancestry); statRepeat && !statRepeat->body->hasEnd)
+            result.emplace("until", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+    }
+    else
+    {
+        if (AstStatRepeat* statRepeat = extractStat<AstStatRepeat>(ancestry); statRepeat && !statRepeat->DEPRECATED_hasUntil)
+            result.emplace("until", AutocompleteEntry{AutocompleteEntryKind::Keyword});
+    }
 
     return result;
 }
@@ -1417,7 +1450,6 @@ static AutocompleteResult autocompleteWhileLoopKeywords(std::vector<AstNode*> an
 
 static std::string makeAnonymous(const ScopePtr& scope, const FunctionType& funcTy)
 {
-    LUAU_ASSERT(FFlag::LuauAnonymousAutofilled1);
     std::string result = "function(";
 
     auto [args, tail] = Luau::flatten(funcTy.argTypes);
@@ -1438,7 +1470,7 @@ static std::string makeAnonymous(const ScopePtr& scope, const FunctionType& func
             name = "a" + std::to_string(argIdx);
 
         if (std::optional<Name> type = tryGetTypeNameInScope(scope, args[argIdx], true))
-            result += name + ": " + *type; 
+            result += name + ": " + *type;
         else
             result += name;
     }
@@ -1454,7 +1486,7 @@ static std::string makeAnonymous(const ScopePtr& scope, const FunctionType& func
             if (std::optional<std::string> res = tryToStringDetailed(scope, pack->ty, true))
                 varArgType = std::move(res);
         }
-        
+
         if (varArgType)
             result += "...: " + *varArgType;
         else
@@ -1481,9 +1513,9 @@ static std::string makeAnonymous(const ScopePtr& scope, const FunctionType& func
     return result;
 }
 
-static std::optional<AutocompleteEntry> makeAnonymousAutofilled(const ModulePtr& module, Position position, const AstNode* node, const std::vector<AstNode*>& ancestry)
+static std::optional<AutocompleteEntry> makeAnonymousAutofilled(
+    const ModulePtr& module, Position position, const AstNode* node, const std::vector<AstNode*>& ancestry)
 {
-    LUAU_ASSERT(FFlag::LuauAnonymousAutofilled1);
     const AstExprCall* call = node->as<AstExprCall>();
     if (!call && ancestry.size() > 1)
         call = ancestry[ancestry.size() - 2]->as<AstExprCall>();
@@ -1519,10 +1551,10 @@ static std::optional<AutocompleteEntry> makeAnonymousAutofilled(const ModulePtr&
     auto [args, tail] = flatten(outerFunction->argTypes);
     if (argument < args.size())
         argType = args[argument];
-    
+
     if (!argType)
         return std::nullopt;
-    
+
     TypeId followed = follow(*argType);
     const FunctionType* type = get<FunctionType>(followed);
     if (!type)
@@ -1801,17 +1833,10 @@ static AutocompleteResult autocomplete(const SourceModule& sourceModule, const M
 
     if (node->asExpr())
     {
-        if (FFlag::LuauAnonymousAutofilled1)
-        {
-            AutocompleteResult ret = autocompleteExpression(sourceModule, *module, builtinTypes, typeArena, ancestry, position);
-            if (std::optional<AutocompleteEntry> generated = makeAnonymousAutofilled(module, position, node, ancestry))
-                ret.entryMap[kGeneratedAnonymousFunctionEntryName] = std::move(*generated);
-            return ret;
-        }
-        else
-        {
-            return autocompleteExpression(sourceModule, *module, builtinTypes, typeArena, ancestry, position);
-        }
+        AutocompleteResult ret = autocompleteExpression(sourceModule, *module, builtinTypes, typeArena, ancestry, position);
+        if (std::optional<AutocompleteEntry> generated = makeAnonymousAutofilled(module, position, node, ancestry))
+            ret.entryMap[kGeneratedAnonymousFunctionEntryName] = std::move(*generated);
+        return ret;
     }
     else if (node->asStat())
         return {autocompleteStatement(sourceModule, *module, ancestry, position), ancestry, AutocompleteContext::Statement};
@@ -1821,15 +1846,6 @@ static AutocompleteResult autocomplete(const SourceModule& sourceModule, const M
 
 AutocompleteResult autocomplete(Frontend& frontend, const ModuleName& moduleName, Position position, StringCompletionCallback callback)
 {
-    if (!FFlag::LuauAutocompleteLastTypecheck)
-    {
-        // FIXME: We can improve performance here by parsing without checking.
-        // The old type graph is probably fine. (famous last words!)
-        FrontendOptions opts;
-        opts.forAutocomplete = true;
-        frontend.check(moduleName, opts);
-    }
-
     const SourceModule* sourceModule = frontend.getSourceModule(moduleName);
     if (!sourceModule)
         return {};

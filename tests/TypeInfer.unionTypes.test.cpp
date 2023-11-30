@@ -222,9 +222,9 @@ TEST_CASE_FIXTURE(Fixture, "union_equality_comparisons")
         type B = number | nil
         type C = number | boolean
 
-        local a: A = 1
-        local b: B = nil
-        local c: C = true
+        local a = 1 :: A
+        local b = nil :: B
+        local c = true :: C
         local n = 1
 
         local x = a == b
@@ -356,7 +356,10 @@ a.x = 2
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
     auto s = toString(result.errors[0]);
-    CHECK_EQ("Value of type '({| x: number |} & {| y: number |})?' could be nil", s);
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK_EQ("Value of type '({ x: number } & { y: number })?' could be nil", s);
+    else
+        CHECK_EQ("Value of type '({| x: number |} & {| y: number |})?' could be nil", s);
 }
 
 TEST_CASE_FIXTURE(Fixture, "optional_length_error")
@@ -471,11 +474,20 @@ local b: { w: number } = a
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    const std::string expected = R"(Type 'X | Y | Z' could not be converted into '{| w: number |}'
-caused by:
-  Not all union options are compatible. 
-Table type 'X' not compatible with type '{| w: number |}' because the former is missing field 'w')";
-    CHECK_EQ(expected, toString(result.errors[0]));
+    TypeMismatch* tm = get<TypeMismatch>(result.errors[0]);
+    REQUIRE(tm);
+
+    CHECK_EQ(tm->reason, "Not all union options are compatible.");
+
+    CHECK_EQ("X | Y | Z", toString(tm->givenType));
+
+    const TableType* expected = get<TableType>(tm->wantedType);
+    REQUIRE(expected);
+    CHECK_EQ(TableState::Sealed, expected->state);
+    CHECK_EQ(1, expected->props.size());
+    auto propW = expected->props.find("w");
+    REQUIRE_NE(expected->props.end(), propW);
+    CHECK_EQ("number", toString(propW->second.type()));
 }
 
 TEST_CASE_FIXTURE(Fixture, "error_detailed_union_all")
@@ -505,7 +517,7 @@ local a: X? = { w = 4 }
     LUAU_REQUIRE_ERROR_COUNT(1, result);
     const std::string expected = R"(Type 'a' could not be converted into 'X?'
 caused by:
-  None of the union options are compatible. For example: 
+  None of the union options are compatible. For example:
 Table type 'a' not compatible with type 'X' because the former is missing field 'x')";
     CHECK_EQ(expected, toString(result.errors[0]));
 }
@@ -744,7 +756,10 @@ TEST_CASE_FIXTURE(Fixture, "less_greedy_unification_with_union_types_2")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ("({| x: number |} | {| x: string |}) -> number | string", toString(requireType("f")));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK_EQ("({ x: number } | { x: string }) -> number | string", toString(requireType("f")));
+    else
+        CHECK_EQ("({| x: number |} | {| x: string |}) -> number | string", toString(requireType("f")));
 }
 
 TEST_CASE_FIXTURE(Fixture, "union_table_any_property")
@@ -828,7 +843,7 @@ TEST_CASE_FIXTURE(Fixture, "suppress_errors_for_prop_lookup_of_a_union_that_incl
     registerHiddenTypes(&frontend);
 
     CheckResult result = check(R"(
-        local a : err | Not<nil>
+        local a = 5 :: err | Not<nil>
 
         local b = a.foo
     )");

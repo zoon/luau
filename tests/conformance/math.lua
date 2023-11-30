@@ -61,6 +61,7 @@ assert(1111111111111111-1111111111111110== 1000.00e-03)
 --     1234567890123456
 assert(1.1 == '1.'+'.1')
 assert('1111111111111111'-'1111111111111110' == tonumber"  +0.001e+3 \n\t")
+assert(10000000000000001 == 10000000000000000)
 
 function eq (a,b,limit)
   if not limit then limit = 10E-10 end
@@ -187,6 +188,26 @@ do   -- testing NaN
   a[1] = 1
   assert(not pcall(function () a[NaN] = 1 end))
   assert(a[NaN] == nil)
+end
+
+-- extra NaN tests, hidden in a function
+do
+  function neq(a) return a ~= a end
+  function eq(a) return a == a end
+  function lt(a) return a < a end
+  function le(a) return a <= a end
+  function gt(a) return a > a end
+  function ge(a) return a >= a end
+
+  local NaN -- to avoid constant folding
+  NaN = 10e500 - 10e400
+
+  assert(neq(NaN))
+  assert(not eq(NaN))
+  assert(not lt(NaN))
+  assert(not le(NaN))
+  assert(not gt(NaN))
+  assert(not ge(NaN))
 end
 
 -- require "checktable"
@@ -326,7 +347,7 @@ assert(math.log10("10") == 1)
 assert(math.log("0") == -inf)
 assert(math.log("8", 2) == 3)
 assert(math.log("10", 10) == 1)
-assert(math.log("9", 3) == 2)
+assert(math.log("16", 4) == 2)
 assert(math.max("1", 2) == 2)
 assert(math.max(2, "1") == 2)
 assert(math.max(1, 2, "3") == 3)

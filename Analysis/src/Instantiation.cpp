@@ -7,6 +7,8 @@
 #include "Luau/TypeArena.h"
 #include "Luau/TypeCheckLimits.h"
 
+#include <algorithm>
+
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
 
 namespace Luau
@@ -174,7 +176,8 @@ struct Replacer : Substitution
     }
 };
 
-std::optional<TypeId> instantiate(NotNull<BuiltinTypes> builtinTypes, NotNull<TypeArena> arena, NotNull<TypeCheckLimits> limits, NotNull<Scope> scope, TypeId ty)
+std::optional<TypeId> instantiate(
+    NotNull<BuiltinTypes> builtinTypes, NotNull<TypeArena> arena, NotNull<TypeCheckLimits> limits, NotNull<Scope> scope, TypeId ty)
 {
     ty = follow(ty);
 

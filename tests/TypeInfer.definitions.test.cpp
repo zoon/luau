@@ -397,8 +397,6 @@ TEST_CASE_FIXTURE(Fixture, "class_definition_string_props")
 
 TEST_CASE_FIXTURE(Fixture, "class_definition_indexer")
 {
-    ScopedFastFlag LuauParseDeclareClassIndexer("LuauParseDeclareClassIndexer", true);
-
     loadDefinition(R"(
         declare class Foo
             [number]: string
@@ -441,6 +439,29 @@ TEST_CASE_FIXTURE(Fixture, "class_definitions_reference_other_classes")
     freeze(frontend.globals.globalTypes);
 
     REQUIRE(result.success);
+}
+
+TEST_CASE_FIXTURE(Fixture, "definition_file_has_source_module_name_set")
+{
+    ScopedFastFlag sff{"LuauDefinitionFileSetModuleName", true};
+
+    LoadDefinitionFileResult result = loadDefinition(R"(
+        declare class Foo
+        end
+    )");
+
+    REQUIRE(result.success);
+
+    CHECK_EQ(result.sourceModule.name, "@test");
+    CHECK_EQ(result.sourceModule.humanReadableName, "@test");
+
+    std::optional<TypeFun> fooTy = frontend.globals.globalScope->lookupType("Foo");
+    REQUIRE(fooTy);
+
+    const ClassType* ctv = get<ClassType>(fooTy->type);
+
+    REQUIRE(ctv);
+    CHECK_EQ(ctv->definitionModuleName, "@test");
 }
 
 TEST_SUITE_END();

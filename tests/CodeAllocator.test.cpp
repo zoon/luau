@@ -57,8 +57,7 @@ TEST_CASE("CodeAllocationCallbacks")
 
     AllocationData allocationData{};
 
-    const auto allocationCallback = [](void* context, void* oldPointer, size_t oldSize, void* newPointer, size_t newSize)
-    {
+    const auto allocationCallback = [](void* context, void* oldPointer, size_t oldSize, void* newPointer, size_t newSize) {
         AllocationData& allocationData = *static_cast<AllocationData*>(context);
         if (oldPointer != nullptr)
         {
@@ -275,6 +274,9 @@ constexpr X64::RegisterX64 rNonVol4 = X64::r14;
 
 TEST_CASE("GeneratedCodeExecutionX64")
 {
+    if (!Luau::CodeGen::isSupported())
+        return;
+
     using namespace X64;
 
     AssemblyBuilderX64 build(/* logText= */ false);
@@ -316,6 +318,9 @@ static void nonthrowing(int64_t arg)
 
 TEST_CASE("GeneratedCodeExecutionWithThrowX64")
 {
+    if (!Luau::CodeGen::isSupported())
+        return;
+
     using namespace X64;
 
     AssemblyBuilderX64 build(/* logText= */ false);
@@ -514,6 +519,9 @@ TEST_CASE("GeneratedCodeExecutionWithThrowX64Simd")
 
 TEST_CASE("GeneratedCodeExecutionMultipleFunctionsWithThrowX64")
 {
+    if (!Luau::CodeGen::isSupported())
+        return;
+
     using namespace X64;
 
     AssemblyBuilderX64 build(/* logText= */ false);
@@ -651,6 +659,9 @@ TEST_CASE("GeneratedCodeExecutionMultipleFunctionsWithThrowX64")
 
 TEST_CASE("GeneratedCodeExecutionWithThrowOutsideTheGateX64")
 {
+    if (!Luau::CodeGen::isSupported())
+        return;
+
     using namespace X64;
 
     AssemblyBuilderX64 build(/* logText= */ false);

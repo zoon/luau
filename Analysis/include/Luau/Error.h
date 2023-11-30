@@ -5,6 +5,9 @@
 #include "Luau/NotNull.h"
 #include "Luau/Type.h"
 #include "Luau/Variant.h"
+#include "Luau/Ast.h"
+
+#include <set>
 
 namespace Luau
 {
@@ -319,6 +322,7 @@ struct TypePackMismatch
 {
     TypePackId wantedTp;
     TypePackId givenTp;
+    std::string reason;
 
     bool operator==(const TypePackMismatch& rhs) const;
 };
@@ -358,13 +362,23 @@ struct PackWhereClauseNeeded
     bool operator==(const PackWhereClauseNeeded& rhs) const;
 };
 
+struct CheckedFunctionCallError
+{
+    TypeId expected;
+    TypeId passed;
+    std::string checkedFunctionName;
+    // TODO: make this a vector<argumentIndices>
+    size_t argumentIndex;
+    bool operator==(const CheckedFunctionCallError& rhs) const;
+};
+
 using TypeErrorData = Variant<TypeMismatch, UnknownSymbol, UnknownProperty, NotATable, CannotExtendTable, OnlyTablesCanHaveMethods,
     DuplicateTypeDefinition, CountMismatch, FunctionDoesNotTakeSelf, FunctionRequiresSelf, OccursCheckFailed, UnknownRequire,
     IncorrectGenericParameterCount, SyntaxError, CodeTooComplex, UnificationTooComplex, UnknownPropButFoundLikeProp, GenericError, InternalError,
     CannotCallNonFunction, ExtraInformation, DeprecatedApiUsed, ModuleHasCyclicDependency, IllegalRequire, FunctionExitsWithoutReturning,
     DuplicateGenericParameter, CannotInferBinaryOperation, MissingProperties, SwappedGenericTypeParameter, OptionalValueAccess, MissingUnionProperty,
     TypesAreUnrelated, NormalizationTooComplex, TypePackMismatch, DynamicPropertyLookupOnClassesUnsafe, UninhabitedTypeFamily,
-    UninhabitedTypePackFamily, WhereClauseNeeded, PackWhereClauseNeeded>;
+    UninhabitedTypePackFamily, WhereClauseNeeded, PackWhereClauseNeeded, CheckedFunctionCallError>;
 
 struct TypeErrorSummary
 {

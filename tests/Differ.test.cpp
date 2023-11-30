@@ -154,7 +154,7 @@ TEST_CASE_FIXTURE(DifferFixture, "left_cyclic_table_right_table_property_wrong")
     local function id<a>(x: a): a
       return x
     end
-    
+
     -- Remove name from cyclic table
     local foo = id({})
     foo.foo = foo
@@ -172,7 +172,7 @@ TEST_CASE_FIXTURE(DifferFixture, "right_cyclic_table_left_table_missing_property
     local function id<a>(x: a): a
       return x
     end
-    
+
     -- Remove name from cyclic table
     local foo = id({})
     foo.foo = foo
@@ -190,7 +190,7 @@ TEST_CASE_FIXTURE(DifferFixture, "right_cyclic_table_left_table_property_wrong")
     local function id<a>(x: a): a
       return x
     end
-    
+
     -- Remove name from cyclic table
     local foo = id({})
     foo.foo = foo
@@ -208,7 +208,7 @@ TEST_CASE_FIXTURE(DifferFixture, "equal_table_two_cyclic_tables_are_not_differen
     local function id<a>(x: a): a
       return x
     end
-    
+
     -- Remove name from cyclic table
     local foo = id({})
     foo.foo = foo
@@ -226,7 +226,7 @@ TEST_CASE_FIXTURE(DifferFixture, "equal_table_two_shifted_circles_are_not_differ
     local function id<a>(x: a): a
       return x
     end
-    
+
     -- Remove name from cyclic table
     local foo = id({})
     foo.foo = id({})
@@ -254,7 +254,7 @@ TEST_CASE_FIXTURE(DifferFixture, "table_left_circle_right_measuring_tape")
     local function id<a>(x: a): a
       return x
     end
-    
+
     -- Remove name from cyclic table
     local foo = id({})
     foo.foo = id({})
@@ -281,7 +281,7 @@ TEST_CASE_FIXTURE(DifferFixture, "equal_table_measuring_tapes")
     local function id<a>(x: a): a
       return x
     end
-    
+
     -- Remove name from cyclic table
     local foo = id({})
     foo.foo = id({})
@@ -305,7 +305,7 @@ TEST_CASE_FIXTURE(DifferFixture, "equal_table_A_B_C")
     local function id<a>(x: a): a
       return x
     end
-    
+
     -- Remove name from cyclic table
     local foo = id({})
     foo.foo = id({})
@@ -657,8 +657,12 @@ TEST_CASE_FIXTURE(DifferFixture, "function_table_self_referential_cyclic")
     )");
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    compareTypesNe("foo", "almostFoo",
-        R"(DiffError: these two types are not equal because the left type at <unlabeled-symbol>.Ret[1].bar.Ret[1] has type t1 where t1 = {| bar: () -> t1 |}, while the right type at <unlabeled-symbol>.Ret[1].bar.Ret[1] has type t1 where t1 = () -> t1)");
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        compareTypesNe("foo", "almostFoo",
+            R"(DiffError: these two types are not equal because the left type at <unlabeled-symbol>.Ret[1].bar.Ret[1] has type t1 where t1 = { bar: () -> t1 }, while the right type at <unlabeled-symbol>.Ret[1].bar.Ret[1] has type t1 where t1 = () -> t1)");
+    else
+        compareTypesNe("foo", "almostFoo",
+            R"(DiffError: these two types are not equal because the left type at <unlabeled-symbol>.Ret[1].bar.Ret[1] has type t1 where t1 = {| bar: () -> t1 |}, while the right type at <unlabeled-symbol>.Ret[1].bar.Ret[1] has type t1 where t1 = () -> t1)");
 }
 
 TEST_CASE_FIXTURE(DifferFixture, "equal_union_cyclic")
@@ -753,8 +757,8 @@ TEST_CASE_FIXTURE(DifferFixture, "singleton_string")
 
 TEST_CASE_FIXTURE(DifferFixtureWithBuiltins, "negation")
 {
-    // Old solver does not correctly refine test types
-    ScopedFastFlag sff{"DebugLuauDeferredConstraintResolution", true};
+    if (!FFlag::DebugLuauDeferredConstraintResolution)
+        return;
 
     CheckResult result = check(R"(
         local bar: { x: { y: unknown }}
@@ -770,7 +774,7 @@ TEST_CASE_FIXTURE(DifferFixtureWithBuiltins, "negation")
         if typeof(almostBar.x.y) ~= "number" then
             almostFoo = almostBar
         end
-            
+
     )");
     LUAU_REQUIRE_NO_ERRORS(result);
 
@@ -812,8 +816,12 @@ TEST_CASE_FIXTURE(DifferFixture, "union_missing")
     )");
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    compareTypesNe("foo", "almostFoo",
-        R"(DiffError: these two types are not equal because the left type at <unlabeled-symbol> is a union containing type {| baz: boolean, rot: "singleton" |}, while the right type at <unlabeled-symbol> is a union missing type {| baz: boolean, rot: "singleton" |})");
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        compareTypesNe("foo", "almostFoo",
+            R"(DiffError: these two types are not equal because the left type at <unlabeled-symbol> is a union containing type { baz: boolean, rot: "singleton" }, while the right type at <unlabeled-symbol> is a union missing type { baz: boolean, rot: "singleton" })");
+    else
+        compareTypesNe("foo", "almostFoo",
+            R"(DiffError: these two types are not equal because the left type at <unlabeled-symbol> is a union containing type {| baz: boolean, rot: "singleton" |}, while the right type at <unlabeled-symbol> is a union missing type {| baz: boolean, rot: "singleton" |})");
 }
 
 TEST_CASE_FIXTURE(DifferFixture, "intersection_missing_right")
@@ -848,8 +856,12 @@ TEST_CASE_FIXTURE(DifferFixture, "intersection_tables_missing_right")
     )");
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    compareTypesNe("foo", "almostFoo",
-        R"(DiffError: these two types are not equal because the left type at <unlabeled-symbol> is an intersection containing type {| x: number |}, while the right type at <unlabeled-symbol> is an intersection missing type {| x: number |})");
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        compareTypesNe("foo", "almostFoo",
+            R"(DiffError: these two types are not equal because the left type at <unlabeled-symbol> is an intersection containing type { x: number }, while the right type at <unlabeled-symbol> is an intersection missing type { x: number })");
+    else
+        compareTypesNe("foo", "almostFoo",
+            R"(DiffError: these two types are not equal because the left type at <unlabeled-symbol> is an intersection containing type {| x: number |}, while the right type at <unlabeled-symbol> is an intersection missing type {| x: number |})");
 }
 
 TEST_CASE_FIXTURE(DifferFixture, "intersection_tables_missing_left")
@@ -860,8 +872,12 @@ TEST_CASE_FIXTURE(DifferFixture, "intersection_tables_missing_left")
     )");
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    compareTypesNe("foo", "almostFoo",
-        R"(DiffError: these two types are not equal because the left type at <unlabeled-symbol> is an intersection missing type {| z: boolean |}, while the right type at <unlabeled-symbol> is an intersection containing type {| z: boolean |})");
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        compareTypesNe("foo", "almostFoo",
+            R"(DiffError: these two types are not equal because the left type at <unlabeled-symbol> is an intersection missing type { z: boolean }, while the right type at <unlabeled-symbol> is an intersection containing type { z: boolean })");
+    else
+        compareTypesNe("foo", "almostFoo",
+            R"(DiffError: these two types are not equal because the left type at <unlabeled-symbol> is an intersection missing type {| z: boolean |}, while the right type at <unlabeled-symbol> is an intersection containing type {| z: boolean |})");
 }
 
 TEST_CASE_FIXTURE(DifferFixture, "equal_function")
@@ -1313,6 +1329,8 @@ TEST_CASE_FIXTURE(DifferFixtureWithBuiltins, "equal_metatable")
 
 TEST_CASE_FIXTURE(DifferFixtureWithBuiltins, "metatable_normal")
 {
+    ScopedFastFlag sff{"DebugLuauDeferredConstraintResolution", false};
+
     CheckResult result = check(R"(
     local metaFoo = {
         metaBar = 5

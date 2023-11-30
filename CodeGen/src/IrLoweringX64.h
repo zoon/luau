@@ -19,13 +19,14 @@ namespace CodeGen
 
 struct ModuleHelpers;
 struct AssemblyOptions;
+struct LoweringStats;
 
 namespace X64
 {
 
 struct IrLoweringX64
 {
-    IrLoweringX64(AssemblyBuilderX64& build, ModuleHelpers& helpers, IrFunction& function);
+    IrLoweringX64(AssemblyBuilderX64& build, ModuleHelpers& helpers, IrFunction& function, LoweringStats* stats);
 
     void lowerInst(IrInst& inst, uint32_t index, const IrBlock& next);
     void finishBlock(const IrBlock& curr, const IrBlock& next);
@@ -49,6 +50,7 @@ struct IrLoweringX64
     OperandX64 memRegUintOp(IrOp op);
     OperandX64 memRegTagOp(IrOp op);
     RegisterX64 regOp(IrOp op);
+    OperandX64 bufferAddrOp(IrOp bufferOp, IrOp indexOp);
 
     IrConst constOp(IrOp op) const;
     uint8_t tagOp(IrOp op) const;
@@ -76,6 +78,7 @@ struct IrLoweringX64
     ModuleHelpers& helpers;
 
     IrFunction& function;
+    LoweringStats* stats = nullptr;
 
     IrRegAllocX64 regs;
 

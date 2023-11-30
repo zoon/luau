@@ -621,11 +621,11 @@ TEST_CASE_FIXTURE(IrBuilderFixture, "ControlFlowEq")
     });
 
     withTwoBlocks([this](IrOp a, IrOp b) {
-        build.inst(IrCmd::JUMP_EQ_INT, build.constInt(0), build.constInt(0), a, b);
+        build.inst(IrCmd::JUMP_CMP_INT, build.constInt(0), build.constInt(0), build.cond(IrCondition::Equal), a, b);
     });
 
     withTwoBlocks([this](IrOp a, IrOp b) {
-        build.inst(IrCmd::JUMP_EQ_INT, build.constInt(0), build.constInt(1), a, b);
+        build.inst(IrCmd::JUMP_CMP_INT, build.constInt(0), build.constInt(1), build.cond(IrCondition::Equal), a, b);
     });
 
     updateUseCounts(build.function);
@@ -1359,7 +1359,7 @@ TEST_CASE_FIXTURE(IrBuilderFixture, "IntEqRemoval")
     build.beginBlock(block);
     build.inst(IrCmd::STORE_INT, build.vmReg(1), build.constInt(5));
     IrOp value = build.inst(IrCmd::LOAD_INT, build.vmReg(1));
-    build.inst(IrCmd::JUMP_EQ_INT, value, build.constInt(5), trueBlock, falseBlock);
+    build.inst(IrCmd::JUMP_CMP_INT, value, build.constInt(5), build.cond(IrCondition::Equal), trueBlock, falseBlock);
 
     build.beginBlock(trueBlock);
     build.inst(IrCmd::RETURN, build.constUint(1));
@@ -1556,7 +1556,7 @@ TEST_CASE_FIXTURE(IrBuilderFixture, "RecursiveSccUseRemoval2")
     IrOp repeat = build.block(IrBlockKind::Internal);
 
     build.beginBlock(entry);
-    build.inst(IrCmd::JUMP_EQ_INT, build.constInt(0), build.constInt(1), block, exit1);
+    build.inst(IrCmd::JUMP_CMP_INT, build.constInt(0), build.constInt(1), build.cond(IrCondition::Equal), block, exit1);
 
     build.beginBlock(exit1);
     build.inst(IrCmd::RETURN, build.vmReg(0), build.constInt(0));
@@ -1933,8 +1933,6 @@ bb_0:
 
 TEST_CASE_FIXTURE(IrBuilderFixture, "DuplicateHashSlotChecks")
 {
-    ScopedFastFlag luauReuseHashSlots{"LuauReuseHashSlots2", true};
-
     IrOp block = build.block(IrBlockKind::Internal);
     IrOp fallback = build.block(IrBlockKind::Fallback);
 
@@ -1991,8 +1989,6 @@ bb_fallback_1:
 
 TEST_CASE_FIXTURE(IrBuilderFixture, "DuplicateHashSlotChecksAvoidNil")
 {
-    ScopedFastFlag luauReuseHashSlots{"LuauReuseHashSlots2", true};
-
     IrOp block = build.block(IrBlockKind::Internal);
     IrOp fallback = build.block(IrBlockKind::Fallback);
 
@@ -2056,6 +2052,293 @@ bb_0:
 
 bb_fallback_1:
    RETURN R1, 2u
+
+)");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "DuplicateArrayElemChecksSameIndex")
+{
+    ScopedFastFlag luauReuseHashSlots{"LuauReuseArrSlots2", true};
+
+    IrOp block = build.block(IrBlockKind::Internal);
+    IrOp fallback = build.block(IrBlockKind::Fallback);
+
+    build.beginBlock(block);
+
+    // This roughly corresponds to 'return t[1] + t[1]'
+    IrOp table1 = build.inst(IrCmd::LOAD_POINTER, build.vmReg(1));
+    build.inst(IrCmd::CHECK_ARRAY_SIZE, table1, build.constInt(0), fallback);
+    IrOp elem1 = build.inst(IrCmd::GET_ARR_ADDR, table1, build.constInt(0));
+    IrOp value1 = build.inst(IrCmd::LOAD_TVALUE, elem1, build.constInt(0));
+    build.inst(IrCmd::STORE_TVALUE, build.vmReg(3), value1);
+
+    build.inst(IrCmd::CHECK_ARRAY_SIZE, table1, build.constInt(0), fallback); // This will be removed
+    IrOp elem2 = build.inst(IrCmd::GET_ARR_ADDR, table1, build.constInt(0));  // And this will be substituted
+    IrOp value1b = build.inst(IrCmd::LOAD_TVALUE, elem2, build.constInt(0));
+    build.inst(IrCmd::STORE_TVALUE, build.vmReg(4), value1b);
+
+    IrOp a = build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(3));
+    IrOp b = build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(4));
+    IrOp sum = build.inst(IrCmd::ADD_NUM, a, b);
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(2), sum);
+
+    build.inst(IrCmd::RETURN, build.vmReg(2), build.constUint(1));
+
+    build.beginBlock(fallback);
+    build.inst(IrCmd::RETURN, build.vmReg(0), build.constUint(1));
+
+    updateUseCounts(build.function);
+    constPropInBlockChains(build, true);
+
+    // In the future, we might even see duplicate identical TValue loads go away
+    // In the future, we might even see loads of different VM regs with the same value go away
+    CHECK("\n" + toString(build.function, /* includeUseInfo */ false) == R"(
+bb_0:
+   %0 = LOAD_POINTER R1
+   CHECK_ARRAY_SIZE %0, 0i, bb_fallback_1
+   %2 = GET_ARR_ADDR %0, 0i
+   %3 = LOAD_TVALUE %2, 0i
+   STORE_TVALUE R3, %3
+   %7 = LOAD_TVALUE %2, 0i
+   STORE_TVALUE R4, %7
+   %9 = LOAD_DOUBLE R3
+   %10 = LOAD_DOUBLE R4
+   %11 = ADD_NUM %9, %10
+   STORE_DOUBLE R2, %11
+   RETURN R2, 1u
+
+bb_fallback_1:
+   RETURN R0, 1u
+
+)");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "DuplicateArrayElemChecksSameValue")
+{
+    ScopedFastFlag luauReuseHashSlots{"LuauReuseArrSlots2", true};
+
+    IrOp block = build.block(IrBlockKind::Internal);
+    IrOp fallback = build.block(IrBlockKind::Fallback);
+
+    build.beginBlock(block);
+
+    // This roughly corresponds to 'return t[i] + t[i]'
+    IrOp table1 = build.inst(IrCmd::LOAD_POINTER, build.vmReg(1));
+    IrOp index = build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(2));
+    IrOp validIndex = build.inst(IrCmd::TRY_NUM_TO_INDEX, index, fallback);
+    IrOp validOffset = build.inst(IrCmd::SUB_INT, validIndex, build.constInt(1));
+    build.inst(IrCmd::CHECK_ARRAY_SIZE, table1, validOffset, fallback);
+    IrOp elem1 = build.inst(IrCmd::GET_ARR_ADDR, table1, build.constInt(0));
+    IrOp value1 = build.inst(IrCmd::LOAD_TVALUE, elem1, build.constInt(0));
+    build.inst(IrCmd::STORE_TVALUE, build.vmReg(3), value1);
+
+    IrOp validIndex2 = build.inst(IrCmd::TRY_NUM_TO_INDEX, index, fallback);
+    IrOp validOffset2 = build.inst(IrCmd::SUB_INT, validIndex2, build.constInt(1));
+    build.inst(IrCmd::CHECK_ARRAY_SIZE, table1, validOffset2, fallback);     // This will be removed
+    IrOp elem2 = build.inst(IrCmd::GET_ARR_ADDR, table1, build.constInt(0)); // And this will be substituted
+    IrOp value1b = build.inst(IrCmd::LOAD_TVALUE, elem2, build.constInt(0));
+    build.inst(IrCmd::STORE_TVALUE, build.vmReg(4), value1b);
+
+    IrOp a = build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(3));
+    IrOp b = build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(4));
+    IrOp sum = build.inst(IrCmd::ADD_NUM, a, b);
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(2), sum);
+
+    build.inst(IrCmd::RETURN, build.vmReg(2), build.constUint(1));
+
+    build.beginBlock(fallback);
+    build.inst(IrCmd::RETURN, build.vmReg(0), build.constUint(1));
+
+    updateUseCounts(build.function);
+    constPropInBlockChains(build, true);
+
+    // In the future, we might even see duplicate identical TValue loads go away
+    // In the future, we might even see loads of different VM regs with the same value go away
+    CHECK("\n" + toString(build.function, /* includeUseInfo */ false) == R"(
+bb_0:
+   %0 = LOAD_POINTER R1
+   %1 = LOAD_DOUBLE R2
+   %2 = TRY_NUM_TO_INDEX %1, bb_fallback_1
+   %3 = SUB_INT %2, 1i
+   CHECK_ARRAY_SIZE %0, %3, bb_fallback_1
+   %5 = GET_ARR_ADDR %0, 0i
+   %6 = LOAD_TVALUE %5, 0i
+   STORE_TVALUE R3, %6
+   %12 = LOAD_TVALUE %5, 0i
+   STORE_TVALUE R4, %12
+   %14 = LOAD_DOUBLE R3
+   %15 = LOAD_DOUBLE R4
+   %16 = ADD_NUM %14, %15
+   STORE_DOUBLE R2, %16
+   RETURN R2, 1u
+
+bb_fallback_1:
+   RETURN R0, 1u
+
+)");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "DuplicateArrayElemChecksLowerIndex")
+{
+    ScopedFastFlag luauReuseHashSlots{"LuauReuseArrSlots2", true};
+
+    IrOp block = build.block(IrBlockKind::Internal);
+    IrOp fallback = build.block(IrBlockKind::Fallback);
+
+    build.beginBlock(block);
+
+    // This roughly corresponds to 'return t[2] + t[1]'
+    IrOp table1 = build.inst(IrCmd::LOAD_POINTER, build.vmReg(1));
+    build.inst(IrCmd::CHECK_ARRAY_SIZE, table1, build.constInt(1), fallback);
+    IrOp elem1 = build.inst(IrCmd::GET_ARR_ADDR, table1, build.constInt(1));
+    IrOp value1 = build.inst(IrCmd::LOAD_TVALUE, elem1, build.constInt(0));
+    build.inst(IrCmd::STORE_TVALUE, build.vmReg(3), value1);
+
+    build.inst(IrCmd::CHECK_ARRAY_SIZE, table1, build.constInt(0), fallback); // This will be removed
+    IrOp elem2 = build.inst(IrCmd::GET_ARR_ADDR, table1, build.constInt(0));
+    IrOp value1b = build.inst(IrCmd::LOAD_TVALUE, elem2, build.constInt(0));
+    build.inst(IrCmd::STORE_TVALUE, build.vmReg(4), value1b);
+
+    IrOp a = build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(3));
+    IrOp b = build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(4));
+    IrOp sum = build.inst(IrCmd::ADD_NUM, a, b);
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(2), sum);
+
+    build.inst(IrCmd::RETURN, build.vmReg(2), build.constUint(1));
+
+    build.beginBlock(fallback);
+    build.inst(IrCmd::RETURN, build.vmReg(0), build.constUint(1));
+
+    updateUseCounts(build.function);
+    constPropInBlockChains(build, true);
+
+    CHECK("\n" + toString(build.function, /* includeUseInfo */ false) == R"(
+bb_0:
+   %0 = LOAD_POINTER R1
+   CHECK_ARRAY_SIZE %0, 1i, bb_fallback_1
+   %2 = GET_ARR_ADDR %0, 1i
+   %3 = LOAD_TVALUE %2, 0i
+   STORE_TVALUE R3, %3
+   %6 = GET_ARR_ADDR %0, 0i
+   %7 = LOAD_TVALUE %6, 0i
+   STORE_TVALUE R4, %7
+   %9 = LOAD_DOUBLE R3
+   %10 = LOAD_DOUBLE R4
+   %11 = ADD_NUM %9, %10
+   STORE_DOUBLE R2, %11
+   RETURN R2, 1u
+
+bb_fallback_1:
+   RETURN R0, 1u
+
+)");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "DuplicateArrayElemChecksInvalidations")
+{
+    ScopedFastFlag luauReuseHashSlots{"LuauReuseArrSlots2", true};
+
+    IrOp block = build.block(IrBlockKind::Internal);
+    IrOp fallback = build.block(IrBlockKind::Fallback);
+
+    build.beginBlock(block);
+
+    // This roughly corresponds to 'return t[1] + t[1]' with a strange table.insert in the middle
+    IrOp table1 = build.inst(IrCmd::LOAD_POINTER, build.vmReg(1));
+    build.inst(IrCmd::CHECK_ARRAY_SIZE, table1, build.constInt(0), fallback);
+    IrOp elem1 = build.inst(IrCmd::GET_ARR_ADDR, table1, build.constInt(0));
+    IrOp value1 = build.inst(IrCmd::LOAD_TVALUE, elem1, build.constInt(0));
+    build.inst(IrCmd::STORE_TVALUE, build.vmReg(3), value1);
+
+    build.inst(IrCmd::TABLE_SETNUM, table1, build.constInt(2));
+
+    build.inst(IrCmd::CHECK_ARRAY_SIZE, table1, build.constInt(0), fallback); // This will be removed
+    IrOp elem2 = build.inst(IrCmd::GET_ARR_ADDR, table1, build.constInt(0));  // And this will be substituted
+    IrOp value1b = build.inst(IrCmd::LOAD_TVALUE, elem2, build.constInt(0));
+    build.inst(IrCmd::STORE_TVALUE, build.vmReg(4), value1b);
+
+    IrOp a = build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(3));
+    IrOp b = build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(4));
+    IrOp sum = build.inst(IrCmd::ADD_NUM, a, b);
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(2), sum);
+
+    build.inst(IrCmd::RETURN, build.vmReg(2), build.constUint(1));
+
+    build.beginBlock(fallback);
+    build.inst(IrCmd::RETURN, build.vmReg(0), build.constUint(1));
+
+    updateUseCounts(build.function);
+    constPropInBlockChains(build, true);
+
+    CHECK("\n" + toString(build.function, /* includeUseInfo */ false) == R"(
+bb_0:
+   %0 = LOAD_POINTER R1
+   CHECK_ARRAY_SIZE %0, 0i, bb_fallback_1
+   %2 = GET_ARR_ADDR %0, 0i
+   %3 = LOAD_TVALUE %2, 0i
+   STORE_TVALUE R3, %3
+   %5 = TABLE_SETNUM %0, 2i
+   CHECK_ARRAY_SIZE %0, 0i, bb_fallback_1
+   %7 = GET_ARR_ADDR %0, 0i
+   %8 = LOAD_TVALUE %7, 0i
+   STORE_TVALUE R4, %8
+   %10 = LOAD_DOUBLE R3
+   %11 = LOAD_DOUBLE R4
+   %12 = ADD_NUM %10, %11
+   STORE_DOUBLE R2, %12
+   RETURN R2, 1u
+
+bb_fallback_1:
+   RETURN R0, 1u
+
+)");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "ArrayElemChecksNegativeIndex")
+{
+    ScopedFastFlag luauReuseHashSlots{"LuauReuseArrSlots2", true};
+
+    IrOp block = build.block(IrBlockKind::Internal);
+    IrOp fallback = build.block(IrBlockKind::Fallback);
+
+    build.beginBlock(block);
+
+    // This roughly corresponds to 'return t[1] + t[0]'
+    IrOp table1 = build.inst(IrCmd::LOAD_POINTER, build.vmReg(1));
+    build.inst(IrCmd::CHECK_ARRAY_SIZE, table1, build.constInt(0), fallback);
+    IrOp elem1 = build.inst(IrCmd::GET_ARR_ADDR, table1, build.constInt(0));
+    IrOp value1 = build.inst(IrCmd::LOAD_TVALUE, elem1, build.constInt(0));
+    build.inst(IrCmd::STORE_TVALUE, build.vmReg(3), value1);
+
+    build.inst(IrCmd::CHECK_ARRAY_SIZE, table1, build.constInt(-1), fallback); // This will jump directly to fallback
+    IrOp elem2 = build.inst(IrCmd::GET_ARR_ADDR, table1, build.constInt(-1));
+    IrOp value1b = build.inst(IrCmd::LOAD_TVALUE, elem2, build.constInt(0));
+    build.inst(IrCmd::STORE_TVALUE, build.vmReg(4), value1b);
+
+    IrOp a = build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(3));
+    IrOp b = build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(4));
+    IrOp sum = build.inst(IrCmd::ADD_NUM, a, b);
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(2), sum);
+
+    build.inst(IrCmd::RETURN, build.vmReg(2), build.constUint(1));
+
+    build.beginBlock(fallback);
+    build.inst(IrCmd::RETURN, build.vmReg(0), build.constUint(1));
+
+    updateUseCounts(build.function);
+    constPropInBlockChains(build, true);
+
+    CHECK("\n" + toString(build.function, /* includeUseInfo */ false) == R"(
+bb_0:
+   %0 = LOAD_POINTER R1
+   CHECK_ARRAY_SIZE %0, 0i, bb_fallback_1
+   %2 = GET_ARR_ADDR %0, 0i
+   %3 = LOAD_TVALUE %2, 0i
+   STORE_TVALUE R3, %3
+   JUMP bb_fallback_1
+
+bb_fallback_1:
+   RETURN R0, 1u
 
 )");
 }
@@ -2783,6 +3066,71 @@ bb_0:
    RETURN R0, 0i
 
 )");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "TagSelfEqualityCheckRemoval")
+{
+    IrOp entry = build.block(IrBlockKind::Internal);
+    IrOp trueBlock = build.block(IrBlockKind::Internal);
+    IrOp falseBlock = build.block(IrBlockKind::Internal);
+
+    build.beginBlock(entry);
+
+    IrOp tag1 = build.inst(IrCmd::LOAD_TAG, build.vmReg(0));
+    IrOp tag2 = build.inst(IrCmd::LOAD_TAG, build.vmReg(0));
+    build.inst(IrCmd::JUMP_EQ_TAG, tag1, tag2, trueBlock, falseBlock);
+
+    build.beginBlock(trueBlock);
+    build.inst(IrCmd::RETURN, build.constUint(1));
+
+    build.beginBlock(falseBlock);
+    build.inst(IrCmd::RETURN, build.constUint(2));
+
+    updateUseCounts(build.function);
+    constPropInBlockChains(build, true);
+
+    CHECK("\n" + toString(build.function, /* includeUseInfo */ false) == R"(
+bb_0:
+   JUMP bb_1
+
+bb_1:
+   RETURN 1u
+
+)");
+}
+
+TEST_SUITE_END();
+
+TEST_SUITE_BEGIN("Dump");
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "ToDot")
+{
+    IrOp entry = build.block(IrBlockKind::Internal);
+    IrOp a = build.block(IrBlockKind::Internal);
+    IrOp b = build.block(IrBlockKind::Internal);
+    IrOp exit = build.block(IrBlockKind::Internal);
+
+    build.beginBlock(entry);
+    build.inst(IrCmd::JUMP_EQ_TAG, build.inst(IrCmd::LOAD_TAG, build.vmReg(0)), build.constTag(tnumber), a, b);
+
+    build.beginBlock(a);
+    build.inst(IrCmd::STORE_TVALUE, build.vmReg(2), build.inst(IrCmd::LOAD_TVALUE, build.vmReg(1)));
+    build.inst(IrCmd::JUMP, exit);
+
+    build.beginBlock(b);
+    build.inst(IrCmd::STORE_TVALUE, build.vmReg(3), build.inst(IrCmd::LOAD_TVALUE, build.vmReg(1)));
+    build.inst(IrCmd::JUMP, exit);
+
+    build.beginBlock(exit);
+    build.inst(IrCmd::RETURN, build.vmReg(2), build.constInt(2));
+
+    updateUseCounts(build.function);
+    computeCfgInfo(build.function);
+
+    // note: we don't validate the output of these to avoid test churn when formatting changes; we run these to make sure they don't assert/crash
+    toDot(build.function, /* includeInst= */ true);
+    toDotCfg(build.function);
+    toDotDjGraph(build.function);
 }
 
 TEST_SUITE_END();
