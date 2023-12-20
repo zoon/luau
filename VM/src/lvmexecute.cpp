@@ -135,6 +135,8 @@
 // Does VM support native execution via ExecutionCallbacks? We mostly assume it does but keep the define to make it easy to quantify the cost.
 #define VM_HAS_NATIVE 1
 
+LUAU_FASTFLAGVARIABLE(LuauTaggedLuData, false)
+
 LUAU_NOINLINE void luau_callhook(lua_State* L, lua_Hook hook, void* userdata)
 {
     ptrdiff_t base = savestack(L, L->base);
@@ -521,7 +523,7 @@ reentry:
 
                         if (unsigned(ic) < LUA_VECTOR_SIZE && name[1] == '\0')
                         {
-                            const float* v = rb->value.v; // silences ubsan when indexing v[]
+                            const float* v = vvalue(rb); // silences ubsan when indexing v[]
                             setnvalue(ra, v[ic]);
                             VM_NEXT();
                         }
@@ -1110,7 +1112,7 @@ reentry:
                         VM_NEXT();
 
                     case LUA_TLIGHTUSERDATA:
-                        pc += pvalue(ra) == pvalue(rb) ? LUAU_INSN_D(insn) : 1;
+                        pc += (pvalue(ra) == pvalue(rb) && (!FFlag::LuauTaggedLuData || lightuserdatatag(ra) == lightuserdatatag(rb))) ? LUAU_INSN_D(insn) : 1;
                         LUAU_ASSERT(unsigned(pc - cl->l.p->code) < unsigned(cl->l.p->sizecode));
                         VM_NEXT();
 
@@ -1225,7 +1227,7 @@ reentry:
                         VM_NEXT();
 
                     case LUA_TLIGHTUSERDATA:
-                        pc += pvalue(ra) != pvalue(rb) ? LUAU_INSN_D(insn) : 1;
+                        pc += (pvalue(ra) != pvalue(rb) || (FFlag::LuauTaggedLuData && lightuserdatatag(ra) != lightuserdatatag(rb))) ? LUAU_INSN_D(insn) : 1;
                         LUAU_ASSERT(unsigned(pc - cl->l.p->code) < unsigned(cl->l.p->sizecode));
                         VM_NEXT();
 
@@ -1464,8 +1466,8 @@ reentry:
                 }
                 else if (ttisvector(rb) && ttisvector(rc))
                 {
-                    const float* vb = rb->value.v;
-                    const float* vc = rc->value.v;
+                    const float* vb = vvalue(rb);
+                    const float* vc = vvalue(rc);
                     setvvalue(ra, vb[0] + vc[0], vb[1] + vc[1], vb[2] + vc[2], vb[3] + vc[3]);
                     VM_NEXT();
                 }
@@ -1510,8 +1512,8 @@ reentry:
                 }
                 else if (ttisvector(rb) && ttisvector(rc))
                 {
-                    const float* vb = rb->value.v;
-                    const float* vc = rc->value.v;
+                    const float* vb = vvalue(rb);
+                    const float* vc = vvalue(rc);
                     setvvalue(ra, vb[0] - vc[0], vb[1] - vc[1], vb[2] - vc[2], vb[3] - vc[3]);
                     VM_NEXT();
                 }
@@ -1556,22 +1558,22 @@ reentry:
                 }
                 else if (ttisvector(rb) && ttisnumber(rc))
                 {
-                    const float* vb = rb->value.v;
+                    const float* vb = vvalue(rb);
                     float vc = cast_to(float, nvalue(rc));
                     setvvalue(ra, vb[0] * vc, vb[1] * vc, vb[2] * vc, vb[3] * vc);
                     VM_NEXT();
                 }
                 else if (ttisvector(rb) && ttisvector(rc))
                 {
-                    const float* vb = rb->value.v;
-                    const float* vc = rc->value.v;
+                    const float* vb = vvalue(rb);
+                    const float* vc = vvalue(rc);
                     setvvalue(ra, vb[0] * vc[0], vb[1] * vc[1], vb[2] * vc[2], vb[3] * vc[3]);
                     VM_NEXT();
                 }
                 else if (ttisnumber(rb) && ttisvector(rc))
                 {
                     float vb = cast_to(float, nvalue(rb));
-                    const float* vc = rc->value.v;
+                    const float* vc = vvalue(rc);
                     setvvalue(ra, vb * vc[0], vb * vc[1], vb * vc[2], vb * vc[3]);
                     VM_NEXT();
                 }
@@ -1617,22 +1619,22 @@ reentry:
                 }
                 else if (ttisvector(rb) && ttisnumber(rc))
                 {
-                    const float* vb = rb->value.v;
+                    const float* vb = vvalue(rb);
                     float vc = cast_to(float, nvalue(rc));
                     setvvalue(ra, vb[0] / vc, vb[1] / vc, vb[2] / vc, vb[3] / vc);
                     VM_NEXT();
                 }
                 else if (ttisvector(rb) && ttisvector(rc))
                 {
-                    const float* vb = rb->value.v;
-                    const float* vc = rc->value.v;
+                    const float* vb = vvalue(rb);
+                    const float* vc = vvalue(rc);
                     setvvalue(ra, vb[0] / vc[0], vb[1] / vc[1], vb[2] / vc[2], vb[3] / vc[3]);
                     VM_NEXT();
                 }
                 else if (ttisnumber(rb) && ttisvector(rc))
                 {
                     float vb = cast_to(float, nvalue(rb));
-                    const float* vc = rc->value.v;
+                    const float* vc = vvalue(rc);
                     setvvalue(ra, vb / vc[0], vb / vc[1], vb / vc[2], vb / vc[3]);
                     VM_NEXT();
                 }
@@ -1812,7 +1814,7 @@ reentry:
                 }
                 else if (ttisvector(rb))
                 {
-                    const float* vb = rb->value.v;
+                    const float* vb = vvalue(rb);
                     float vc = cast_to(float, nvalue(kv));
                     setvvalue(ra, vb[0] * vc, vb[1] * vc, vb[2] * vc, vb[3] * vc);
                     VM_NEXT();
@@ -2071,7 +2073,7 @@ reentry:
                 }
                 else if (ttisvector(rb))
                 {
-                    const float* vb = rb->value.v;
+                    const float* vb = vvalue(rb);
                     setvvalue(ra, -vb[0], -vb[1], -vb[2], -vb[3]);
                     VM_NEXT();
                 }
@@ -2296,7 +2298,7 @@ reentry:
                     {
                         // set up registers for builtin iteration
                         setobj2s(L, ra + 1, ra);
-                        setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(0)));
+                        setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(0)), LU_TAG_ITERATOR);
                         setnilvalue(ra);
                     }
                     else
@@ -2348,7 +2350,7 @@ reentry:
 
                         if (!ttisnil(e))
                         {
-                            setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(index + 1)));
+                            setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(index + 1)), LU_TAG_ITERATOR);
                             setnvalue(ra + 3, double(index + 1));
                             setobj2s(L, ra + 4, e);
 
@@ -2369,7 +2371,7 @@ reentry:
 
                         if (!ttisnil(gval(n)))
                         {
-                            setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(index + 1)));
+                            setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(index + 1)), LU_TAG_ITERATOR);
                             getnodekey(L, ra + 3, n);
                             setobj2s(L, ra + 4, gval(n));
 
@@ -2421,7 +2423,7 @@ reentry:
                 {
                     setnilvalue(ra);
                     // ra+1 is already the table
-                    setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(0)));
+                    setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(0)), LU_TAG_ITERATOR);
                 }
                 else if (!ttisfunction(ra))
                 {
@@ -2450,7 +2452,7 @@ reentry:
                 {
                     setnilvalue(ra);
                     // ra+1 is already the table
-                    setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(0)));
+                    setpvalue(ra + 2, reinterpret_cast<void*>(uintptr_t(0)), LU_TAG_ITERATOR);
                 }
                 else if (!ttisfunction(ra))
                 {

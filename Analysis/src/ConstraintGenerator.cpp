@@ -205,7 +205,7 @@ ScopePtr ConstraintGenerator::childScope(AstNode* node, const ScopePtr& parent)
     return scope;
 }
 
-std::optional<TypeId> ConstraintGenerator::lookup(Scope* scope, DefId def)
+std::optional<TypeId> ConstraintGenerator::lookup(Scope* scope, DefId def, bool prototype)
 {
     if (get<Cell>(def))
         return scope->lookup(def);
@@ -213,22 +213,24 @@ std::optional<TypeId> ConstraintGenerator::lookup(Scope* scope, DefId def)
     {
         if (auto found = scope->lookup(def))
             return *found;
+        else if (!prototype)
+            return std::nullopt;
 
         TypeId res = builtinTypes->neverType;
 
         for (DefId operand : phi->operands)
         {
-            // `scope->lookup(operand)` may return nothing because it could be a phi node of globals, but one of
-            // the operand of that global has never been assigned a type, and so it should be an error.
-            // e.g.
-            // ```
-            // if foo() then
-            //   g = 5
-            // end
-            // -- `g` here is a phi node of the assignment to `g`, or the original revision of `g` before the branch.
-            // ```
-            TypeId ty = scope->lookup(operand).value_or(builtinTypes->errorRecoveryType());
-            res = simplifyUnion(builtinTypes, arena, res, ty).result;
+            // `scope->lookup(operand)` may return nothing because we only bind a type to that operand
+            // once we've seen that particular `DefId`. In this case, we need to prototype those types
+            // and use those at a later time.
+            std::optional<TypeId> ty = lookup(scope, operand, /*prototype*/false);
+            if (!ty)
+            {
+                ty = arena->addType(BlockedType{});
+                rootScope->lvalueTypes[operand] = *ty;
+            }
+
+            res = simplifyUnion(builtinTypes, arena, res, *ty).result;
         }
 
         scope->lvalueTypes[def] = res;
@@ -255,7 +257,7 @@ void ConstraintGenerator::unionRefinements(const RefinementContext& lhs, const R
             return types[0];
         else if (2 == types.size())
         {
-            // TODO: It may be advantageous to create a RefineConstraint here when there are blockedTypes.
+            // TODO: It may be advantageous to introduce a refine type family here when there are blockedTypes.
             SimplifyResult sr = simplifyIntersection(builtinTypes, arena, types[0], types[1]);
             if (sr.blockedTypes.empty())
                 return sr.result;
@@ -439,10 +441,14 @@ void ConstraintGenerator::applyRefinements(const ScopePtr& scope, Location locat
             {
                 if (mustDeferIntersection(ty) || mustDeferIntersection(dt))
                 {
-                    TypeId r = arena->addType(BlockedType{});
-                    addConstraint(scope, location, RefineConstraint{RefineConstraint::Intersection, r, ty, dt});
+                    TypeId resultType = arena->addType(TypeFamilyInstanceType{
+                        NotNull{&kBuiltinTypeFamilies.refineFamily},
+                        {ty, dt},
+                        {},
+                    });
+                    addConstraint(scope, location, ReduceConstraint{resultType});
 
-                    ty = r;
+                    ty = resultType;
                 }
                 else
                 {
@@ -750,16 +756,17 @@ ControlFlow ConstraintGenerator::visit(const ScopePtr& scope, AstStatForIn* forI
 
     for (AstLocal* var : forIn->vars)
     {
-        TypeId ty = nullptr;
-        if (var->annotation)
-            ty = resolveType(loopScope, var->annotation, /*inTypeArguments*/ false);
-        else
-            ty = freshType(loopScope);
-
-        loopScope->bindings[var] = Binding{ty, var->location};
-
         TypeId assignee = arena->addType(BlockedType{});
         variableTypes.push_back(assignee);
+
+        if (var->annotation)
+        {
+            TypeId annotationTy = resolveType(loopScope, var->annotation, /*inTypeArguments*/ false);
+            loopScope->bindings[var] = Binding{annotationTy, var->location};
+            addConstraint(scope, var->location, SubtypeConstraint{assignee, annotationTy});
+        }
+        else
+            loopScope->bindings[var] = Binding{assignee, var->location};
 
         DefId def = dfg->getDef(var);
         loopScope->lvalueTypes[def] = assignee;
@@ -860,7 +867,7 @@ ControlFlow ConstraintGenerator::visit(const ScopePtr& scope, AstStatFunction* f
     DenseHashSet<Constraint*> excludeList{nullptr};
 
     DefId def = dfg->getDef(function->name);
-    std::optional<TypeId> existingFunctionTy = scope->lookup(def);
+    std::optional<TypeId> existingFunctionTy = lookup(scope.get(), def);
 
     if (AstExprLocal* localName = function->name->as<AstExprLocal>())
     {
@@ -1002,9 +1009,6 @@ ControlFlow ConstraintGenerator::visit(const ScopePtr& scope, AstStatAssign* ass
 
         checkLValue(scope, lvalue, assignee);
         assignees.push_back(assignee);
-
-        DefId def = dfg->getDef(lvalue);
-        scope->lvalueTypes[def] = assignee;
     }
 
     TypePackId resultPack = checkPack(scope, assign->values).tp;
@@ -1439,9 +1443,6 @@ InferencePack ConstraintGenerator::checkPack(const ScopePtr& scope, AstExprCall*
     module->astOriginalCallTypes[call->func] = fnType;
     module->astOriginalCallTypes[call] = fnType;
 
-    TypeId instantiatedFnType = arena->addType(BlockedType{});
-    addConstraint(scope, call->location, InstantiationConstraint{instantiatedFnType, fnType});
-
     Checkpoint argBeginCheckpoint = checkpoint(this);
 
     std::vector<TypeId> args;
@@ -1726,26 +1727,23 @@ Inference ConstraintGenerator::check(const ScopePtr& scope, AstExprGlobal* globa
     /* prepopulateGlobalScope() has already added all global functions to the environment by this point, so any
      * global that is not already in-scope is definitely an unknown symbol.
      */
-    if (auto ty = lookup(scope.get(), def))
-        return Inference{*ty, refinementArena.proposition(key, builtinTypes->truthyType)};
-    else if (auto ty = scope->lookup(global->name))
+    if (auto ty = lookup(scope.get(), def, /*prototype=*/false))
     {
         rootScope->lvalueTypes[def] = *ty;
         return Inference{*ty, refinementArena.proposition(key, builtinTypes->truthyType)};
     }
     else
     {
-        reportError(global->location, UnknownSymbol{global->name.value});
+        reportError(global->location, UnknownSymbol{global->name.value, UnknownSymbol::Binding});
         return Inference{builtinTypes->errorRecoveryType()};
     }
 }
 
-Inference ConstraintGenerator::check(const ScopePtr& scope, AstExprIndexName* indexName)
+Inference ConstraintGenerator::checkIndexName(const ScopePtr& scope, const RefinementKey* key, AstExpr* indexee, std::string index)
 {
-    TypeId obj = check(scope, indexName->expr).ty;
+    TypeId obj = check(scope, indexee).ty;
     TypeId result = arena->addType(BlockedType{});
 
-    const RefinementKey* key = dfg->getRefinementKey(indexName);
     if (key)
     {
         if (auto ty = lookup(scope.get(), key->def))
@@ -1754,7 +1752,7 @@ Inference ConstraintGenerator::check(const ScopePtr& scope, AstExprIndexName* in
         scope->rvalueRefinements[key->def] = result;
     }
 
-    addConstraint(scope, indexName->expr->location, HasPropConstraint{result, obj, indexName->index.value});
+    addConstraint(scope, indexee->location, HasPropConstraint{result, obj, std::move(index)});
 
     if (key)
         return Inference{result, refinementArena.proposition(key, builtinTypes->truthyType)};
@@ -1762,10 +1760,23 @@ Inference ConstraintGenerator::check(const ScopePtr& scope, AstExprIndexName* in
         return Inference{result};
 }
 
+Inference ConstraintGenerator::check(const ScopePtr& scope, AstExprIndexName* indexName)
+{
+    const RefinementKey* key = dfg->getRefinementKey(indexName);
+    return checkIndexName(scope, key, indexName->expr, indexName->index.value);
+}
+
 Inference ConstraintGenerator::check(const ScopePtr& scope, AstExprIndexExpr* indexExpr)
 {
+    if (auto constantString = indexExpr->index->as<AstExprConstantString>())
+    {
+        const RefinementKey* key = dfg->getRefinementKey(indexExpr);
+        return checkIndexName(scope, key, indexExpr->expr, constantString->value.data);
+    }
+
     TypeId obj = check(scope, indexExpr->expr).ty;
     TypeId indexType = check(scope, indexExpr->index).ty;
+
     TypeId result = freshType(scope);
 
     const RefinementKey* key = dfg->getRefinementKey(indexExpr);
@@ -3079,17 +3090,35 @@ struct GlobalPrepopulator : AstVisitor
     {
     }
 
+    bool visit(AstExprGlobal* global) override
+    {
+        if (auto ty = globalScope->lookup(global->name))
+        {
+            DefId def = dfg->getDef(global);
+            globalScope->lvalueTypes[def] = *ty;
+        }
+
+        return true;
+    }
+
     bool visit(AstStatFunction* function) override
     {
         if (AstExprGlobal* g = function->name->as<AstExprGlobal>())
         {
             TypeId bt = arena->addType(BlockedType{});
             globalScope->bindings[g->name] = Binding{bt};
-
-            DefId def = dfg->getDef(function->name);
-            globalScope->lvalueTypes[def] = bt;
         }
 
+        return true;
+    }
+
+    bool visit(AstType*) override
+    {
+        return true;
+    }
+
+    bool visit(class AstTypePack* node) override
+    {
         return true;
     }
 };

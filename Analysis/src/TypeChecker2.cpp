@@ -1603,8 +1603,8 @@ struct TypeChecker2
         visit(indexExpr->expr, ValueContext::RValue);
         visit(indexExpr->index, ValueContext::RValue);
 
-        TypeId exprType = lookupType(indexExpr->expr);
-        TypeId indexType = lookupType(indexExpr->index);
+        TypeId exprType = follow(lookupType(indexExpr->expr));
+        TypeId indexType = follow(lookupType(indexExpr->index));
 
         if (auto tt = get<TableType>(exprType))
         {
@@ -2467,6 +2467,8 @@ struct TypeChecker2
             std::string relation = "a subtype of";
             if (reasoning.variance == SubtypingVariance::Invariant)
                 relation = "exactly";
+            else if (reasoning.variance == SubtypingVariance::Contravariant)
+                relation = "a supertype of";
 
             std::string reason;
             if (reasoning.subPath == reasoning.superPath)

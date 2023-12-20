@@ -9,6 +9,7 @@
 using namespace Luau;
 
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAG(LuauAlwaysCommitInferencesOfFunctionCalls);
 
 TEST_SUITE_BEGIN("BuiltinTests");
 
@@ -133,7 +134,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "sort_with_predicate")
 TEST_CASE_FIXTURE(BuiltinsFixture, "sort_with_bad_predicate")
 {
     ScopedFastFlag sff[] = {
-        {"LuauAlwaysCommitInferencesOfFunctionCalls", true},
+        {FFlag::LuauAlwaysCommitInferencesOfFunctionCalls, true},
     };
 
     CheckResult result = check(R"(
@@ -937,6 +938,11 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "tonumber_returns_optional_number_type2")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "dont_add_definitions_to_persistent_types")
 {
+    // This test makes no sense with type states and I think it generally makes no sense under the new solver.
+    // TODO: clip.
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        return;
+
     CheckResult result = check(R"(
         local f = math.sin
         local function g(x) return math.sin(x) end
@@ -1092,7 +1098,7 @@ end
 TEST_CASE_FIXTURE(Fixture, "string_match")
 {
     CheckResult result = check(R"(
-        local s:string
+        local s: string = "hello"
         local p = s:match("foo")
     )");
 

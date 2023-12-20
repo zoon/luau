@@ -26,6 +26,16 @@ extern bool verbose;
 extern bool codegen;
 extern int optimizationLevel;
 
+LUAU_FASTFLAG(LuauBit32Byteswap);
+LUAU_FASTFLAG(LuauBufferBetterMsg);
+LUAU_FASTFLAG(LuauBufferDefinitions);
+LUAU_FASTFLAG(LuauCodeGenFixByteLower);
+LUAU_FASTFLAG(LuauCompileBufferAnnotation);
+LUAU_FASTFLAG(LuauLoopInterruptFix);
+LUAU_FASTFLAG(LuauTaggedLuData);
+LUAU_DYNAMIC_FASTFLAG(LuauStricterUtf8);
+LUAU_FASTINT(CodegenHeuristicsInstructionLimit);
+
 static lua_CompileOptions defaultOptions()
 {
     lua_CompileOptions copts = {};
@@ -288,7 +298,9 @@ static std::vector<Luau::CodeGen::FunctionBytecodeSummary> analyzeFile(const cha
     std::unique_ptr<lua_State, void (*)(lua_State*)> globalState(luaL_newstate(), lua_close);
     lua_State* L = globalState.get();
 
-    LUAU_ASSERT(luau_load(L, "source", bytecode.data(), bytecode.size(), 0) == 0);
+    int result = luau_load(L, "source", bytecode.data(), bytecode.size(), 0);
+    REQUIRE(result == 0);
+
     return Luau::CodeGen::summarizeBytecode(L, -1, nestingLimit);
 }
 
@@ -312,8 +324,8 @@ TEST_CASE("Basic")
 
 TEST_CASE("Buffers")
 {
-    ScopedFastFlag luauBufferBetterMsg{"LuauBufferBetterMsg", true};
-    ScopedFastFlag luauCodeGenFixByteLower{"LuauCodeGenFixByteLower", true};
+    ScopedFastFlag luauBufferBetterMsg{FFlag::LuauBufferBetterMsg, true};
+    ScopedFastFlag luauCodeGenFixByteLower{FFlag::LuauCodeGenFixByteLower, true};
 
     runConformance("buffers.lua");
 }
@@ -429,13 +441,13 @@ TEST_CASE("GC")
 
 TEST_CASE("Bitwise")
 {
-    ScopedFastFlag sffs{"LuauBit32Byteswap", true};
+    ScopedFastFlag sffs{FFlag::LuauBit32Byteswap, true};
     runConformance("bitwise.lua");
 }
 
 TEST_CASE("UTF8")
 {
-    ScopedFastFlag sff("LuauStricterUtf8", true);
+    ScopedFastFlag sff(DFFlag::LuauStricterUtf8, true);
     runConformance("utf8.lua");
 }
 
@@ -580,7 +592,7 @@ static void populateRTTI(lua_State* L, Luau::TypeId type)
 
 TEST_CASE("Types")
 {
-    ScopedFastFlag luauBufferDefinitions{"LuauBufferDefinitions", true};
+    ScopedFastFlag luauBufferDefinitions{FFlag::LuauBufferDefinitions, true};
 
     runConformance("types.lua", [](lua_State* L) {
         Luau::NullModuleResolver moduleResolver;
@@ -1528,6 +1540,8 @@ TEST_CASE("GCDump")
 
 TEST_CASE("Interrupt")
 {
+    ScopedFastFlag luauLoopInterruptFix{FFlag::LuauLoopInterruptFix, true};
+
     lua_CompileOptions copts = defaultOptions();
     copts.optimizationLevel = 1; // disable loop unrolling to get fixed expected hit results
 
@@ -1586,12 +1600,12 @@ TEST_CASE("Interrupt")
         if (gc >= 0)
             return;
 
-        CHECK(index < 10);
-        if (++index == 10)
+        CHECK(index < 11);
+        if (++index == 11)
             lua_yield(L, 0);
     };
 
-    for (int test = 1; test <= 9; ++test)
+    for (int test = 1; test <= 10; ++test)
     {
         lua_State* T = lua_newthread(L);
 
@@ -1601,7 +1615,7 @@ TEST_CASE("Interrupt")
         index = 0;
         int status = lua_resume(T, nullptr, 0);
         CHECK(status == LUA_YIELD);
-        CHECK(index == 10);
+        CHECK(index == 11);
 
         // abandon the thread
         lua_pop(L, 1);
@@ -1685,6 +1699,32 @@ TEST_CASE("UserdataApi")
     globalState.reset();
 
     CHECK(dtorhits == 42);
+}
+
+TEST_CASE("LightuserdataApi")
+{
+    ScopedFastFlag luauTaggedLuData{FFlag::LuauTaggedLuData, true};
+
+    StateRef globalState(luaL_newstate(), lua_close);
+    lua_State* L = globalState.get();
+
+    void* value = (void*)0x12345678;
+
+    lua_pushlightuserdatatagged(L, value, 1);
+    CHECK(lua_lightuserdatatag(L, -1) == 1);
+    CHECK(lua_tolightuserdatatagged(L, -1, 0) == nullptr);
+    CHECK(lua_tolightuserdatatagged(L, -1, 1) == value);
+
+    lua_setlightuserdataname(L, 1, "id");
+    CHECK(!lua_getlightuserdataname(L, 0));
+    CHECK(strcmp(lua_getlightuserdataname(L, 1), "id") == 0);
+    CHECK(strcmp(luaL_typename(L, -1), "id") == 0);
+
+    lua_pushlightuserdatatagged(L, value, 0);
+    lua_pushlightuserdatatagged(L, value, 1);
+    CHECK(lua_rawequal(L, -1, -2) == 0);
+
+    globalState.reset();
 }
 
 TEST_CASE("Iter")
@@ -1913,8 +1953,6 @@ TEST_CASE("SafeEnv")
 
 TEST_CASE("Native")
 {
-    ScopedFastFlag luauLowerAltLoopForn{"LuauLowerAltLoopForn", true};
-
     runConformance("native.lua");
 }
 
@@ -1924,7 +1962,7 @@ TEST_CASE("NativeTypeAnnotations")
     if (!codegen || !luau_codegen_supported())
         return;
 
-    ScopedFastFlag luauCompileBufferAnnotation{"LuauCompileBufferAnnotation", true};
+    ScopedFastFlag luauCompileBufferAnnotation{FFlag::LuauCompileBufferAnnotation, true};
 
     lua_CompileOptions copts = defaultOptions();
     copts.vectorCtor = "vector";
@@ -2008,6 +2046,64 @@ TEST_CASE("HugeFunction")
     REQUIRE(status == 0);
 
     CHECK(lua_tonumber(L, -1) == 42);
+}
+
+TEST_CASE("IrInstructionLimit")
+{
+    if (!codegen || !luau_codegen_supported())
+        return;
+
+    ScopedFastInt codegenHeuristicsInstructionLimit{FInt::CodegenHeuristicsInstructionLimit, 50'000};
+
+    std::string source;
+
+    // Generate a hundred fat functions
+    for (int fn = 0; fn < 100; fn++)
+    {
+        source += "local function fn" + std::to_string(fn) + "(...)\n";
+        source += "if ... then\n";
+        source += "local p1, p2 = ...\n";
+        source += "local _ = {\n";
+
+        for (int i = 0; i < 100; ++i)
+        {
+            source += "p1*0." + std::to_string(i) + ",";
+            source += "p2+0." + std::to_string(i) + ",";
+        }
+
+        source += "}\n";
+        source += "return _\n";
+        source += "end\n";
+        source += "end\n";
+    }
+
+    StateRef globalState(luaL_newstate(), lua_close);
+    lua_State* L = globalState.get();
+
+    luau_codegen_create(L);
+
+    luaL_openlibs(L);
+    luaL_sandbox(L);
+    luaL_sandboxthread(L);
+
+    size_t bytecodeSize = 0;
+    char* bytecode = luau_compile(source.data(), source.size(), nullptr, &bytecodeSize);
+    int result = luau_load(L, "=HugeFunction", bytecode, bytecodeSize, 0);
+    free(bytecode);
+
+    REQUIRE(result == 0);
+
+    Luau::CodeGen::CompilationStats nativeStats = {};
+    Luau::CodeGen::CodeGenCompilationResult nativeResult = Luau::CodeGen::compile(L, -1, Luau::CodeGen::CodeGen_ColdFunctions, &nativeStats);
+
+    // Limit is not hit immediately, so with some functions compiled it should be a success
+    CHECK(nativeResult != Luau::CodeGen::CodeGenCompilationResult::CodeGenFailed);
+
+    // We should be able to compile at least one of our functions
+    CHECK(nativeStats.functionsCompiled > 0);
+
+    // But because of the limit, not all of them (101 because there's an extra global function)
+    CHECK(nativeStats.functionsCompiled < 101);
 }
 
 TEST_CASE("BytecodeDistributionPerFunctionTest")

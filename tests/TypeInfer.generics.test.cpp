@@ -11,6 +11,7 @@
 
 LUAU_FASTFLAG(LuauInstantiateInSubtyping);
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAG(DebugLuauSharedSelf);
 
 using namespace Luau;
 
@@ -274,7 +275,7 @@ TEST_CASE_FIXTURE(Fixture, "infer_nested_generic_function")
 
 TEST_CASE_FIXTURE(Fixture, "infer_generic_methods")
 {
-    ScopedFastFlag sff{"DebugLuauSharedSelf", true};
+    ScopedFastFlag sff{FFlag::DebugLuauSharedSelf, true};
 
     CheckResult result = check(R"(
         local x = {}
@@ -303,8 +304,15 @@ TEST_CASE_FIXTURE(Fixture, "calling_self_generic_methods")
         end
     )");
 
-    // TODO: Should typecheck but currently errors CLI-54277
-    LUAU_REQUIRE_ERRORS(result);
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        LUAU_REQUIRE_NO_ERRORS(result);
+
+        CHECK_EQ("{ f: (t1) -> (), id: <a>(unknown, a) -> a } where t1 = { id: ((t1, number) -> number) & ((t1, string) -> string) }",
+            toString(requireType("x"), {true}));
+    }
+    else
+        LUAU_REQUIRE_ERRORS(result);
 }
 
 TEST_CASE_FIXTURE(Fixture, "infer_generic_property")
@@ -691,7 +699,7 @@ local d: D = c
 TEST_CASE_FIXTURE(BuiltinsFixture, "generic_functions_dont_cache_type_parameters")
 {
     CheckResult result = check(R"(
--- See https://github.com/Roblox/luau/issues/332
+-- See https://github.com/luau-lang/luau/issues/332
 -- This function has a type parameter with the same name as clones,
 -- so if we cache type parameter names for functions these get confused.
 -- function id<Z>(x : Z) : Z
@@ -1146,7 +1154,7 @@ TEST_CASE_FIXTURE(Fixture, "substitution_with_bound_table")
 
 TEST_CASE_FIXTURE(Fixture, "apply_type_function_nested_generics1")
 {
-    // https://github.com/Roblox/luau/issues/484
+    // https://github.com/luau-lang/luau/issues/484
     CheckResult result = check(R"(
 --!strict
 type MyObject = {
@@ -1174,7 +1182,7 @@ local complex: ComplexObject<string> = {
 
 TEST_CASE_FIXTURE(Fixture, "apply_type_function_nested_generics2")
 {
-    // https://github.com/Roblox/luau/issues/484
+    // https://github.com/luau-lang/luau/issues/484
     CheckResult result = check(R"(
 --!strict
 type MyObject = {
@@ -1185,15 +1193,15 @@ type ComplexObject<T> = {
 	nested: MyObject
 }
 
-local complex2: ComplexObject<string> = nil
+function f(complex: ComplexObject<string>)
+    local x = complex.nested.getReturnValue(function(): string
+        return ""
+    end)
 
-local x = complex2.nested.getReturnValue(function(): string
-	return ""
-end)
-
-local y = complex2.nested.getReturnValue(function()
-	return 3
-end)
+    local y = complex.nested.getReturnValue(function()
+        return 3
+    end)
+end
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
@@ -1260,7 +1268,7 @@ end
 TEST_CASE_FIXTURE(BuiltinsFixture, "higher_rank_polymorphism_should_not_accept_instantiated_arguments")
 {
     ScopedFastFlag sffs[] = {
-        {"LuauInstantiateInSubtyping", true},
+        {FFlag::LuauInstantiateInSubtyping, true},
     };
 
     CheckResult result = check(R"(

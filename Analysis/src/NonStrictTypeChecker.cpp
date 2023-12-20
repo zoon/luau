@@ -12,8 +12,10 @@
 #include "Luau/TypeArena.h"
 #include "Luau/TypeFamily.h"
 #include "Luau/Def.h"
+#include "Luau/TypeFwd.h"
 
 #include <iostream>
+#include <iterator>
 
 namespace Luau
 {
@@ -56,8 +58,6 @@ struct StackPusher
 
 struct NonStrictContext
 {
-    std::unordered_map<const Def*, TypeId> context;
-
     NonStrictContext() = default;
 
     NonStrictContext(const NonStrictContext&) = delete;
@@ -105,15 +105,29 @@ struct NonStrictContext
         return conj;
     }
 
-    void removeFromContext(const std::vector<DefId>& defs)
+    // Returns true if the removal was successful
+    bool remove(const DefId& def)
     {
-        // TODO: unimplemented
+        std::vector<DefId> defs;
+        collectOperands(def, &defs);
+        bool result = true;
+        for (DefId def : defs)
+            result = result && context.erase(def.get()) == 1;
+        return result;
     }
 
     std::optional<TypeId> find(const DefId& def) const
     {
         const Def* d = def.get();
         return find(d);
+    }
+
+    void addContext(const DefId& def, TypeId ty)
+    {
+        std::vector<DefId> defs;
+        collectOperands(def, &defs);
+        for (DefId def : defs)
+            context[def.get()] = ty;
     }
 
 private:
@@ -124,6 +138,9 @@ private:
             return {it->second};
         return {};
     }
+
+    std::unordered_map<const Def*, TypeId> context;
+
 };
 
 struct NonStrictTypeChecker
@@ -138,6 +155,7 @@ struct NonStrictTypeChecker
     NotNull<const DataFlowGraph> dfg;
     DenseHashSet<TypeId> noTypeFamilyErrors{nullptr};
     std::vector<NotNull<Scope>> stack;
+    DenseHashMap<TypeId, TypeId> cachedNegations{nullptr};
 
     const NotNull<TypeCheckLimits> limits;
 
@@ -271,8 +289,22 @@ struct NonStrictTypeChecker
     {
         auto StackPusher = pushStack(block);
         NonStrictContext ctx;
-        for (AstStat* statement : block->body)
-            ctx = NonStrictContext::disjunction(builtinTypes, NotNull{&arena}, ctx, visit(statement));
+
+
+        for (auto it = block->body.rbegin(); it != block->body.rend(); it++)
+        {
+            AstStat* stat = *it;
+            if (AstStatLocal* local = stat->as<AstStatLocal>())
+            {
+                // Iterating in reverse order
+                // local x ; B generates the context of B without x
+                visit(local);
+                for (auto local : local->vars)
+                    ctx.remove(dfg->getDef(local));
+            }
+            else
+                ctx = NonStrictContext::disjunction(builtinTypes, NotNull{&arena}, visit(stat), ctx);
+        }
         return ctx;
     }
 
@@ -491,8 +523,25 @@ struct NonStrictTypeChecker
                 // ...
                 // (unknown^N-1, ~S_N) -> error
                 std::vector<TypeId> argTypes;
-                for (TypeId ty : fn->argTypes)
-                    argTypes.push_back(ty);
+                argTypes.reserve(call->args.size);
+                // Pad out the arg types array with the types you would expect to see
+                TypePackIterator curr = begin(fn->argTypes);
+                TypePackIterator fin = end(fn->argTypes);
+                while (curr != fin)
+                {
+                    argTypes.push_back(*curr);
+                    ++curr;
+                }
+                if (auto argTail = curr.tail())
+                {
+                    if (const VariadicTypePack* vtp = get<VariadicTypePack>(follow(*argTail)))
+                    {
+                        while (argTypes.size() < call->args.size)
+                        {
+                            argTypes.push_back(vtp->ty);
+                        }
+                    }
+                }
                 // For a checked function, these gotta be the same size
                 LUAU_ASSERT(call->args.size == argTypes.size());
                 for (size_t i = 0; i < call->args.size; i++)
@@ -505,10 +554,8 @@ struct NonStrictTypeChecker
                     AstExpr* arg = call->args.data[i];
                     TypeId expectedArgType = argTypes[i];
                     DefId def = dfg->getDef(arg);
-                    // TODO: Cache negations created here!!!
-                    // See Jira Ticket: https://roblox.atlassian.net/browse/CLI-87539
-                    TypeId runTimeErrorTy = arena.addType(NegationType{expectedArgType});
-                    fresh.context[def.get()] = runTimeErrorTy;
+                    TypeId runTimeErrorTy = getOrCreateNegation(expectedArgType);
+                    fresh.addContext(def, runTimeErrorTy);
                 }
 
                 // Populate the context and now iterate through each of the arguments to the call to find out if we satisfy the types
@@ -537,8 +584,16 @@ struct NonStrictTypeChecker
 
     NonStrictContext visit(AstExprFunction* exprFn)
     {
+        // TODO: should a function being used as an expression generate a context without the arguments?
         auto pusher = pushStack(exprFn);
-        return visit(exprFn->body);
+        NonStrictContext remainder = visit(exprFn->body);
+        for (AstLocal* local : exprFn->args)
+        {
+            if (std::optional<TypeId> ty = willRunTimeErrorFunctionDefinition(local, remainder))
+                reportError(NonStrictFunctionDefinitionError{exprFn->debugname.value, local->name.value, *ty}, local->location);
+            remainder.remove(dfg->getDef(local));
+        }
+        return remainder;
     }
 
     NonStrictContext visit(AstExprTable* table)
@@ -590,19 +645,54 @@ struct NonStrictTypeChecker
     std::optional<TypeId> willRunTimeError(AstExpr* fragment, const NonStrictContext& context)
     {
         DefId def = dfg->getDef(fragment);
-        if (std::optional<TypeId> contextTy = context.find(def))
+        std::vector<DefId> defs;
+        collectOperands(def, &defs);
+        for (DefId def : defs)
         {
+            if (std::optional<TypeId> contextTy = context.find(def))
+            {
 
-            TypeId actualType = lookupType(fragment);
-            SubtypingResult r = subtyping.isSubtype(actualType, *contextTy);
-            if (r.normalizationTooComplex)
-                reportError(NormalizationTooComplex{}, fragment->location);
-            if (r.isSubtype)
-                return {actualType};
+                TypeId actualType = lookupType(fragment);
+                SubtypingResult r = subtyping.isSubtype(actualType, *contextTy);
+                if (r.normalizationTooComplex)
+                    reportError(NormalizationTooComplex{}, fragment->location);
+                if (r.isSubtype)
+                    return {actualType};
+            }
         }
 
         return {};
     }
+
+    std::optional<TypeId> willRunTimeErrorFunctionDefinition(AstLocal* fragment, const NonStrictContext& context)
+    {
+        DefId def = dfg->getDef(fragment);
+        std::vector<DefId> defs;
+        collectOperands(def, &defs);
+        for (DefId def : defs)
+        {
+            if (std::optional<TypeId> contextTy = context.find(def))
+            {
+                SubtypingResult r1 = subtyping.isSubtype(builtinTypes->unknownType, *contextTy);
+                SubtypingResult r2 = subtyping.isSubtype(*contextTy, builtinTypes->unknownType);
+                if (r1.normalizationTooComplex || r2.normalizationTooComplex)
+                    reportError(NormalizationTooComplex{}, fragment->location);
+                bool isUnknown = r1.isSubtype && r2.isSubtype;
+                if (isUnknown)
+                    return {builtinTypes->unknownType};
+            }
+        }
+        return {};
+    }
+
+private:
+    TypeId getOrCreateNegation(TypeId baseType)
+    {
+        TypeId& cachedResult = cachedNegations[baseType];
+        if (!cachedResult)
+            cachedResult = arena.addType(NegationType{baseType});
+        return cachedResult;
+    };
 };
 
 void checkNonStrict(NotNull<BuiltinTypes> builtinTypes, NotNull<InternalErrorReporter> ice, NotNull<UnifierSharedState> unifierState,

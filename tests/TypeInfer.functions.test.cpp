@@ -16,6 +16,8 @@ using namespace Luau;
 
 LUAU_FASTFLAG(LuauInstantiateInSubtyping);
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAG(LuauAlwaysCommitInferencesOfFunctionCalls);
+LUAU_FASTINT(LuauTarjanChildLimit);
 
 TEST_SUITE_BEGIN("TypeInferFunctions");
 
@@ -734,7 +736,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "mutual_recursion")
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
-    dumpErrors(result);
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "toposort_doesnt_break_mutual_recursion")
@@ -1911,7 +1912,7 @@ end
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "dont_assert_when_the_tarjan_limit_is_exceeded_during_generalization")
 {
-    ScopedFastInt sfi{"LuauTarjanChildLimit", 2};
+    ScopedFastInt sfi{FInt::LuauTarjanChildLimit, 2};
     if (!FFlag::DebugLuauDeferredConstraintResolution)
         return;
 
@@ -1995,7 +1996,7 @@ TEST_CASE_FIXTURE(Fixture, "function_exprs_are_generalized_at_signature_scope_no
 TEST_CASE_FIXTURE(BuiltinsFixture, "param_1_and_2_both_takes_the_same_generic_but_their_arguments_are_incompatible")
 {
     ScopedFastFlag sff[] = {
-        {"LuauAlwaysCommitInferencesOfFunctionCalls", true},
+        {FFlag::LuauAlwaysCommitInferencesOfFunctionCalls, true},
     };
 
     CheckResult result = check(R"(
@@ -2050,7 +2051,7 @@ Table type '{ x: number }' not compatible with type 'vec2' because the former is
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "param_1_and_2_both_takes_the_same_generic_but_their_arguments_are_incompatible_2")
 {
-    ScopedFastFlag sff{"LuauAlwaysCommitInferencesOfFunctionCalls", true};
+    ScopedFastFlag sff{FFlag::LuauAlwaysCommitInferencesOfFunctionCalls, true};
 
     CheckResult result = check(R"(
         local function f<a>(x: a, y: a): a
@@ -2103,7 +2104,7 @@ TEST_CASE_FIXTURE(Fixture, "generic_packs_are_not_variadic")
     if (!FFlag::DebugLuauDeferredConstraintResolution)
         return;
 
-    ScopedFastFlag sff{"DebugLuauDeferredConstraintResolution", true};
+    ScopedFastFlag sff{FFlag::DebugLuauDeferredConstraintResolution, true};
 
     CheckResult result = check(R"(
         local function apply<a, b..., c...>(f: (a, b...) -> c..., x: a)
@@ -2177,6 +2178,21 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "apply_of_lambda_with_inferred_and_explicit_t
 
         local function apply_explicit<A, B...>(f: (A) -> B..., x: A): B... return f(x) end
         local x = apply_explicit(function(x: string): number return 5 end, "hello!")
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "regex_benchmark_string_format_minimization")
+{
+    CheckResult result = check(R"(
+        (nil :: any)(function(n)
+            if tonumber(n) then
+                n = tonumber(n)
+            elseif n ~= nil then
+                string.format("invalid argument #4 to 'sub': number expected, got %s", typeof(n))
+            end
+        end);
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
