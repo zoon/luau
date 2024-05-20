@@ -47,6 +47,10 @@
 // Version 4: Adds Proto::flags, typeinfo, and floor division opcodes IDIV/IDIVK. Currently supported.
 // Version 5: Adds SUBRK/DIVRK and vector constants. Currently supported.
 
+// # Bytecode type information history
+// Version 1: (from bytecode version 4) Type information for function signature. Currently supported.
+// Version 2: (from bytecode version 4) Type information for arguments, upvalues, locals and some temporaries. Currently supported.
+
 // Bytecode opcode, part of the instruction header
 enum LuauOpcode
 {
@@ -431,9 +435,10 @@ enum LuauBytecodeTag
     // Bytecode version; runtime supports [MIN, MAX], compiler emits TARGET by default but may emit a higher version when flags are enabled
     LBC_VERSION_MIN = 3,
     LBC_VERSION_MAX = 5,
-    LBC_VERSION_TARGET = 4,
+    LBC_VERSION_TARGET = 5,
     // Type encoding version
-    LBC_TYPE_VERSION = 1,
+    LBC_TYPE_VERSION_DEPRECATED = 1,
+    LBC_TYPE_VERSION = 2,
     // Types of constant table entries
     LBC_CONSTANT_NIL = 0,
     LBC_CONSTANT_BOOLEAN,

@@ -19,6 +19,22 @@ struct TypeArena;
 struct TxnLog;
 class Normalizer;
 
+struct TypeFamilyQueue
+{
+    NotNull<VecDeque<TypeId>> queuedTys;
+    NotNull<VecDeque<TypePackId>> queuedTps;
+
+    void add(TypeId instanceTy);
+    void add(TypePackId instanceTp);
+
+    template<typename T>
+    void add(const std::vector<T>& ts)
+    {
+        for (const T& t : ts)
+            enqueue(t);
+    }
+};
+
 struct TypeFamilyContext
 {
     NotNull<TypeArena> arena;
@@ -30,8 +46,10 @@ struct TypeFamilyContext
 
     // nullptr if the type family is being reduced outside of the constraint solver.
     ConstraintSolver* solver;
+    // The constraint being reduced in this run of the reduction
+    const Constraint* constraint;
 
-    TypeFamilyContext(NotNull<ConstraintSolver> cs, NotNull<Scope> scope)
+    TypeFamilyContext(NotNull<ConstraintSolver> cs, NotNull<Scope> scope, NotNull<const Constraint> constraint)
         : arena(cs->arena)
         , builtins(cs->builtinTypes)
         , scope(scope)
@@ -39,6 +57,7 @@ struct TypeFamilyContext
         , ice(NotNull{&cs->iceReporter})
         , limits(NotNull{&cs->limits})
         , solver(cs.get())
+        , constraint(constraint.get())
     {
     }
 
@@ -51,8 +70,11 @@ struct TypeFamilyContext
         , ice(ice)
         , limits(limits)
         , solver(nullptr)
+        , constraint(nullptr)
     {
     }
+
+    NotNull<Constraint> pushConstraint(ConstraintV&& c);
 };
 
 /// Represents a reduction result, which may have successfully reduced the type,
@@ -76,6 +98,10 @@ struct TypeFamilyReductionResult
     std::vector<TypePackId> blockedPacks;
 };
 
+template<typename T>
+using ReducerFunction = std::function<TypeFamilyReductionResult<T>(
+    T, NotNull<TypeFamilyQueue>, const std::vector<TypeId>&, const std::vector<TypePackId>&, NotNull<TypeFamilyContext>)>;
+
 /// Represents a type function that may be applied to map a series of types and
 /// type packs to a single output type.
 struct TypeFamily
@@ -85,7 +111,7 @@ struct TypeFamily
     std::string name;
 
     /// The reducer function for the type family.
-    std::function<TypeFamilyReductionResult<TypeId>(const std::vector<TypeId>&, const std::vector<TypePackId>&, NotNull<TypeFamilyContext>)> reducer;
+    ReducerFunction<TypeId> reducer;
 };
 
 /// Represents a type function that may be applied to map a series of types and
@@ -97,7 +123,7 @@ struct TypePackFamily
     std::string name;
 
     /// The reducer function for the type pack family.
-    std::function<TypeFamilyReductionResult<TypePackId>(const std::vector<TypeId>&, const std::vector<TypePackId>&, NotNull<TypeFamilyContext>)> reducer;
+    ReducerFunction<TypePackId> reducer;
 };
 
 struct FamilyGraphReductionResult
@@ -163,6 +189,12 @@ struct BuiltinTypeFamilies
     TypeFamily eqFamily;
 
     TypeFamily refineFamily;
+    TypeFamily singletonFamily;
+    TypeFamily unionFamily;
+    TypeFamily intersectFamily;
+
+    TypeFamily keyofFamily;
+    TypeFamily rawkeyofFamily;
 
     void addToScope(NotNull<TypeArena> arena, NotNull<Scope> scope) const;
 };

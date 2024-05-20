@@ -13,7 +13,9 @@
 
 #include <string.h>
 
-LUAU_FASTFLAGVARIABLE(LuauCodegenBytecodeInfer, false)
+LUAU_FASTFLAG(LuauLoadTypeInfo) // Because new VM typeinfo load changes the format used by Codegen, same flag is used
+LUAU_FASTFLAG(LuauTypeInfoLookupImprovement)
+LUAU_FASTFLAG(LuauCodegenAnalyzeHostVectorOps)
 
 namespace Luau
 {
@@ -22,19 +24,22 @@ namespace CodeGen
 
 constexpr unsigned kNoAssociatedBlockIndex = ~0u;
 
-IrBuilder::IrBuilder()
-    : constantMap({IrConstKind::Tag, ~0ull})
+IrBuilder::IrBuilder(const HostIrHooks& hostHooks)
+    : hostHooks(hostHooks)
+    , constantMap({IrConstKind::Tag, ~0ull})
 {
 }
-
-static bool hasTypedParameters(Proto* proto)
+static bool hasTypedParameters_DEPRECATED(Proto* proto)
 {
+    CODEGEN_ASSERT(!FFlag::LuauLoadTypeInfo);
+
     return proto->typeinfo && proto->numparams != 0;
 }
 
-static void buildArgumentTypeChecks(IrBuilder& build, Proto* proto)
+static void buildArgumentTypeChecks_DEPRECATED(IrBuilder& build, Proto* proto)
 {
-    LUAU_ASSERT(hasTypedParameters(proto));
+    CODEGEN_ASSERT(!FFlag::LuauLoadTypeInfo);
+    CODEGEN_ASSERT(hasTypedParameters_DEPRECATED(proto));
 
     for (int i = 0; i < proto->numparams; ++i)
     {
@@ -110,28 +115,136 @@ static void buildArgumentTypeChecks(IrBuilder& build, Proto* proto)
     }
 }
 
+static bool hasTypedParameters(const BytecodeTypeInfo& typeInfo)
+{
+    CODEGEN_ASSERT(FFlag::LuauLoadTypeInfo);
+
+    if (FFlag::LuauTypeInfoLookupImprovement)
+    {
+        for (auto el : typeInfo.argumentTypes)
+        {
+            if (el != LBC_TYPE_ANY)
+                return true;
+        }
+
+        return false;
+    }
+    else
+    {
+        return !typeInfo.argumentTypes.empty();
+    }
+}
+
+static void buildArgumentTypeChecks(IrBuilder& build)
+{
+    CODEGEN_ASSERT(FFlag::LuauLoadTypeInfo);
+
+    const BytecodeTypeInfo& typeInfo = build.function.bcTypeInfo;
+    CODEGEN_ASSERT(hasTypedParameters(typeInfo));
+
+    for (size_t i = 0; i < typeInfo.argumentTypes.size(); i++)
+    {
+        uint8_t et = typeInfo.argumentTypes[i];
+
+        uint8_t tag = et & ~LBC_TYPE_OPTIONAL_BIT;
+        uint8_t optional = et & LBC_TYPE_OPTIONAL_BIT;
+
+        if (tag == LBC_TYPE_ANY)
+            continue;
+
+        IrOp load = build.inst(IrCmd::LOAD_TAG, build.vmReg(uint8_t(i)));
+
+        IrOp nextCheck;
+        if (optional)
+        {
+            nextCheck = build.block(IrBlockKind::Internal);
+            IrOp fallbackCheck = build.block(IrBlockKind::Internal);
+
+            build.inst(IrCmd::JUMP_EQ_TAG, load, build.constTag(LUA_TNIL), nextCheck, fallbackCheck);
+
+            build.beginBlock(fallbackCheck);
+        }
+
+        switch (tag)
+        {
+        case LBC_TYPE_NIL:
+            build.inst(IrCmd::CHECK_TAG, load, build.constTag(LUA_TNIL), build.vmExit(kVmExitEntryGuardPc));
+            break;
+        case LBC_TYPE_BOOLEAN:
+            build.inst(IrCmd::CHECK_TAG, load, build.constTag(LUA_TBOOLEAN), build.vmExit(kVmExitEntryGuardPc));
+            break;
+        case LBC_TYPE_NUMBER:
+            build.inst(IrCmd::CHECK_TAG, load, build.constTag(LUA_TNUMBER), build.vmExit(kVmExitEntryGuardPc));
+            break;
+        case LBC_TYPE_STRING:
+            build.inst(IrCmd::CHECK_TAG, load, build.constTag(LUA_TSTRING), build.vmExit(kVmExitEntryGuardPc));
+            break;
+        case LBC_TYPE_TABLE:
+            build.inst(IrCmd::CHECK_TAG, load, build.constTag(LUA_TTABLE), build.vmExit(kVmExitEntryGuardPc));
+            break;
+        case LBC_TYPE_FUNCTION:
+            build.inst(IrCmd::CHECK_TAG, load, build.constTag(LUA_TFUNCTION), build.vmExit(kVmExitEntryGuardPc));
+            break;
+        case LBC_TYPE_THREAD:
+            build.inst(IrCmd::CHECK_TAG, load, build.constTag(LUA_TTHREAD), build.vmExit(kVmExitEntryGuardPc));
+            break;
+        case LBC_TYPE_USERDATA:
+            build.inst(IrCmd::CHECK_TAG, load, build.constTag(LUA_TUSERDATA), build.vmExit(kVmExitEntryGuardPc));
+            break;
+        case LBC_TYPE_VECTOR:
+            build.inst(IrCmd::CHECK_TAG, load, build.constTag(LUA_TVECTOR), build.vmExit(kVmExitEntryGuardPc));
+            break;
+        case LBC_TYPE_BUFFER:
+            build.inst(IrCmd::CHECK_TAG, load, build.constTag(LUA_TBUFFER), build.vmExit(kVmExitEntryGuardPc));
+            break;
+        }
+
+        if (optional)
+        {
+            build.inst(IrCmd::JUMP, nextCheck);
+            build.beginBlock(nextCheck);
+        }
+    }
+
+    // If the last argument is optional, we can skip creating a new internal block since one will already have been created.
+    if (!(typeInfo.argumentTypes.back() & LBC_TYPE_OPTIONAL_BIT))
+    {
+        IrOp next = build.block(IrBlockKind::Internal);
+        build.inst(IrCmd::JUMP, next);
+
+        build.beginBlock(next);
+    }
+}
+
 void IrBuilder::buildFunctionIr(Proto* proto)
 {
     function.proto = proto;
     function.variadic = proto->is_vararg != 0;
 
+    if (FFlag::LuauLoadTypeInfo)
+        loadBytecodeTypeInfo(function);
+
     // Reserve entry block
-    bool generateTypeChecks = hasTypedParameters(proto);
+    bool generateTypeChecks = FFlag::LuauLoadTypeInfo ? hasTypedParameters(function.bcTypeInfo) : hasTypedParameters_DEPRECATED(proto);
     IrOp entry = generateTypeChecks ? block(IrBlockKind::Internal) : IrOp{};
 
     // Rebuild original control flow blocks
     rebuildBytecodeBasicBlocks(proto);
 
     // Infer register tags in bytecode
-    if (FFlag::LuauCodegenBytecodeInfer)
-        analyzeBytecodeTypes(function);
+    analyzeBytecodeTypes(function, hostHooks);
 
     function.bcMapping.resize(proto->sizecode, {~0u, ~0u});
 
     if (generateTypeChecks)
     {
         beginBlock(entry);
-        buildArgumentTypeChecks(*this, proto);
+
+        if (FFlag::LuauLoadTypeInfo)
+            buildArgumentTypeChecks(*this);
+        else
+            buildArgumentTypeChecks_DEPRECATED(*this, proto);
+
         inst(IrCmd::JUMP, blockAtInst(0));
     }
     else
@@ -148,7 +261,7 @@ void IrBuilder::buildFunctionIr(Proto* proto)
         LuauOpcode op = LuauOpcode(LUAU_INSN_OP(*pc));
 
         int nexti = i + getOpLength(op);
-        LUAU_ASSERT(nexti <= proto->sizecode);
+        CODEGEN_ASSERT(nexti <= proto->sizecode);
 
         function.bcMapping[i] = {uint32_t(function.instructions.size()), ~0u};
 
@@ -172,10 +285,10 @@ void IrBuilder::buildFunctionIr(Proto* proto)
 
             translateInst(op, pc, i);
 
-            if (fastcallSkipTarget != -1)
+            if (cmdSkipTarget != -1)
             {
-                nexti = fastcallSkipTarget;
-                fastcallSkipTarget = -1;
+                nexti = cmdSkipTarget;
+                cmdSkipTarget = -1;
             }
         }
 
@@ -184,7 +297,7 @@ void IrBuilder::buildFunctionIr(Proto* proto)
             afterInstForNLoop(*this, pc);
 
         i = nexti;
-        LUAU_ASSERT(i <= proto->sizecode);
+        CODEGEN_ASSERT(i <= proto->sizecode);
 
         // If we are going into a new block at the next instruction and it's a fallthrough, jump has to be placed to mark block termination
         if (i < int(instIndexToBlock.size()) && instIndexToBlock[i] != kNoAssociatedBlockIndex)
@@ -216,7 +329,7 @@ void IrBuilder::rebuildBytecodeBasicBlocks(Proto* proto)
             jumpTargets[target] = true;
 
         i += getOpLength(op);
-        LUAU_ASSERT(i <= proto->sizecode);
+        CODEGEN_ASSERT(i <= proto->sizecode);
     }
 
     // Bytecode blocks are created at bytecode jump targets and the start of a function
@@ -231,8 +344,7 @@ void IrBuilder::rebuildBytecodeBasicBlocks(Proto* proto)
         }
     }
 
-    if (FFlag::LuauCodegenBytecodeInfer)
-        buildBytecodeBlocks(function, jumpTargets);
+    buildBytecodeBlocks(function, jumpTargets);
 }
 
 void IrBuilder::translateInst(LuauOpcode op, const Instruction* pc, int i)
@@ -503,7 +615,15 @@ void IrBuilder::translateInst(LuauOpcode op, const Instruction* pc, int i)
         translateInstCapture(*this, pc, i);
         break;
     case LOP_NAMECALL:
-        translateInstNamecall(*this, pc, i);
+        if (FFlag::LuauCodegenAnalyzeHostVectorOps)
+        {
+            if (translateInstNamecall(*this, pc, i))
+                cmdSkipTarget = i + 3;
+        }
+        else
+        {
+            translateInstNamecall(*this, pc, i);
+        }
         break;
     case LOP_PREPVARARGS:
         inst(IrCmd::FALLBACK_PREPVARARGS, constUint(i), constInt(LUAU_INSN_A(*pc)));
@@ -525,7 +645,7 @@ void IrBuilder::translateInst(LuauOpcode op, const Instruction* pc, int i)
         break;
     }
     default:
-        LUAU_ASSERT(!"Unknown instruction");
+        CODEGEN_ASSERT(!"Unknown instruction");
     }
 }
 
@@ -544,7 +664,7 @@ void IrBuilder::handleFastcallFallback(IrOp fallbackOrUndef, const Instruction* 
     }
     else
     {
-        fastcallSkipTarget = i + skip + 2;
+        cmdSkipTarget = i + skip + 2;
     }
 }
 
@@ -560,7 +680,7 @@ void IrBuilder::beginBlock(IrOp block)
     IrBlock& target = function.blocks[block.index];
     activeBlockIdx = block.index;
 
-    LUAU_ASSERT(target.start == ~0u || target.start == uint32_t(function.instructions.size()));
+    CODEGEN_ASSERT(target.start == ~0u || target.start == uint32_t(function.instructions.size()));
 
     target.start = uint32_t(function.instructions.size());
     target.sortkey = target.start;
@@ -583,7 +703,7 @@ void IrBuilder::clone(const IrBlock& source, bool removeCurrentTerminator)
             if (const uint32_t* newIndex = instRedir.find(op.index))
                 op.index = *newIndex;
             else
-                LUAU_ASSERT(!"Values can only be used if they are defined in the same block");
+                CODEGEN_ASSERT(!"Values can only be used if they are defined in the same block");
         }
     };
 
@@ -598,13 +718,13 @@ void IrBuilder::clone(const IrBlock& source, bool removeCurrentTerminator)
 
     for (uint32_t index = source.start; index <= source.finish; index++)
     {
-        LUAU_ASSERT(index < function.instructions.size());
+        CODEGEN_ASSERT(index < function.instructions.size());
         IrInst clone = function.instructions[index];
 
         // Skip pseudo instructions to make clone more compact, but validate that they have no users
         if (isPseudo(clone.cmd))
         {
-            LUAU_ASSERT(clone.useCount == 0);
+            CODEGEN_ASSERT(clone.useCount == 0);
             continue;
         }
 
@@ -727,7 +847,7 @@ IrOp IrBuilder::inst(IrCmd cmd, IrOp a, IrOp b, IrOp c, IrOp d, IrOp e, IrOp f)
     uint32_t index = uint32_t(function.instructions.size());
     function.instructions.push_back({cmd, a, b, c, d, e, f});
 
-    LUAU_ASSERT(!inTerminatedBlock);
+    CODEGEN_ASSERT(!inTerminatedBlock);
 
     if (isBlockTerminator(cmd))
     {

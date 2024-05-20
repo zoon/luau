@@ -80,9 +80,7 @@
         } \
     }
 
-
 #define VM_DISPATCH_OP(op) &&CASE_##op
-
 
 #define VM_DISPATCH_TABLE() \
     VM_DISPATCH_OP(LOP_NOP), VM_DISPATCH_OP(LOP_BREAK), VM_DISPATCH_OP(LOP_LOADNIL), VM_DISPATCH_OP(LOP_LOADB), VM_DISPATCH_OP(LOP_LOADN), \
@@ -134,8 +132,6 @@
 
 // Does VM support native execution via ExecutionCallbacks? We mostly assume it does but keep the define to make it easy to quantify the cost.
 #define VM_HAS_NATIVE 1
-
-LUAU_FASTFLAGVARIABLE(LuauTaggedLuData, false)
 
 LUAU_NOINLINE void luau_callhook(lua_State* L, lua_Hook hook, void* userdata)
 {
@@ -1112,7 +1108,7 @@ reentry:
                         VM_NEXT();
 
                     case LUA_TLIGHTUSERDATA:
-                        pc += (pvalue(ra) == pvalue(rb) && (!FFlag::LuauTaggedLuData || lightuserdatatag(ra) == lightuserdatatag(rb))) ? LUAU_INSN_D(insn) : 1;
+                        pc += (pvalue(ra) == pvalue(rb) && lightuserdatatag(ra) == lightuserdatatag(rb)) ? LUAU_INSN_D(insn) : 1;
                         LUAU_ASSERT(unsigned(pc - cl->l.p->code) < unsigned(cl->l.p->sizecode));
                         VM_NEXT();
 
@@ -1227,7 +1223,7 @@ reentry:
                         VM_NEXT();
 
                     case LUA_TLIGHTUSERDATA:
-                        pc += (pvalue(ra) != pvalue(rb) || (FFlag::LuauTaggedLuData && lightuserdatatag(ra) != lightuserdatatag(rb))) ? LUAU_INSN_D(insn) : 1;
+                        pc += (pvalue(ra) != pvalue(rb) || lightuserdatatag(ra) != lightuserdatatag(rb)) ? LUAU_INSN_D(insn) : 1;
                         LUAU_ASSERT(unsigned(pc - cl->l.p->code) < unsigned(cl->l.p->sizecode));
                         VM_NEXT();
 
@@ -3031,7 +3027,7 @@ int luau_precall(lua_State* L, StkId func, int nresults)
         ci->savedpc = p->code;
 
 #if VM_HAS_NATIVE
-        if (p->execdata)
+        if (p->exectarget != 0 && p->execdata)
             ci->flags = LUA_CALLINFO_NATIVE;
 #endif
 

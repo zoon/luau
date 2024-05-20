@@ -9,7 +9,8 @@
 #include <stdexcept>
 
 LUAU_FASTINTVARIABLE(LuauTarjanChildLimit, 10000)
-LUAU_FASTFLAG(DebugLuauReadWriteProperties)
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTINTVARIABLE(LuauTarjanPreallocationSize, 256);
 
 namespace Luau
 {
@@ -146,6 +147,15 @@ static TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool a
     return resTy;
 }
 
+Tarjan::Tarjan()
+{
+    nodes.reserve(FInt::LuauTarjanPreallocationSize);
+    stack.reserve(FInt::LuauTarjanPreallocationSize);
+    edgesTy.reserve(FInt::LuauTarjanPreallocationSize);
+    edgesTp.reserve(FInt::LuauTarjanPreallocationSize);
+    worklist.reserve(FInt::LuauTarjanPreallocationSize);
+}
+
 void Tarjan::visitChildren(TypeId ty, int index)
 {
     LUAU_ASSERT(ty == log->follow(ty));
@@ -171,10 +181,10 @@ void Tarjan::visitChildren(TypeId ty, int index)
         LUAU_ASSERT(!ttv->boundTo);
         for (const auto& [name, prop] : ttv->props)
         {
-            if (FFlag::DebugLuauReadWriteProperties)
+            if (FFlag::DebugLuauDeferredConstraintResolution)
             {
-                visitChild(prop.readType());
-                visitChild(prop.writeType());
+                visitChild(prop.readTy);
+                visitChild(prop.writeTy);
             }
             else
                 visitChild(prop.type());
@@ -515,6 +525,24 @@ TarjanResult Tarjan::findDirty(TypePackId tp)
     return visitRoot(tp);
 }
 
+Substitution::Substitution(const TxnLog* log_, TypeArena* arena)
+    : arena(arena)
+{
+    log = log_;
+    LUAU_ASSERT(log);
+    LUAU_ASSERT(arena);
+}
+
+void Substitution::dontTraverseInto(TypeId ty)
+{
+    noTraverseTypes.insert(ty);
+}
+
+void Substitution::dontTraverseInto(TypePackId tp)
+{
+    noTraverseTypePacks.insert(tp);
+}
+
 std::optional<TypeId> Substitution::substitute(TypeId ty)
 {
     ty = log->follow(ty);
@@ -530,7 +558,8 @@ std::optional<TypeId> Substitution::substitute(TypeId ty)
     {
         if (!ignoreChildren(oldTy) && !replacedTypes.contains(newTy))
         {
-            replaceChildren(newTy);
+            if (!noTraverseTypes.contains(newTy))
+                replaceChildren(newTy);
             replacedTypes.insert(newTy);
         }
     }
@@ -538,7 +567,8 @@ std::optional<TypeId> Substitution::substitute(TypeId ty)
     {
         if (!ignoreChildren(oldTp) && !replacedTypePacks.contains(newTp))
         {
-            replaceChildren(newTp);
+            if (!noTraverseTypePacks.contains(newTp))
+                replaceChildren(newTp);
             replacedTypePacks.insert(newTp);
         }
     }
@@ -561,7 +591,8 @@ std::optional<TypePackId> Substitution::substitute(TypePackId tp)
     {
         if (!ignoreChildren(oldTy) && !replacedTypes.contains(newTy))
         {
-            replaceChildren(newTy);
+            if (!noTraverseTypes.contains(newTy))
+                replaceChildren(newTy);
             replacedTypes.insert(newTy);
         }
     }
@@ -569,7 +600,8 @@ std::optional<TypePackId> Substitution::substitute(TypePackId tp)
     {
         if (!ignoreChildren(oldTp) && !replacedTypePacks.contains(newTp))
         {
-            replaceChildren(newTp);
+            if (!noTraverseTypePacks.contains(newTp))
+                replaceChildren(newTp);
             replacedTypePacks.insert(newTp);
         }
     }
@@ -686,8 +718,8 @@ void Substitution::replaceChildren(TypeId ty)
         LUAU_ASSERT(!ttv->boundTo);
         for (auto& [name, prop] : ttv->props)
         {
-            if (FFlag::DebugLuauReadWriteProperties)
-                prop = Property::create(replace(prop.readType()), replace(prop.writeType()));
+            if (FFlag::DebugLuauDeferredConstraintResolution)
+                prop = Property::create(replace(prop.readTy), replace(prop.writeTy));
             else
                 prop.setType(replace(prop.type()));
         }

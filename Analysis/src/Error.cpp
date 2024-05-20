@@ -10,9 +10,12 @@
 
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 
 LUAU_FASTINTVARIABLE(LuauIndentTypeMismatchMaxTypeLength, 10)
+
+LUAU_DYNAMIC_FASTFLAGVARIABLE(LuauImproveNonFunctionCallError, false)
 
 static std::string wrongNumberOfArgsString(
     size_t expectedCount, std::optional<size_t> maximumCount, size_t actualCount, const char* argPrefix = nullptr, bool isVariadic = false)
@@ -334,8 +337,65 @@ struct ErrorConverter
         return e.message;
     }
 
+    std::optional<TypeId> findCallMetamethod(TypeId type) const
+    {
+        type = follow(type);
+
+        std::optional<TypeId> metatable;
+        if (const MetatableType* mtType = get<MetatableType>(type))
+            metatable = mtType->metatable;
+        else if (const ClassType* classType = get<ClassType>(type))
+            metatable = classType->metatable;
+
+        if (!metatable)
+            return std::nullopt;
+
+        TypeId unwrapped = follow(*metatable);
+
+        if (get<AnyType>(unwrapped))
+            return unwrapped;
+
+        const TableType* mtt = getTableType(unwrapped);
+        if (!mtt)
+            return std::nullopt;
+
+        auto it = mtt->props.find("__call");
+        if (it != mtt->props.end())
+            return it->second.type();
+        else
+            return std::nullopt;
+    }
+
     std::string operator()(const Luau::CannotCallNonFunction& e) const
     {
+        if (DFFlag::LuauImproveNonFunctionCallError)
+        {
+            if (auto unionTy = get<UnionType>(follow(e.ty)))
+            {
+                std::string err = "Cannot call a value of the union type:";
+
+                for (auto option : unionTy)
+                {
+                    option = follow(option);
+
+                    if (get<FunctionType>(option) || findCallMetamethod(option))
+                    {
+                        err += "\n  | " + toString(option);
+                        continue;
+                    }
+
+                    // early-exit if we find something that isn't callable in the union.
+                    return "Cannot call a value of type " + toString(option) + " in union:\n  " + toString(e.ty);
+                }
+
+                err += "\nWe are unable to determine the appropriate result type for such a call.";
+
+                return err;
+            }
+
+            return "Cannot call a value of type " + toString(e.ty);
+        }
+
         return "Cannot call non-function " + toString(e.ty);
     }
     std::string operator()(const Luau::ExtraInformation& e) const
@@ -508,6 +568,26 @@ struct ErrorConverter
         return "Type family instance " + Luau::toString(e.ty) + " is uninhabited";
     }
 
+    std::string operator()(const ExplicitFunctionAnnotationRecommended& r) const
+    {
+        std::string toReturn = toString(r.recommendedReturn);
+        std::string argAnnotations;
+        for (auto [arg, type] : r.recommendedArgs)
+        {
+            argAnnotations += arg + ": " + toString(type) + ", ";
+        }
+        if (argAnnotations.length() >= 2)
+        {
+            argAnnotations.pop_back();
+            argAnnotations.pop_back();
+        }
+
+        if (argAnnotations.empty())
+            return "Consider annotating the return with " + toReturn;
+
+        return "Consider placing the following annotations on the arguments: " + argAnnotations + " or instead annotating the return as " + toReturn;
+    }
+
     std::string operator()(const UninhabitedTypePackFamily& e) const
     {
         return "Type pack family instance " + Luau::toString(e.tp) + " is uninhabited";
@@ -538,6 +618,56 @@ struct ErrorConverter
     {
         return "Argument " + e.argument + " with type '" + toString(e.argumentType) + "' in function '" + e.functionName +
                "' is used in a way that will run time error";
+    }
+
+    std::string operator()(const PropertyAccessViolation& e) const
+    {
+        const std::string stringKey = isIdentifier(e.key) ? e.key : "\"" + e.key + "\"";
+        switch (e.context)
+        {
+        case PropertyAccessViolation::CannotRead:
+            return "Property " + stringKey + " of table '" + toString(e.table) + "' is write-only";
+        case PropertyAccessViolation::CannotWrite:
+            return "Property " + stringKey + " of table '" + toString(e.table) + "' is read-only";
+        }
+
+        LUAU_UNREACHABLE();
+        return "<Invalid PropertyAccessViolation>";
+    }
+
+    std::string operator()(const CheckedFunctionIncorrectArgs& e) const
+    {
+        return "Checked Function " + e.functionName + " expects " + std::to_string(e.expected) + " arguments, but received " +
+               std::to_string(e.actual);
+    }
+
+    std::string operator()(const UnexpectedTypeInSubtyping& e) const
+    {
+        return "Encountered an unexpected type in subtyping: " + toString(e.ty);
+    }
+
+    std::string operator()(const UnexpectedTypePackInSubtyping& e) const
+    {
+        return "Encountered an unexpected type pack in subtyping: " + toString(e.tp);
+    }
+
+    std::string operator()(const CannotAssignToNever& e) const
+    {
+        std::string result = "Cannot assign a value of type " + toString(e.rhsType) + " to a field of type never";
+
+        switch (e.reason)
+        {
+        case CannotAssignToNever::Reason::PropertyNarrowed:
+            if (!e.cause.empty())
+            {
+                result += "\ncaused by the property being given the following incompatible types:\n";
+                for (auto ty : e.cause)
+                    result += "    " + toString(ty) + "\n";
+                result += "There are no values that could safely satisfy all of these types at once.";
+            }
+        }
+
+        return result;
     }
 };
 
@@ -629,6 +759,11 @@ bool UnknownSymbol::operator==(const UnknownSymbol& rhs) const
 bool UnknownProperty::operator==(const UnknownProperty& rhs) const
 {
     return *table == *rhs.table && key == rhs.key;
+}
+
+bool PropertyAccessViolation::operator==(const PropertyAccessViolation& rhs) const
+{
+    return *table == *rhs.table && key == rhs.key && context == rhs.context;
 }
 
 bool NotATable::operator==(const NotATable& rhs) const
@@ -846,6 +981,12 @@ bool UninhabitedTypeFamily::operator==(const UninhabitedTypeFamily& rhs) const
     return ty == rhs.ty;
 }
 
+
+bool ExplicitFunctionAnnotationRecommended::operator==(const ExplicitFunctionAnnotationRecommended& rhs) const
+{
+    return recommendedReturn == rhs.recommendedReturn && recommendedArgs == rhs.recommendedArgs;
+}
+
 bool UninhabitedTypePackFamily::operator==(const UninhabitedTypePackFamily& rhs) const
 {
     return tp == rhs.tp;
@@ -870,6 +1011,35 @@ bool CheckedFunctionCallError::operator==(const CheckedFunctionCallError& rhs) c
 bool NonStrictFunctionDefinitionError::operator==(const NonStrictFunctionDefinitionError& rhs) const
 {
     return functionName == rhs.functionName && argument == rhs.argument && argumentType == rhs.argumentType;
+}
+
+bool CheckedFunctionIncorrectArgs::operator==(const CheckedFunctionIncorrectArgs& rhs) const
+{
+    return functionName == rhs.functionName && expected == rhs.expected && actual == rhs.actual;
+}
+
+bool UnexpectedTypeInSubtyping::operator==(const UnexpectedTypeInSubtyping& rhs) const
+{
+    return ty == rhs.ty;
+}
+
+bool UnexpectedTypePackInSubtyping::operator==(const UnexpectedTypePackInSubtyping& rhs) const
+{
+    return tp == rhs.tp;
+}
+
+bool CannotAssignToNever::operator==(const CannotAssignToNever& rhs) const
+{
+    if (cause.size() != rhs.cause.size())
+        return false;
+
+    for (size_t i = 0; i < cause.size(); ++i)
+    {
+        if (*cause[i] != *rhs.cause[i])
+            return false;
+    }
+
+    return *rhsType == *rhs.rhsType && reason == rhs.reason;
 }
 
 std::string toString(const TypeError& error)
@@ -1032,6 +1202,12 @@ void copyError(T& e, TypeArena& destArena, CloneState& cloneState)
         e.ty = clone(e.ty);
     else if constexpr (std::is_same_v<T, UninhabitedTypeFamily>)
         e.ty = clone(e.ty);
+    else if constexpr (std::is_same_v<T, ExplicitFunctionAnnotationRecommended>)
+    {
+        e.recommendedReturn = clone(e.recommendedReturn);
+        for (auto [_, t] : e.recommendedArgs)
+            t = clone(t);
+    }
     else if constexpr (std::is_same_v<T, UninhabitedTypePackFamily>)
         e.tp = clone(e.tp);
     else if constexpr (std::is_same_v<T, WhereClauseNeeded>)
@@ -1046,6 +1222,22 @@ void copyError(T& e, TypeArena& destArena, CloneState& cloneState)
     else if constexpr (std::is_same_v<T, NonStrictFunctionDefinitionError>)
     {
         e.argumentType = clone(e.argumentType);
+    }
+    else if constexpr (std::is_same_v<T, PropertyAccessViolation>)
+        e.table = clone(e.table);
+    else if constexpr (std::is_same_v<T, CheckedFunctionIncorrectArgs>)
+    {
+    }
+    else if constexpr (std::is_same_v<T, UnexpectedTypeInSubtyping>)
+        e.ty = clone(e.ty);
+    else if constexpr (std::is_same_v<T, UnexpectedTypePackInSubtyping>)
+        e.tp = clone(e.tp);
+    else if constexpr (std::is_same_v<T, CannotAssignToNever>)
+    {
+        e.rhsType = clone(e.rhsType);
+
+        for (auto& ty : e.cause)
+            ty = clone(ty);
     }
     else
         static_assert(always_false_v<T>, "Non-exhaustive type switch");

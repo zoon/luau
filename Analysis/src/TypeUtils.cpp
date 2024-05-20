@@ -14,6 +14,30 @@ LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
 namespace Luau
 {
 
+bool inConditional(const TypeContext& context)
+{
+    return context == TypeContext::Condition;
+}
+
+bool occursCheck(TypeId needle, TypeId haystack)
+{
+    LUAU_ASSERT(get<BlockedType>(needle) || get<PendingExpansionType>(needle));
+    haystack = follow(haystack);
+
+    auto checkHaystack = [needle](TypeId haystack) {
+        return occursCheck(needle, haystack);
+    };
+
+    if (needle == haystack)
+        return true;
+    else if (auto ut = get<UnionType>(haystack))
+        return std::any_of(begin(ut), end(ut), checkHaystack);
+    else if (auto it = get<IntersectionType>(haystack))
+        return std::any_of(begin(it), end(it), checkHaystack);
+
+    return false;
+}
+
 std::optional<TypeId> findMetatableEntry(
     NotNull<BuiltinTypes> builtinTypes, ErrorVec& errors, TypeId type, const std::string& entry, Location location)
 {
@@ -45,6 +69,12 @@ std::optional<TypeId> findMetatableEntry(
 std::optional<TypeId> findTablePropertyRespectingMeta(
     NotNull<BuiltinTypes> builtinTypes, ErrorVec& errors, TypeId ty, const std::string& name, Location location)
 {
+    return findTablePropertyRespectingMeta(builtinTypes, errors, ty, name, ValueContext::RValue, location);
+}
+
+std::optional<TypeId> findTablePropertyRespectingMeta(
+    NotNull<BuiltinTypes> builtinTypes, ErrorVec& errors, TypeId ty, const std::string& name, ValueContext context, Location location)
+{
     if (get<AnyType>(ty))
         return ty;
 
@@ -52,7 +82,20 @@ std::optional<TypeId> findTablePropertyRespectingMeta(
     {
         const auto& it = tableType->props.find(name);
         if (it != tableType->props.end())
-            return it->second.type();
+        {
+            if (FFlag::DebugLuauDeferredConstraintResolution)
+            {
+                switch (context)
+                {
+                case ValueContext::RValue:
+                    return it->second.readTy;
+                case ValueContext::LValue:
+                    return it->second.writeTy;
+                }
+            }
+            else
+                return it->second.type();
+        }
     }
 
     std::optional<TypeId> mtIndex = findMetatableEntry(builtinTypes, errors, ty, "__index", location);
@@ -306,7 +349,8 @@ TypeId stripNil(NotNull<BuiltinTypes> builtinTypes, TypeArena& arena, TypeId ty)
 
 ErrorSuppression shouldSuppressErrors(NotNull<Normalizer> normalizer, TypeId ty)
 {
-    const NormalizedType* normType = normalizer->normalize(ty);
+    LUAU_ASSERT(FFlag::DebugLuauDeferredConstraintResolution);
+    std::shared_ptr<const NormalizedType> normType = normalizer->normalize(ty);
 
     if (!normType)
         return ErrorSuppression::NormalizationFailed;
