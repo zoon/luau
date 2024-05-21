@@ -129,7 +129,7 @@ static int lua_require(lua_State* L)
     if (resolvedRequire.status == RequireResolver::ModuleStatus::Cached)
         return finishrequire(L);
     else if (resolvedRequire.status == RequireResolver::ModuleStatus::NotFound)
-        luaL_errorL(L, "error requiring module");
+        luaL_errorL(L, "error requiring: module not found");
 
     // module needs to run in a new thread, isolated from the rest
     // note: we create ML on main thread so that it doesn't inherit environment of L

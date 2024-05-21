@@ -62,7 +62,7 @@ RequireResolver::ModuleStatus RequireResolver::findModule()
         std::optional<std::string> absolutePathOpt = resolvePath(pathToResolve, joinPaths(config.paths[i], "placeholder"));
 
         if (!absolutePathOpt)
-            luaL_errorL(L, "error requiring module");
+            luaL_errorL(L, "error requiring module 01");
 
         chunkname = *absolutePathOpt;
         absolutePath = *absolutePathOpt;
@@ -132,14 +132,14 @@ void RequireResolver::resolveAndStoreDefaultPaths()
         std::optional<std::string> absolutePathContext = getRequiringContextAbsolute();
 
         if (!absolutePathContext)
-            luaL_errorL(L, "error requiring module");
+            luaL_errorL(L, "error requiring module 02");
 
         // resolvePath automatically sanitizes/normalizes the paths
         std::optional<std::string> chunknameOpt = resolvePath(pathToResolve, chunknameContext);
         std::optional<std::string> absolutePathOpt = resolvePath(pathToResolve, *absolutePathContext);
 
         if (!chunknameOpt || !absolutePathOpt)
-            luaL_errorL(L, "error requiring module");
+            luaL_errorL(L, "error requiring module 03");
 
         chunkname = std::move(*chunknameOpt);
         absolutePath = std::move(*absolutePathOpt);
@@ -149,7 +149,7 @@ void RequireResolver::resolveAndStoreDefaultPaths()
         // Here we must explicitly sanitize, as the path is taken as is
         std::optional<std::string> sanitizedPath = normalizePath(pathToResolve);
         if (!sanitizedPath)
-            luaL_errorL(L, "error requiring module");
+            luaL_errorL(L, "error requiring module 04");
 
         chunkname = *sanitizedPath;
         absolutePath = std::move(*sanitizedPath);
@@ -246,7 +246,7 @@ void RequireResolver::parseNextConfig()
     {
         std::optional<std::string> requiringFile = getRequiringContextAbsolute();
         if (!requiringFile)
-            luaL_errorL(L, "error requiring module");
+            luaL_errorL(L, "error requiring module 05");
 
         directory = getParentPath(*requiringFile);
     }
@@ -283,7 +283,7 @@ void RequireResolver::parseConfigInDirectory(const std::string& directory)
             if (std::optional<std::string> resolvedPath = resolvePath(*it, configPath))
                 *it = std::move(*resolvedPath);
             else
-                luaL_errorL(L, "error requiring module");
+                luaL_errorL(L, "error requiring module 06");
         }
     }
 }
