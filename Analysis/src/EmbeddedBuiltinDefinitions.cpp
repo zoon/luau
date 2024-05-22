@@ -137,6 +137,7 @@ declare _VERSION: string
 declare function gcinfo(): number
 
 declare function print<T...>(...: T...)
+declare function warn<T...>(...: T...)
 
 declare function type<T>(value: T): string
 declare function typeof<T>(value: T): string
@@ -329,6 +330,7 @@ declare _VERSION: string
 declare function gcinfo(): number
 
 declare function print<T...>(...: T...)
+declare function warn<T...>(...: T...)
 
 declare function type<T>(value: T): string
 declare function typeof<T>(value: T): string

@@ -172,6 +172,7 @@ static const std::string kNames[] = {
     "userdata",
     "utf8",
     "vector",
+    "warn",
     "wrap",
     "writef32",
     "writef64",
