@@ -151,6 +151,8 @@ const char* getCmdName(IrCmd cmd)
         return "SQRT_NUM";
     case IrCmd::ABS_NUM:
         return "ABS_NUM";
+    case IrCmd::SIGN_NUM:
+        return "SIGN_NUM";
     case IrCmd::ADD_VEC:
         return "ADD_VEC";
     case IrCmd::SUB_VEC:
@@ -197,6 +199,8 @@ const char* getCmdName(IrCmd cmd)
         return "TRY_NUM_TO_INDEX";
     case IrCmd::TRY_CALL_FASTGETTM:
         return "TRY_CALL_FASTGETTM";
+    case IrCmd::NEW_USERDATA:
+        return "NEW_USERDATA";
     case IrCmd::INT_TO_NUM:
         return "INT_TO_NUM";
     case IrCmd::UINT_TO_NUM:
@@ -255,6 +259,8 @@ const char* getCmdName(IrCmd cmd)
         return "CHECK_NODE_VALUE";
     case IrCmd::CHECK_BUFFER_LEN:
         return "CHECK_BUFFER_LEN";
+    case IrCmd::CHECK_USERDATA_TAG:
+        return "CHECK_USERDATA_TAG";
     case IrCmd::INTERRUPT:
         return "INTERRUPT";
     case IrCmd::CHECK_GC:
@@ -411,6 +417,7 @@ void toString(IrToStringContext& ctx, const IrInst& inst, uint32_t index)
     checkOp(inst.d, ", ");
     checkOp(inst.e, ", ");
     checkOp(inst.f, ", ");
+    checkOp(inst.g, ", ");
 }
 
 void toString(IrToStringContext& ctx, const IrBlock& block, uint32_t index)
@@ -480,45 +487,62 @@ void toString(std::string& result, IrConst constant)
     }
 }
 
-const char* getBytecodeTypeName(uint8_t type)
+const char* getBytecodeTypeName(uint8_t type, const char* const* userdataTypes)
 {
-    switch (type & ~LBC_TYPE_OPTIONAL_BIT)
+    // Optional bit should be handled externally
+    type = type & ~LBC_TYPE_OPTIONAL_BIT;
+
+    if (type >= LBC_TYPE_TAGGED_USERDATA_BASE && type < LBC_TYPE_TAGGED_USERDATA_END)
+    {
+        if (userdataTypes)
+            return userdataTypes[type - LBC_TYPE_TAGGED_USERDATA_BASE];
+
+        return "userdata";
+    }
+
+    switch (type)
     {
     case LBC_TYPE_NIL:
-        return (type & LBC_TYPE_OPTIONAL_BIT) != 0 ? "nil?" : "nil";
+        return "nil";
     case LBC_TYPE_BOOLEAN:
-        return (type & LBC_TYPE_OPTIONAL_BIT) != 0 ? "boolean?" : "boolean";
+        return "boolean";
     case LBC_TYPE_NUMBER:
-        return (type & LBC_TYPE_OPTIONAL_BIT) != 0 ? "number?" : "number";
+        return "number";
     case LBC_TYPE_STRING:
-        return (type & LBC_TYPE_OPTIONAL_BIT) != 0 ? "string?" : "string";
+        return "string";
     case LBC_TYPE_TABLE:
-        return (type & LBC_TYPE_OPTIONAL_BIT) != 0 ? "table?" : "table";
+        return "table";
     case LBC_TYPE_FUNCTION:
-        return (type & LBC_TYPE_OPTIONAL_BIT) != 0 ? "function?" : "function";
+        return "function";
     case LBC_TYPE_THREAD:
-        return (type & LBC_TYPE_OPTIONAL_BIT) != 0 ? "thread?" : "thread";
+        return "thread";
     case LBC_TYPE_USERDATA:
-        return (type & LBC_TYPE_OPTIONAL_BIT) != 0 ? "userdata?" : "userdata";
+        return "userdata";
     case LBC_TYPE_VECTOR:
-        return (type & LBC_TYPE_OPTIONAL_BIT) != 0 ? "vector?" : "vector";
+        return "vector";
     case LBC_TYPE_BUFFER:
-        return (type & LBC_TYPE_OPTIONAL_BIT) != 0 ? "buffer?" : "buffer";
+        return "buffer";
     case LBC_TYPE_ANY:
-        return (type & LBC_TYPE_OPTIONAL_BIT) != 0 ? "any?" : "any";
+        return "any";
     }
 
     CODEGEN_ASSERT(!"Unhandled type in getBytecodeTypeName");
     return nullptr;
 }
 
-void toString(std::string& result, const BytecodeTypes& bcTypes)
+void toString(std::string& result, const BytecodeTypes& bcTypes, const char* const* userdataTypes)
 {
+    append(result, "%s%s", getBytecodeTypeName(bcTypes.result, userdataTypes), (bcTypes.result & LBC_TYPE_OPTIONAL_BIT) != 0 ? "?" : "");
+    append(result, " <- ");
+    append(result, "%s%s", getBytecodeTypeName(bcTypes.a, userdataTypes), (bcTypes.a & LBC_TYPE_OPTIONAL_BIT) != 0 ? "?" : "");
+    append(result, ", ");
+    append(result, "%s%s", getBytecodeTypeName(bcTypes.b, userdataTypes), (bcTypes.b & LBC_TYPE_OPTIONAL_BIT) != 0 ? "?" : "");
+
     if (bcTypes.c != LBC_TYPE_ANY)
-        append(result, "%s <- %s, %s, %s", getBytecodeTypeName(bcTypes.result), getBytecodeTypeName(bcTypes.a), getBytecodeTypeName(bcTypes.b),
-            getBytecodeTypeName(bcTypes.c));
-    else
-        append(result, "%s <- %s, %s", getBytecodeTypeName(bcTypes.result), getBytecodeTypeName(bcTypes.a), getBytecodeTypeName(bcTypes.b));
+    {
+        append(result, ", ");
+        append(result, "%s%s", getBytecodeTypeName(bcTypes.c, userdataTypes), (bcTypes.c & LBC_TYPE_OPTIONAL_BIT) != 0 ? "?" : "");
+    }
 }
 
 static void appendBlockSet(IrToStringContext& ctx, BlockIteratorWrapper blocks)
@@ -583,6 +607,8 @@ static RegisterSet getJumpTargetExtraLiveIn(IrToStringContext& ctx, const IrBloc
         op = inst.e;
     else if (inst.f.kind == IrOpKind::Block)
         op = inst.f;
+    else if (inst.g.kind == IrOpKind::Block)
+        op = inst.g;
 
     if (op.kind == IrOpKind::Block && op.index < ctx.cfg.in.size())
     {
@@ -867,6 +893,7 @@ std::string toDot(const IrFunction& function, bool includeInst)
             checkOp(inst.d);
             checkOp(inst.e);
             checkOp(inst.f);
+            checkOp(inst.g);
         }
     }
 

@@ -18,7 +18,6 @@
 LUAU_FASTFLAGVARIABLE(DebugLuauCheckNormalizeInvariant, false)
 LUAU_FASTFLAGVARIABLE(LuauNormalizeAwayUninhabitableTables, false)
 LUAU_FASTFLAGVARIABLE(LuauNormalizeNotUnknownIntersection, false);
-LUAU_FASTFLAGVARIABLE(LuauFixCyclicUnionsOfIntersections, false);
 LUAU_FASTFLAGVARIABLE(LuauFixReduceStackPressure, false);
 LUAU_FASTFLAGVARIABLE(LuauFixCyclicTablesBlowingStack, false);
 
@@ -26,11 +25,6 @@ LUAU_FASTFLAGVARIABLE(LuauFixCyclicTablesBlowingStack, false);
 LUAU_FASTINTVARIABLE(LuauNormalizeIterationLimit, 1200);
 LUAU_FASTINTVARIABLE(LuauNormalizeCacheLimit, 100000);
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
-
-static bool fixCyclicUnionsOfIntersections()
-{
-    return FFlag::LuauFixCyclicUnionsOfIntersections || FFlag::DebugLuauDeferredConstraintResolution;
-}
 
 static bool fixReduceStackPressure()
 {
@@ -261,8 +255,10 @@ bool isSubtype(const NormalizedStringType& subStr, const NormalizedStringType& s
 
 void NormalizedClassType::pushPair(TypeId ty, TypeIds negations)
 {
-    ordering.push_back(ty);
-    classes.insert(std::make_pair(ty, std::move(negations)));
+    auto result = classes.insert(std::make_pair(ty, std::move(negations)));
+    if (result.second)
+        ordering.push_back(ty);
+    LUAU_ASSERT(ordering.size() == classes.size());
 }
 
 void NormalizedClassType::resetToNever()
@@ -820,7 +816,7 @@ static bool areNormalizedClasses(const NormalizedClassType& tys)
 
 static bool isPlainTyvar(TypeId ty)
 {
-    return (get<FreeType>(ty) || get<GenericType>(ty) || get<BlockedType>(ty) || get<PendingExpansionType>(ty) || get<TypeFamilyInstanceType>(ty));
+    return (get<FreeType>(ty) || get<GenericType>(ty) || get<BlockedType>(ty) || get<PendingExpansionType>(ty) || get<TypeFunctionInstanceType>(ty));
 }
 
 static bool isNormalizedTyvar(const NormalizedTyvars& tyvars)
@@ -887,7 +883,7 @@ static bool isCacheable(TypePackId tp, Set<TypeId>& seen)
 
     if (auto tail = it.tail())
     {
-        if (get<FreeTypePack>(*tail) || get<BlockedTypePack>(*tail) || get<TypeFamilyInstanceTypePack>(*tail))
+        if (get<FreeTypePack>(*tail) || get<BlockedTypePack>(*tail) || get<TypeFunctionInstanceTypePack>(*tail))
             return false;
     }
 
@@ -905,7 +901,7 @@ static bool isCacheable(TypeId ty, Set<TypeId>& seen)
     if (get<FreeType>(ty) || get<BlockedType>(ty) || get<PendingExpansionType>(ty))
         return false;
 
-    if (auto tfi = get<TypeFamilyInstanceType>(ty))
+    if (auto tfi = get<TypeFunctionInstanceType>(ty))
     {
         for (TypeId t : tfi->typeArguments)
         {
@@ -1776,12 +1772,9 @@ NormalizationResult Normalizer::unionNormalWithTy(NormalizedType& here, TypeId t
     }
     else if (const IntersectionType* itv = get<IntersectionType>(there))
     {
-        if (fixCyclicUnionsOfIntersections())
-        {
-            if (seenSetTypes.count(there))
-                return NormalizationResult::True;
-            seenSetTypes.insert(there);
-        }
+        if (seenSetTypes.count(there))
+            return NormalizationResult::True;
+        seenSetTypes.insert(there);
 
         NormalizedType norm{builtinTypes};
         norm.tops = builtinTypes->anyType;
@@ -1790,21 +1783,19 @@ NormalizationResult Normalizer::unionNormalWithTy(NormalizedType& here, TypeId t
             NormalizationResult res = intersectNormalWithTy(norm, *it, seenSetTypes);
             if (res != NormalizationResult::True)
             {
-                if (fixCyclicUnionsOfIntersections())
-                    seenSetTypes.erase(there);
+                seenSetTypes.erase(there);
                 return res;
             }
         }
 
-        if (fixCyclicUnionsOfIntersections())
-            seenSetTypes.erase(there);
+        seenSetTypes.erase(there);
 
         return unionNormals(here, norm);
     }
     else if (get<UnknownType>(here.tops))
         return NormalizationResult::True;
     else if (get<GenericType>(there) || get<FreeType>(there) || get<BlockedType>(there) || get<PendingExpansionType>(there) ||
-             get<TypeFamilyInstanceType>(there))
+             get<TypeFunctionInstanceType>(there))
     {
         if (tyvarIndex(there) <= ignoreSmallerTyvars)
             return NormalizationResult::True;
@@ -1814,12 +1805,6 @@ NormalizationResult Normalizer::unionNormalWithTy(NormalizedType& here, TypeId t
 
         if (!isCacheable(there))
             here.isCacheable = false;
-    }
-    else if (auto lt = get<LocalType>(there))
-    {
-        // FIXME?  This is somewhat questionable.
-        // Maybe we should assert because this should never happen?
-        unionNormalWithTy(here, lt->domain, seenSetTypes, ignoreSmallerTyvars);
     }
     else if (get<FunctionType>(there))
         unionFunctionsWithFunction(here.functions, there);
@@ -1887,7 +1872,7 @@ NormalizationResult Normalizer::unionNormalWithTy(NormalizedType& here, TypeId t
         if (res != NormalizationResult::True)
             return res;
     }
-    else if (get<PendingExpansionType>(there) || get<TypeFamilyInstanceType>(there))
+    else if (get<PendingExpansionType>(there) || get<TypeFunctionInstanceType>(there))
     {
         // nothing
     }
@@ -2534,6 +2519,7 @@ std::optional<TypeId> Normalizer::intersectionOfTables(TypeId here, TypeId there
         state = tttv->state;
 
     TypeLevel level = max(httv->level, tttv->level);
+    Scope* scope = max(httv->scope, tttv->scope);
 
     std::unique_ptr<TableType> result = nullptr;
     bool hereSubThere = true;
@@ -2644,7 +2630,7 @@ std::optional<TypeId> Normalizer::intersectionOfTables(TypeId here, TypeId there
         if (prop.readTy || prop.writeTy)
         {
             if (!result.get())
-                result = std::make_unique<TableType>(TableType{state, level});
+                result = std::make_unique<TableType>(TableType{state, level, scope});
             result->props[name] = prop;
         }
     }
@@ -2654,7 +2640,7 @@ std::optional<TypeId> Normalizer::intersectionOfTables(TypeId here, TypeId there
         if (httv->props.count(name) == 0)
         {
             if (!result.get())
-                result = std::make_unique<TableType>(TableType{state, level});
+                result = std::make_unique<TableType>(TableType{state, level, scope});
 
             result->props[name] = tprop;
             hereSubThere = false;
@@ -2667,7 +2653,7 @@ std::optional<TypeId> Normalizer::intersectionOfTables(TypeId here, TypeId there
         TypeId index = unionType(httv->indexer->indexType, tttv->indexer->indexType);
         TypeId indexResult = intersectionType(httv->indexer->indexResultType, tttv->indexer->indexResultType);
         if (!result.get())
-            result = std::make_unique<TableType>(TableType{state, level});
+            result = std::make_unique<TableType>(TableType{state, level, scope});
         result->indexer = {index, indexResult};
         hereSubThere &= (httv->indexer->indexType == index) && (httv->indexer->indexResultType == indexResult);
         thereSubHere &= (tttv->indexer->indexType == index) && (tttv->indexer->indexResultType == indexResult);
@@ -2675,14 +2661,14 @@ std::optional<TypeId> Normalizer::intersectionOfTables(TypeId here, TypeId there
     else if (httv->indexer)
     {
         if (!result.get())
-            result = std::make_unique<TableType>(TableType{state, level});
+            result = std::make_unique<TableType>(TableType{state, level, scope});
         result->indexer = httv->indexer;
         thereSubHere = false;
     }
     else if (tttv->indexer)
     {
         if (!result.get())
-            result = std::make_unique<TableType>(TableType{state, level});
+            result = std::make_unique<TableType>(TableType{state, level, scope});
         result->indexer = tttv->indexer;
         hereSubThere = false;
     }
@@ -2697,7 +2683,7 @@ std::optional<TypeId> Normalizer::intersectionOfTables(TypeId here, TypeId there
         if (result.get())
             table = arena->addType(std::move(*result));
         else
-            table = arena->addType(TableType{state, level});
+            table = arena->addType(TableType{state, level, scope});
     }
 
     if (tmtable && hmtable)
@@ -3094,7 +3080,7 @@ NormalizationResult Normalizer::intersectNormalWithTy(NormalizedType& here, Type
         return NormalizationResult::True;
     }
     else if (get<GenericType>(there) || get<FreeType>(there) || get<BlockedType>(there) || get<PendingExpansionType>(there) ||
-             get<TypeFamilyInstanceType>(there) || get<LocalType>(there))
+             get<TypeFunctionInstanceType>(there))
     {
         NormalizedType thereNorm{builtinTypes};
         NormalizedType topNorm{builtinTypes};
@@ -3102,10 +3088,6 @@ NormalizationResult Normalizer::intersectNormalWithTy(NormalizedType& here, Type
         thereNorm.tyvars.insert_or_assign(there, std::make_unique<NormalizedType>(std::move(topNorm)));
         here.isCacheable = false;
         return intersectNormals(here, thereNorm);
-    }
-    else if (auto lt = get<LocalType>(there))
-    {
-        return intersectNormalWithTy(here, lt->domain, seenSetTypes);
     }
 
     NormalizedTyvars tyvars = std::move(here.tyvars);

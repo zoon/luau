@@ -1582,7 +1582,7 @@ TEST_CASE_FIXTURE(Fixture, "inferred_higher_order_functions_are_quantified_at_th
     if (!result.errors.empty())
     {
         for (const auto& e : result.errors)
-            printf("%s %s: %s\n", e.moduleName.c_str(), toString(e.location).c_str(), toString(e).c_str());
+            MESSAGE(e.moduleName << " " << toString(e.location) << ": " << toString(e));
     }
 }
 
@@ -2262,7 +2262,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "regex_benchmark_string_format_minimization")
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
-TEST_CASE_FIXTURE(BuiltinsFixture, "subgeneric_typefamily_super_monomorphic")
+TEST_CASE_FIXTURE(BuiltinsFixture, "subgeneric_type_function_super_monomorphic")
 {
     CheckResult result = check(R"(
 local a: (number, number) -> number = function(a, b) return a - b end
@@ -2298,10 +2298,14 @@ end
     if (FFlag::DebugLuauDeferredConstraintResolution)
     {
         LUAU_REQUIRE_ERROR_COUNT(4, result);
-        CHECK(toString(result.errors[0]) == "Type family instance sub<unknown, number> is uninhabited");
-        CHECK(toString(result.errors[1]) == "Type family instance sub<unknown, number> is uninhabited");
-        CHECK(toString(result.errors[2]) == "Type family instance sub<unknown, number> is uninhabited");
-        CHECK(toString(result.errors[3]) == "Type family instance sub<unknown, number> is uninhabited");
+        CHECK(toString(result.errors[0]) ==
+              "Operator '-' could not be applied to operands of types unknown and number; there is no corresponding overload for __sub");
+        CHECK(toString(result.errors[1]) ==
+              "Operator '-' could not be applied to operands of types unknown and number; there is no corresponding overload for __sub");
+        CHECK(toString(result.errors[2]) ==
+              "Operator '-' could not be applied to operands of types unknown and number; there is no corresponding overload for __sub");
+        CHECK(toString(result.errors[3]) ==
+              "Operator '-' could not be applied to operands of types unknown and number; there is no corresponding overload for __sub");
     }
     else
     {
@@ -2373,6 +2377,28 @@ end
     REQUIRE(err->recommendedArgs.size() == 2);
     CHECK("number" == toString(err->recommendedArgs[0].second));
     CHECK("number" == toString(err->recommendedArgs[1].second));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "tf_suggest_arg_type_2")
+{
+    if (!FFlag::DebugLuauDeferredConstraintResolution)
+        return;
+
+    // Make sure the error types are cloned to module interface
+    frontend.options.retainFullTypeGraphs = false;
+
+    CheckResult result = check(R"(
+local function escape_fslash(pre)
+    return (#pre % 2 == 0 and '\\' or '') .. pre .. '.'
+end
+)");
+
+    LUAU_REQUIRE_ERRORS(result);
+    auto err = get<ExplicitFunctionAnnotationRecommended>(result.errors.back());
+    LUAU_ASSERT(err);
+    CHECK("unknown" == toString(err->recommendedReturn));
+    REQUIRE(err->recommendedArgs.size() == 1);
+    CHECK("a" == toString(err->recommendedArgs[0].second));
 }
 
 TEST_CASE_FIXTURE(Fixture, "local_function_fwd_decl_doesnt_crash")
@@ -2719,7 +2745,22 @@ end
 _ = _,{}
 
     )");
+}
 
+TEST_CASE_FIXTURE(BuiltinsFixture, "overload_resolution_crash_when_argExprs_is_smaller_than_type_args")
+{
+    CheckResult result = check(R"(
+--!strict
+local parseError
+type Set<T> = {[T]: any}
+local function captureDependencies(
+	saveToSet: Set<PubTypes.Dependency>,
+	callback: (...any) -> any,
+	...
+)
+	local data = table.pack(xpcall(callback, parseError, ...))
+    end
+)");
 }
 
 

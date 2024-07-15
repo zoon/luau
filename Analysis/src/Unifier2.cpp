@@ -8,7 +8,7 @@
 #include "Luau/Type.h"
 #include "Luau/TypeArena.h"
 #include "Luau/TypeCheckLimits.h"
-#include "Luau/TypeFamily.h"
+#include "Luau/TypeFunction.h"
 #include "Luau/TypeFwd.h"
 #include "Luau/TypePack.h"
 #include "Luau/TypeUtils.h"
@@ -76,13 +76,13 @@ static bool areCompatible(TypeId left, TypeId right)
 // returns `true` if `ty` is irressolvable and should be added to `incompleteSubtypes`.
 static bool isIrresolvable(TypeId ty)
 {
-    return get<BlockedType>(ty) || get<TypeFamilyInstanceType>(ty);
+    return get<BlockedType>(ty) || get<TypeFunctionInstanceType>(ty);
 }
 
 // returns `true` if `tp` is irressolvable and should be added to `incompleteSubtypes`.
 static bool isIrresolvable(TypePackId tp)
 {
-    return get<BlockedTypePack>(tp) || get<TypeFamilyInstanceTypePack>(tp);
+    return get<BlockedTypePack>(tp) || get<TypeFunctionInstanceTypePack>(tp);
 }
 
 Unifier2::Unifier2(NotNull<TypeArena> arena, NotNull<BuiltinTypes> builtinTypes, NotNull<Scope> scope, NotNull<InternalErrorReporter> ice)
@@ -157,12 +157,6 @@ bool Unifier2::unify(TypeId subTy, TypeId superTy)
 
     if (subFree || superFree)
         return true;
-
-    if (auto subLocal = getMutable<LocalType>(subTy))
-    {
-        subLocal->domain = mkUnion(subLocal->domain, superTy);
-        expandedFreeTypes[subTy].push_back(superTy);
-    }
 
     auto subFn = get<FunctionType>(subTy);
     auto superFn = get<FunctionType>(superTy);
@@ -485,7 +479,7 @@ bool Unifier2::unify(const FunctionType* subFn, const AnyType* superAny)
 
 bool Unifier2::unify(const AnyType* subAny, const TableType* superTable)
 {
-    for (const auto& [propName, prop]: superTable->props)
+    for (const auto& [propName, prop] : superTable->props)
     {
         if (prop.readTy)
             unify(builtinTypes->anyType, *prop.readTy);
@@ -505,7 +499,7 @@ bool Unifier2::unify(const AnyType* subAny, const TableType* superTable)
 
 bool Unifier2::unify(const TableType* subTable, const AnyType* superAny)
 {
-    for (const auto& [propName, prop]: subTable->props)
+    for (const auto& [propName, prop] : subTable->props)
     {
         if (prop.readTy)
             unify(*prop.readTy, builtinTypes->anyType);
@@ -664,31 +658,31 @@ struct FreeTypeSearcher : TypeVisitor
     {
         switch (polarity)
         {
-            case Positive:
-            {
-                if (seenPositive.contains(ty))
-                    return true;
+        case Positive:
+        {
+            if (seenPositive.contains(ty))
+                return true;
 
-                seenPositive.insert(ty);
-                return false;
-            }
-            case Negative:
-            {
-                if (seenNegative.contains(ty))
-                    return true;
+            seenPositive.insert(ty);
+            return false;
+        }
+        case Negative:
+        {
+            if (seenNegative.contains(ty))
+                return true;
 
-                seenNegative.insert(ty);
-                return false;
-            }
-            case Both:
-            {
-                if (seenPositive.contains(ty) && seenNegative.contains(ty))
-                    return true;
+            seenNegative.insert(ty);
+            return false;
+        }
+        case Both:
+        {
+            if (seenPositive.contains(ty) && seenNegative.contains(ty))
+                return true;
 
-                seenPositive.insert(ty);
-                seenNegative.insert(ty);
-                return false;
-            }
+            seenPositive.insert(ty);
+            seenNegative.insert(ty);
+            return false;
+        }
         }
 
         return false;

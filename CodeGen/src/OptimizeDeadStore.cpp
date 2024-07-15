@@ -9,8 +9,6 @@
 
 #include "lobject.h"
 
-LUAU_FASTFLAGVARIABLE(LuauCodegenRemoveDeadStores5, false)
-
 // TODO: optimization can be improved by knowing which registers are live in at each VM exit
 
 namespace Luau
@@ -594,6 +592,9 @@ static void markDeadStoresInInst(RemoveDeadStoreState& state, IrBuilder& build, 
         break;
     case IrCmd::CHECK_BUFFER_LEN:
         state.checkLiveIns(inst.d);
+        break;
+    case IrCmd::CHECK_USERDATA_TAG:
+        state.checkLiveIns(inst.c);
         break;
 
     case IrCmd::JUMP:

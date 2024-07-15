@@ -181,6 +181,7 @@ void IrRegAllocX64::freeLastUseRegs(const IrInst& inst, uint32_t instIdx)
     checkOp(inst.d);
     checkOp(inst.e);
     checkOp(inst.f);
+    checkOp(inst.g);
 }
 
 bool IrRegAllocX64::isLastUseReg(const IrInst& target, uint32_t instIdx) const

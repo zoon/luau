@@ -32,7 +32,7 @@ struct TypeArena;
 struct Scope;
 using ScopePtr = std::shared_ptr<Scope>;
 
-struct TypeFamily;
+struct TypeFunction;
 struct Constraint;
 
 /**
@@ -86,24 +86,6 @@ struct FreeType
     TypeId upperBound = nullptr;
 };
 
-/** A type that tracks the domain of a local variable.
- *
- * We consider each local's domain to be the union of all types assigned to it.
- * We accomplish this with LocalType.  Each time we dispatch an assignment to a
- * local, we accumulate this union and decrement blockCount.
- *
- * When blockCount reaches 0, we can consider the LocalType to be "fully baked"
- * and replace it with the union we've built.
- */
-struct LocalType
-{
-    TypeId domain;
-    int blockCount = 0;
-
-    // Used for debugging
-    std::string name;
-};
-
 struct GenericType
 {
     // By default, generics are global, with a synthetic name
@@ -148,6 +130,7 @@ struct BlockedType
 
     Constraint* getOwner() const;
     void setOwner(Constraint* newOwner);
+    void replaceOwner(Constraint* newOwner);
 
 private:
     // The constraint that is intended to unblock this type. Other constraints
@@ -471,6 +454,11 @@ struct TableType
 
     // Methods of this table that have an untyped self will use the same shared self type.
     std::optional<TypeId> selfTy;
+
+    // We track the number of as-yet-unadded properties to unsealed tables.
+    // Some constraints will use this information to decide whether or not they
+    // are able to dispatch.
+    size_t remainingProps = 0;
 };
 
 // Represents a metatable attached to a table type. Somewhat analogous to a bound type.
@@ -540,34 +528,34 @@ struct ClassType
 };
 
 /**
- * An instance of a type family that has not yet been reduced to a more concrete
+ * An instance of a type function that has not yet been reduced to a more concrete
  * type. The constraint solver receives a constraint to reduce each
- * TypeFamilyInstanceType to a concrete type. A design detail is important to
- * note here: the parameters for this instantiation of the type family are
+ * TypeFunctionInstanceType to a concrete type. A design detail is important to
+ * note here: the parameters for this instantiation of the type function are
  * contained within this type, so that they can be substituted.
  */
-struct TypeFamilyInstanceType
+struct TypeFunctionInstanceType
 {
-    NotNull<const TypeFamily> family;
+    NotNull<const TypeFunction> family;
 
     std::vector<TypeId> typeArguments;
     std::vector<TypePackId> packArguments;
 
-    TypeFamilyInstanceType(NotNull<const TypeFamily> family, std::vector<TypeId> typeArguments, std::vector<TypePackId> packArguments)
+    TypeFunctionInstanceType(NotNull<const TypeFunction> family, std::vector<TypeId> typeArguments, std::vector<TypePackId> packArguments)
         : family(family)
         , typeArguments(typeArguments)
         , packArguments(packArguments)
     {
     }
 
-    TypeFamilyInstanceType(const TypeFamily& family, std::vector<TypeId> typeArguments)
+    TypeFunctionInstanceType(const TypeFunction& family, std::vector<TypeId> typeArguments)
         : family{&family}
         , typeArguments(typeArguments)
         , packArguments{}
     {
     }
 
-    TypeFamilyInstanceType(const TypeFamily& family, std::vector<TypeId> typeArguments, std::vector<TypePackId> packArguments)
+    TypeFunctionInstanceType(const TypeFunction& family, std::vector<TypeId> typeArguments, std::vector<TypePackId> packArguments)
         : family{&family}
         , typeArguments(typeArguments)
         , packArguments(packArguments)
@@ -669,9 +657,9 @@ struct NegationType
 
 using ErrorType = Unifiable::Error;
 
-using TypeVariant = Unifiable::Variant<TypeId, FreeType, LocalType, GenericType, PrimitiveType, BlockedType, PendingExpansionType, SingletonType,
-    FunctionType, TableType, MetatableType, ClassType, AnyType, UnionType, IntersectionType, LazyType, UnknownType, NeverType, NegationType,
-    TypeFamilyInstanceType>;
+using TypeVariant =
+    Unifiable::Variant<TypeId, FreeType, GenericType, PrimitiveType, SingletonType, BlockedType, PendingExpansionType, FunctionType, TableType,
+        MetatableType, ClassType, AnyType, UnionType, IntersectionType, LazyType, UnknownType, NeverType, NegationType, TypeFunctionInstanceType>;
 
 struct Type final
 {

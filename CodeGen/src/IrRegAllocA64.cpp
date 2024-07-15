@@ -256,6 +256,7 @@ void IrRegAllocA64::freeLastUseRegs(const IrInst& inst, uint32_t index)
     checkOp(inst.d);
     checkOp(inst.e);
     checkOp(inst.f);
+    checkOp(inst.g);
 }
 
 void IrRegAllocA64::freeTempRegs()

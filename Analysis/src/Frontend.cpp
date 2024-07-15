@@ -34,12 +34,15 @@ LUAU_FASTINT(LuauTypeInferRecursionLimit)
 LUAU_FASTINT(LuauTarjanChildLimit)
 LUAU_FASTFLAG(LuauInferInNoCheckMode)
 LUAU_FASTFLAGVARIABLE(LuauKnowsTheDataModel3, false)
+LUAU_FASTFLAGVARIABLE(LuauCancelFromProgress, false)
+LUAU_FASTFLAGVARIABLE(LuauStoreCommentsForDefinitionFiles, false)
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
 LUAU_FASTFLAGVARIABLE(DebugLuauLogSolverToJson, false)
 LUAU_FASTFLAGVARIABLE(DebugLuauLogSolverToJsonFile, false)
 LUAU_FASTFLAGVARIABLE(DebugLuauForbidInternalTypes, false)
 LUAU_FASTFLAGVARIABLE(DebugLuauForceStrictMode, false)
 LUAU_FASTFLAGVARIABLE(DebugLuauForceNonStrictMode, false)
+LUAU_FASTFLAGVARIABLE(LuauSourceModuleUpdatedWithSelectedMode, false)
 
 namespace Luau
 {
@@ -125,6 +128,13 @@ static ParseResult parseSourceForModule(std::string_view source, Luau::SourceMod
     Luau::ParseResult parseResult = Luau::Parser::parse(source.data(), source.size(), *sourceModule.names, *sourceModule.allocator, options);
     sourceModule.root = parseResult.root;
     sourceModule.mode = Mode::Definition;
+
+    if (FFlag::LuauStoreCommentsForDefinitionFiles && options.captureComments)
+    {
+        sourceModule.hotcomments = parseResult.hotcomments;
+        sourceModule.commentLocations = parseResult.commentLocations;
+    }
+
     return parseResult;
 }
 
@@ -440,6 +450,8 @@ CheckResult Frontend::check(const ModuleName& name, std::optional<FrontendOption
     LUAU_TIMETRACE_ARGUMENT("name", name.c_str());
 
     FrontendOptions frontendOptions = optionOverride.value_or(options);
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        frontendOptions.forAutocomplete = false;
 
     if (std::optional<CheckResult> result = getCheckResult(name, true, frontendOptions.forAutocomplete))
         return std::move(*result);
@@ -492,9 +504,11 @@ void Frontend::queueModuleCheck(const ModuleName& name)
 }
 
 std::vector<ModuleName> Frontend::checkQueuedModules(std::optional<FrontendOptions> optionOverride,
-    std::function<void(std::function<void()> task)> executeTask, std::function<void(size_t done, size_t total)> progress)
+    std::function<void(std::function<void()> task)> executeTask, std::function<bool(size_t done, size_t total)> progress)
 {
     FrontendOptions frontendOptions = optionOverride.value_or(options);
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        frontendOptions.forAutocomplete = false;
 
     // By taking data into locals, we make sure queue is cleared at the end, even if an ICE or a different exception is thrown
     std::vector<ModuleName> currModuleQueue;
@@ -673,7 +687,17 @@ std::vector<ModuleName> Frontend::checkQueuedModules(std::optional<FrontendOptio
         }
 
         if (progress)
-            progress(buildQueueItems.size() - remaining, buildQueueItems.size());
+        {
+            if (FFlag::LuauCancelFromProgress)
+            {
+                if (!progress(buildQueueItems.size() - remaining, buildQueueItems.size()))
+                    cancelled = true;
+            }
+            else
+            {
+                progress(buildQueueItems.size() - remaining, buildQueueItems.size());
+            }
+        }
 
         // Items cannot be submitted while holding the lock
         for (size_t i : nextItems)
@@ -707,6 +731,9 @@ std::vector<ModuleName> Frontend::checkQueuedModules(std::optional<FrontendOptio
 
 std::optional<CheckResult> Frontend::getCheckResult(const ModuleName& name, bool accumulateNested, bool forAutocomplete)
 {
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        forAutocomplete = false;
+
     auto it = sourceNodes.find(name);
 
     if (it == sourceNodes.end() || it->second->hasDirtyModule(forAutocomplete))
@@ -900,6 +927,9 @@ void Frontend::checkBuildQueueItem(BuildQueueItem& item)
         mode = Mode::Nonstrict;
     else
         mode = sourceModule.mode.value_or(config.mode);
+
+    if (FFlag::LuauSourceModuleUpdatedWithSelectedMode)
+        item.sourceModule->mode = {mode};
     ScopePtr environmentScope = item.environmentScope;
     double timestamp = getTimestamp();
     const std::vector<RequireCycle>& requireCycles = item.requireCycles;
@@ -1003,11 +1033,10 @@ void Frontend::checkBuildQueueItem(BuildQueueItem& item)
         module->astForInNextTypes.clear();
         module->astResolvedTypes.clear();
         module->astResolvedTypePacks.clear();
+        module->astCompoundAssignResultTypes.clear();
         module->astScopes.clear();
         module->upperBoundContributors.clear();
-
-        if (!FFlag::DebugLuauDeferredConstraintResolution)
-            module->scopes.clear();
+        module->scopes.clear();
     }
 
     if (mode != Mode::NoCheck)
@@ -1196,12 +1225,6 @@ struct InternalTypeFinder : TypeOnceVisitor
         return false;
     }
 
-    bool visit(TypeId, const LocalType&) override
-    {
-        LUAU_ASSERT(false);
-        return false;
-    }
-
     bool visit(TypePackId, const BlockedTypePack&) override
     {
         LUAU_ASSERT(false);
@@ -1214,7 +1237,7 @@ struct InternalTypeFinder : TypeOnceVisitor
         return false;
     }
 
-    bool visit(TypePackId, const TypeFamilyInstanceTypePack&) override
+    bool visit(TypePackId, const TypeFunctionInstanceTypePack&) override
     {
         LUAU_ASSERT(false);
         return false;
@@ -1229,9 +1252,7 @@ ModulePtr check(const SourceModule& sourceModule, Mode mode, const std::vector<R
     ModulePtr result = std::make_shared<Module>();
     result->name = sourceModule.name;
     result->humanReadableName = sourceModule.humanReadableName;
-
-    result->mode = sourceModule.mode.value_or(Mode::NoCheck);
-
+    result->mode = mode;
     result->internalTypes.owningModule = result.get();
     result->interfaceTypes.owningModule = result.get();
 
@@ -1312,10 +1333,19 @@ ModulePtr check(const SourceModule& sourceModule, Mode mode, const std::vector<R
     }
     else
     {
-        if (mode == Mode::Nonstrict)
+        switch (mode)
+        {
+        case Mode::Nonstrict:
             Luau::checkNonStrict(builtinTypes, iceHandler, NotNull{&unifierState}, NotNull{&dfg}, NotNull{&limits}, sourceModule, result.get());
-        else
+            break;
+        case Mode::Definition:
+            // fallthrough intentional
+        case Mode::Strict:
             Luau::check(builtinTypes, NotNull{&unifierState}, NotNull{&limits}, logger.get(), sourceModule, result.get());
+            break;
+        case Mode::NoCheck:
+            break;
+        };
     }
 
     unfreeze(result->interfaceTypes);
