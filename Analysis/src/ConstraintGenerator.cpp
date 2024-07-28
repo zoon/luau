@@ -15,6 +15,7 @@
 #include "Luau/Simplify.h"
 #include "Luau/StringUtils.h"
 #include "Luau/TableLiteralInference.h"
+#include "Luau/TimeTrace.h"
 #include "Luau/Type.h"
 #include "Luau/TypeFunction.h"
 #include "Luau/TypePack.h"
@@ -28,7 +29,6 @@
 LUAU_FASTINT(LuauCheckRecursionLimit);
 LUAU_FASTFLAG(DebugLuauLogSolverToJson);
 LUAU_FASTFLAG(DebugLuauMagicTypes);
-LUAU_FASTFLAG(LuauAttributeSyntax);
 LUAU_FASTFLAG(LuauDeclarationExtraPropData);
 
 namespace Luau
@@ -211,6 +211,8 @@ ConstraintGenerator::ConstraintGenerator(ModulePtr module, NotNull<Normalizer> n
 
 void ConstraintGenerator::visitModuleRoot(AstStatBlock* block)
 {
+    LUAU_TIMETRACE_SCOPE("ConstraintGenerator::visitModuleRoot", "Typechecking");
+
     LUAU_ASSERT(scopes.empty());
     LUAU_ASSERT(rootScope == nullptr);
     ScopePtr scope = std::make_shared<Scope>(globalScope);
@@ -754,7 +756,9 @@ ControlFlow ConstraintGenerator::visit(const ScopePtr& scope, AstStatLocal* stat
         scope->lvalueTypes[def] = assignee;
     }
 
+    Checkpoint start = checkpoint(this);
     TypePackId rvaluePack = checkPack(scope, statLocal->values, expectedTypes).tp;
+    Checkpoint end = checkpoint(this);
 
     if (hasAnnotation)
     {
@@ -787,6 +791,12 @@ ControlFlow ConstraintGenerator::visit(const ScopePtr& scope, AstStatLocal* stat
                 valueTypes.push_back(arena->addType(BlockedType{}));
 
             auto uc = addConstraint(scope, statLocal->location, UnpackConstraint{valueTypes, rvaluePack});
+
+            forEachConstraint(start, end, this,
+                [&uc](const ConstraintPtr& runBefore)
+                {
+                    uc->dependencies.push_back(NotNull{runBefore.get()});
+                });
 
             for (TypeId t : valueTypes)
                 getMutable<BlockedType>(t)->setOwner(uc);
@@ -978,7 +988,7 @@ ControlFlow ConstraintGenerator::visit(const ScopePtr& scope, AstStatLocalFuncti
     scope->bindings[function->name] = Binding{functionType, function->name->location};
 
     FunctionSignature sig = checkFunctionSignature(scope, function->func, /* expectedType */ std::nullopt, function->name->location);
-    sig.bodyScope->bindings[function->name] = Binding{sig.signature, function->func->location};
+    sig.bodyScope->bindings[function->name] = Binding{sig.signature, function->name->location};
 
     bool sigFullyDefined = !hasFreeType(sig.signature);
     if (sigFullyDefined)
@@ -1349,7 +1359,7 @@ ControlFlow ConstraintGenerator::visit(const ScopePtr& scope, AstStatDeclareClas
 
     Name className(declaredClass->name.value);
 
-    TypeId classTy = arena->addType(ClassType(className, {}, superTy, std::nullopt, {}, {}, module->name));
+    TypeId classTy = arena->addType(ClassType(className, {}, superTy, std::nullopt, {}, {}, module->name, declaredClass->location));
     ClassType* ctv = getMutable<ClassType>(classTy);
 
     TypeId metaTy = arena->addType(TableType{TableState::Sealed, scope->level, scope.get()});
@@ -1513,7 +1523,7 @@ ControlFlow ConstraintGenerator::visit(const ScopePtr& scope, AstStatDeclareFunc
 
     TypeId fnType = arena->addType(FunctionType{TypeLevel{}, funScope.get(), std::move(genericTys), std::move(genericTps), paramPack, retPack, defn});
     FunctionType* ftv = getMutable<FunctionType>(fnType);
-    ftv->isCheckedFunction = FFlag::LuauAttributeSyntax ? global->isCheckedFunction() : false;
+    ftv->isCheckedFunction = global->isCheckedFunction();
 
     ftv->argNames.reserve(global->paramNames.size);
     for (const auto& el : global->paramNames)
@@ -1755,6 +1765,12 @@ InferencePack ConstraintGenerator::checkPack(const ScopePtr& scope, AstExprCall*
             DefId def = dfg->getDef(targetLocal);
             scope->lvalueTypes[def] = resultTy;       // TODO: typestates: track this as an assignment
             scope->rvalueRefinements[def] = resultTy; // TODO: typestates: track this as an assignment
+
+            // HACK: If we have a targetLocal, it has already been added to the
+            // inferredBindings table.  We want to replace it so that we don't
+            // infer a weird union like tbl | { @metatable something, tbl }
+            if (InferredBinding* ib = inferredBindings.find(targetLocal->local))
+                ib->types.erase(target);
 
             recordInferredBinding(targetLocal->local, resultTy);
         }
@@ -2929,7 +2945,7 @@ TypeId ConstraintGenerator::resolveType(const ScopePtr& scope, AstType* ty, bool
         // TODO: FunctionType needs a pointer to the scope so that we know
         // how to quantify/instantiate it.
         FunctionType ftv{TypeLevel{}, scope.get(), {}, {}, argTypes, returnTypes};
-        ftv.isCheckedFunction = FFlag::LuauAttributeSyntax ? fn->isCheckedFunction() : false;
+        ftv.isCheckedFunction = fn->isCheckedFunction();
 
         // This replicates the behavior of the appropriate FunctionType
         // constructors.
@@ -3356,9 +3372,9 @@ std::vector<std::optional<TypeId>> ConstraintGenerator::getExpectedCallTypesForF
 }
 
 TypeId ConstraintGenerator::createTypeFunctionInstance(
-    const TypeFunction& family, std::vector<TypeId> typeArguments, std::vector<TypePackId> packArguments, const ScopePtr& scope, Location location)
+    const TypeFunction& function, std::vector<TypeId> typeArguments, std::vector<TypePackId> packArguments, const ScopePtr& scope, Location location)
 {
-    TypeId result = arena->addTypeFunction(family, typeArguments, packArguments);
+    TypeId result = arena->addTypeFunction(function, typeArguments, packArguments);
     addConstraint(scope, location, ReduceConstraint{result});
     return result;
 }
