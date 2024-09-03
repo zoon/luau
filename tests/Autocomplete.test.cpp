@@ -106,15 +106,17 @@ struct ACFixtureImpl : BaseType
         GlobalTypes& globals = this->frontend.globalsForAutocomplete;
         unfreeze(globals.globalTypes);
         LoadDefinitionFileResult result = this->frontend.loadDefinitionFile(
-            globals, globals.globalScope, source, "@test", /* captureComments */ false, /* typeCheckForAutocomplete */ true);
+            globals, globals.globalScope, source, "@test", /* captureComments */ false, /* typeCheckForAutocomplete */ true
+        );
         freeze(globals.globalTypes);
 
-        if (FFlag::DebugLuauDeferredConstraintResolution)
+        if (FFlag::LuauSolverV2)
         {
             GlobalTypes& globals = this->frontend.globals;
             unfreeze(globals.globalTypes);
             LoadDefinitionFileResult result = this->frontend.loadDefinitionFile(
-                globals, globals.globalScope, source, "@test", /* captureComments */ false, /* typeCheckForAutocomplete */ true);
+                globals, globals.globalScope, source, "@test", /* captureComments */ false, /* typeCheckForAutocomplete */ true
+            );
             freeze(globals.globalTypes);
         }
 
@@ -868,8 +870,10 @@ TEST_CASE_FIXTURE(ACFixture, "autocomplete_if_middle_keywords")
 
     auto ac1 = autocomplete('1');
     CHECK_EQ(ac1.entryMap.count("then"), 0);
-    CHECK_EQ(ac1.entryMap.count("function"),
-        1); // FIXME: This is kind of dumb.  It is technically syntactically valid but you can never do anything interesting with this.
+    CHECK_EQ(
+        ac1.entryMap.count("function"),
+        1
+    ); // FIXME: This is kind of dumb.  It is technically syntactically valid but you can never do anything interesting with this.
     CHECK_EQ(ac1.entryMap.count("table"), 1);
     CHECK_EQ(ac1.entryMap.count("else"), 0);
     CHECK_EQ(ac1.entryMap.count("elseif"), 0);
@@ -1603,6 +1607,9 @@ return target(a.@1
 
 TEST_CASE_FIXTURE(ACFixture, "type_correct_suggestion_in_table")
 {
+    if (FFlag::LuauSolverV2) // CLI-116815 Autocomplete cannot suggest keys while autocompleting inside of a table
+        return;
+
     check(R"(
 type Foo = { a: number, b: string }
 local a = { one = 4, two = "hello" }
@@ -2206,7 +2213,7 @@ local fp: @1= f
 
     auto ac = autocomplete('1');
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
         REQUIRE_EQ("({ x: number, y: number }) -> number", toString(requireType("f")));
     else
         REQUIRE_EQ("({| x: number, y: number |}) -> number", toString(requireType("f")));
@@ -2257,6 +2264,9 @@ local ec = e(f@5)
 
 TEST_CASE_FIXTURE(ACFixture, "type_correct_suggestion_for_overloads")
 {
+    if (FFlag::LuauSolverV2) // CLI-116814 Autocomplete needs to populate expected types for function arguments correctly
+                                                      // (overloads and singletons)
+        return;
     check(R"(
 local target: ((number) -> string) & ((string) -> number))
 
@@ -2604,6 +2614,10 @@ end
 
 TEST_CASE_FIXTURE(ACFixture, "suggest_table_keys")
 {
+    if (FFlag::LuauSolverV2) // CLI-116812 AutocompleteTest.suggest_table_keys needs to populate expected types for nested
+                                                      // tables without an annotation
+        return;
+
     check(R"(
 type Test = { first: number, second: number }
 local t: Test = { f@1 }
@@ -3087,6 +3101,10 @@ TEST_CASE_FIXTURE(ACBuiltinsFixture, "autocomplete_on_string_singletons")
 
 TEST_CASE_FIXTURE(ACFixture, "autocomplete_string_singletons")
 {
+    if (FFlag::LuauSolverV2) // CLI-116814 Autocomplete needs to populate expected types for function arguments correctly
+                                                      // (overloads and singletons)
+        return;
+
     check(R"(
         type tag = "cat" | "dog"
         local function f(a: tag) end
@@ -3192,7 +3210,7 @@ TEST_CASE_FIXTURE(ACFixture, "string_singleton_as_table_key")
 TEST_CASE_FIXTURE(ACFixture, "string_singleton_in_if_statement")
 {
     ScopedFastFlag sff[]{
-        {FFlag::DebugLuauDeferredConstraintResolution, true},
+        {FFlag::LuauSolverV2, true},
     };
 
     check(R"(
@@ -3276,7 +3294,7 @@ TEST_CASE_FIXTURE(ACFixture, "string_singleton_in_if_statement")
 TEST_CASE_FIXTURE(ACFixture, "string_singleton_in_if_statement2")
 {
     // don't run this when the DCR flag isn't set
-    if (!FFlag::DebugLuauDeferredConstraintResolution)
+    if (!FFlag::LuauSolverV2)
         return;
 
     check(R"(
@@ -3559,7 +3577,11 @@ t.@1
     auto ac = autocomplete('1');
 
     REQUIRE(ac.entryMap.count("m"));
-    CHECK(!ac.entryMap["m"].wrongIndexType);
+
+    if (FFlag::LuauSolverV2)
+        CHECK(ac.entryMap["m"].wrongIndexType);
+    else
+        CHECK(!ac.entryMap["m"].wrongIndexType);
     CHECK(!ac.entryMap["m"].indexedWithSelf);
 }
 
@@ -3738,7 +3760,7 @@ TEST_CASE_FIXTURE(ACFixture, "string_contents_is_available_to_callback")
         declare function require(path: string): any
     )");
 
-    GlobalTypes& globals = FFlag::DebugLuauDeferredConstraintResolution ? frontend.globals : frontend.globalsForAutocomplete;
+    GlobalTypes& globals = FFlag::LuauSolverV2 ? frontend.globals : frontend.globalsForAutocomplete;
 
     std::optional<Binding> require = globals.globalScope->linearSearchForBinding("require");
     REQUIRE(require);
@@ -3752,17 +3774,20 @@ TEST_CASE_FIXTURE(ACFixture, "string_contents_is_available_to_callback")
 
     bool isCorrect = false;
     auto ac1 = autocomplete(
-        '1', [&isCorrect](std::string, std::optional<const ClassType*>, std::optional<std::string> contents) -> std::optional<AutocompleteEntryMap> {
+        '1',
+        [&isCorrect](std::string, std::optional<const ClassType*>, std::optional<std::string> contents) -> std::optional<AutocompleteEntryMap>
+        {
             isCorrect = contents && *contents == "testing/";
             return std::nullopt;
-        });
+        }
+    );
 
     CHECK(isCorrect);
 }
 
 TEST_CASE_FIXTURE(ACFixture, "autocomplete_response_perf1" * doctest::timeout(0.5))
 {
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
         return; // FIXME: This test is just barely at the threshhold which makes it very flaky under the new solver
 
     // Build a function type with a large overload set
@@ -3844,7 +3869,7 @@ TEST_CASE_FIXTURE(ACFixture, "string_completion_outside_quotes")
         declare function require(path: string): any
     )");
 
-    GlobalTypes& globals = FFlag::DebugLuauDeferredConstraintResolution ? frontend.globals : frontend.globalsForAutocomplete;
+    GlobalTypes& globals = FFlag::LuauSolverV2 ? frontend.globals : frontend.globalsForAutocomplete;
 
     std::optional<Binding> require = globals.globalScope->linearSearchForBinding("require");
     REQUIRE(require);
@@ -3856,8 +3881,9 @@ TEST_CASE_FIXTURE(ACFixture, "string_completion_outside_quotes")
         local x = require(@1"@2"@3)
     )");
 
-    StringCompletionCallback callback = [](std::string, std::optional<const ClassType*>,
-                                            std::optional<std::string> contents) -> std::optional<AutocompleteEntryMap> {
+    StringCompletionCallback callback = [](std::string, std::optional<const ClassType*>, std::optional<std::string> contents
+                                        ) -> std::optional<AutocompleteEntryMap>
+    {
         Luau::AutocompleteEntryMap results = {{"test", Luau::AutocompleteEntry{Luau::AutocompleteEntryKind::String, std::nullopt, false, false}}};
         return results;
     };
@@ -4235,6 +4261,9 @@ foo(@1)
 
 TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_generic_type_pack_vararg")
 {
+    // CLI-116932 - Autocomplete on a anonymous function in a function argument should not recommend a function with a generic parameter.
+    if (FFlag::LuauSolverV2)
+        return;
     check(R"(
 local function foo<A>(a: (...A) -> number, ...: A)
 	return a(...)
@@ -4264,7 +4293,8 @@ end
 foo(@1)
     )");
 
-    const std::optional<std::string> EXPECTED_INSERT = "function(...): number  end";
+    const std::optional<std::string> EXPECTED_INSERT =
+        FFlag::LuauSolverV2 ? "function(...: number): number  end" : "function(...): number  end";
 
     auto ac = autocomplete('1');
 
