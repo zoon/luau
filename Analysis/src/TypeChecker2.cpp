@@ -31,6 +31,8 @@
 #include <ostream>
 
 LUAU_FASTFLAG(DebugLuauMagicTypes)
+LUAU_FASTFLAG(LuauUserDefinedTypeFunctions2)
+LUAU_DYNAMIC_FASTINT(LuauTypeSolverRelease)
 
 namespace Luau
 {
@@ -266,6 +268,7 @@ struct InternalTypeFunctionFinder : TypeOnceVisitor
 
 void check(
     NotNull<BuiltinTypes> builtinTypes,
+    NotNull<TypeFunctionRuntime> typeFunctionRuntime,
     NotNull<UnifierSharedState> unifierState,
     NotNull<TypeCheckLimits> limits,
     DcrLogger* logger,
@@ -275,7 +278,7 @@ void check(
 {
     LUAU_TIMETRACE_SCOPE("check", "Typechecking");
 
-    TypeChecker2 typeChecker{builtinTypes, unifierState, limits, logger, &sourceModule, module};
+    TypeChecker2 typeChecker{builtinTypes, typeFunctionRuntime, unifierState, limits, logger, &sourceModule, module};
 
     typeChecker.visit(sourceModule.root);
 
@@ -292,6 +295,7 @@ void check(
 
 TypeChecker2::TypeChecker2(
     NotNull<BuiltinTypes> builtinTypes,
+    NotNull<TypeFunctionRuntime> typeFunctionRuntime,
     NotNull<UnifierSharedState> unifierState,
     NotNull<TypeCheckLimits> limits,
     DcrLogger* logger,
@@ -299,13 +303,14 @@ TypeChecker2::TypeChecker2(
     Module* module
 )
     : builtinTypes(builtinTypes)
+    , typeFunctionRuntime(typeFunctionRuntime)
     , logger(logger)
     , limits(limits)
     , ice(unifierState->iceHandler)
     , sourceModule(sourceModule)
     , module(module)
     , normalizer{&module->internalTypes, builtinTypes, unifierState, /* cacheInhabitance */ true}
-    , _subtyping{builtinTypes, NotNull{&module->internalTypes}, NotNull{&normalizer}, NotNull{unifierState->iceHandler}}
+    , _subtyping{builtinTypes, NotNull{&module->internalTypes}, NotNull{&normalizer}, typeFunctionRuntime, NotNull{unifierState->iceHandler}}
     , subtyping(&_subtyping)
 {
 }
@@ -483,13 +488,14 @@ TypeId TypeChecker2::checkForTypeFunctionInhabitance(TypeId instance, Location l
         return instance;
     seenTypeFunctionInstances.insert(instance);
 
-    ErrorVec errors = reduceTypeFunctions(
-                          instance,
-                          location,
-                          TypeFunctionContext{NotNull{&module->internalTypes}, builtinTypes, stack.back(), NotNull{&normalizer}, ice, limits},
-                          true
-    )
-                          .errors;
+    ErrorVec errors =
+        reduceTypeFunctions(
+            instance,
+            location,
+            TypeFunctionContext{NotNull{&module->internalTypes}, builtinTypes, stack.back(), NotNull{&normalizer}, typeFunctionRuntime, ice, limits},
+            true
+        )
+            .errors;
     if (!isErrorSuppressing(location, instance))
         reportErrors(std::move(errors));
     return instance;
@@ -1193,8 +1199,8 @@ void TypeChecker2::visit(AstStatTypeAlias* stat)
 void TypeChecker2::visit(AstStatTypeFunction* stat)
 {
     // TODO: add type checking for user-defined type functions
-
-    reportError(TypeError{stat->location, GenericError{"This syntax is not supported"}});
+    if (!FFlag::LuauUserDefinedTypeFunctions2)
+        reportError(TypeError{stat->location, GenericError{"This syntax is not supported"}});
 }
 
 void TypeChecker2::visit(AstTypeList types)
@@ -1378,7 +1384,7 @@ void TypeChecker2::visitCall(AstExprCall* call)
             break;
         case ErrorSuppression::NormalizationFailed:
             reportError(NormalizationTooComplex{}, call->func->location);
-            // fallthrough intentional
+            [[fallthrough]];
         case ErrorSuppression::DoNotSuppress:
             reportError(OptionalValueAccess{fnTy}, call->func->location);
         }
@@ -1445,6 +1451,7 @@ void TypeChecker2::visitCall(AstExprCall* call)
         builtinTypes,
         NotNull{&module->internalTypes},
         NotNull{&normalizer},
+        typeFunctionRuntime,
         NotNull{stack.back()},
         ice,
         limits,
@@ -1582,7 +1589,7 @@ TypeId TypeChecker2::stripFromNilAndReport(TypeId ty, const Location& location)
             break;
         case ErrorSuppression::NormalizationFailed:
             reportError(NormalizationTooComplex{}, location);
-            // fallthrough intentional
+            [[fallthrough]];
         case ErrorSuppression::DoNotSuppress:
             reportError(OptionalValueAccess{ty}, location);
         }
@@ -1666,7 +1673,7 @@ void TypeChecker2::visit(AstExprIndexExpr* indexExpr, ValueContext context)
             break;
         case ErrorSuppression::NormalizationFailed:
             reportError(NormalizationTooComplex{}, indexExpr->location);
-            // fallthrough intentional
+            [[fallthrough]];
         case ErrorSuppression::DoNotSuppress:
             reportError(OptionalValueAccess{exprType}, indexExpr->location);
         }
@@ -2723,6 +2730,7 @@ void TypeChecker2::explainError(TypeId subTy, TypeId superTy, Location location,
         return;
     case ErrorSuppression::NormalizationFailed:
         reportError(NormalizationTooComplex{}, location);
+        break;
     case ErrorSuppression::DoNotSuppress:
         break;
     }
@@ -2741,6 +2749,7 @@ void TypeChecker2::explainError(TypePackId subTy, TypePackId superTy, Location l
         return;
     case ErrorSuppression::NormalizationFailed:
         reportError(NormalizationTooComplex{}, location);
+        break;
     case ErrorSuppression::DoNotSuppress:
         break;
     }
@@ -3010,11 +3019,20 @@ PropertyType TypeChecker2::hasIndexTypeFromType(
         if (tt->indexer)
         {
             TypeId indexType = follow(tt->indexer->indexType);
-            if (isPrim(indexType, PrimitiveType::String))
-                return {NormalizationResult::True, {tt->indexer->indexResultType}};
-            // If the indexer looks like { [any] : _} - the prop lookup should be allowed!
-            else if (get<AnyType>(indexType) || get<UnknownType>(indexType))
-                return {NormalizationResult::True, {tt->indexer->indexResultType}};
+            if (DFInt::LuauTypeSolverRelease >= 644)
+            {
+                TypeId givenType = module->internalTypes.addType(SingletonType{StringSingleton{prop}});
+                if (isSubtype(givenType, indexType, NotNull{module->getModuleScope().get()}, builtinTypes, *ice))
+                    return {NormalizationResult::True, {tt->indexer->indexResultType}};
+            }
+            else
+            {
+                if (isPrim(indexType, PrimitiveType::String))
+                    return {NormalizationResult::True, {tt->indexer->indexResultType}};
+                // If the indexer looks like { [any] : _} - the prop lookup should be allowed!
+                else if (get<AnyType>(indexType) || get<UnknownType>(indexType))
+                    return {NormalizationResult::True, {tt->indexer->indexResultType}};
+            }
         }
 
 

@@ -9,7 +9,6 @@
 using namespace Luau;
 
 LUAU_FASTFLAG(LuauSolverV2);
-LUAU_FASTFLAG(LuauDCRMagicFunctionTypeChecker);
 
 TEST_SUITE_BEGIN("BuiltinTests");
 
@@ -793,10 +792,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "select_with_variadic_typepack_tail_and_strin
 
 TEST_CASE_FIXTURE(Fixture, "string_format_as_method")
 {
-    // CLI-115690
-    if (FFlag::LuauSolverV2)
-        return;
-
     CheckResult result = check("local _ = ('%s'):format(5)");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
@@ -820,10 +815,6 @@ TEST_CASE_FIXTURE(Fixture, "string_format_use_correct_argument")
 
 TEST_CASE_FIXTURE(Fixture, "string_format_use_correct_argument2")
 {
-    // CLI-115690
-    if (FFlag::LuauSolverV2)
-        return;
-
     CheckResult result = check(R"(
         local _ = ("%s %d").format("%d %s", "A type error", 2)
     )");
@@ -882,10 +873,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "debug_info_is_crazy")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "aliased_string_format")
 {
-    // CLI-115690
-    if (FFlag::LuauSolverV2)
-        return;
-
     CheckResult result = check(R"(
         local fmt = string.format
         local s = fmt("%d", "oops")
@@ -945,11 +932,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "select_on_variadic")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "string_format_report_all_type_errors_at_correct_positions")
 {
-    // CLI-115690
-    if (FFlag::LuauSolverV2)
-        return;
-
-    ScopedFastFlag sff{FFlag::LuauDCRMagicFunctionTypeChecker, true};
     CheckResult result = check(R"(
         ("%s%d%s"):format(1, "hello", true)
         string.format("%s%d%s", 1, "hello", true)
@@ -1443,6 +1425,20 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "find_capture_types3")
 
     CHECK_EQ(toString(requireType("d")), "number?");
     CHECK_EQ(toString(requireType("e")), "number?");
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "string_find_should_not_crash")
+{
+    ScopedFastFlag _{FFlag::LuauSolverV2, true};
+
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+        local function StringSplit(input, separator)
+            string.find(input, separator)
+            if not separator then
+                separator = "%s+"
+            end
+        end
+    )"));
 }
 
 TEST_SUITE_END();

@@ -530,4 +530,170 @@ return l0
     CHECK(mod->scopes[3].second->importedModules["l1"] == "game/A");
 }
 
+TEST_CASE_FIXTURE(BuiltinsFixture, "ensure_scope_is_nullptr_after_shallow_copy")
+{
+    ScopedFastFlag _{FFlag::LuauSolverV2, true};
+    frontend.options.retainFullTypeGraphs = false;
+
+    fileResolver.source["game/A"] = R"(
+-- Roughly taken from ReactTypes.lua
+type CoreBinding<T> = {}
+type BindingMap = {}
+export type Binding<T> = CoreBinding<T> & BindingMap
+
+return {}
+    )";
+
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+local Types = require(game.A)
+type Binding<T> = Types.Binding<T>
+    )"));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "ensure_free_variables_are_generialized_across_function_boundaries")
+{
+    ScopedFastFlag _{FFlag::LuauSolverV2, true};
+
+    fileResolver.source["game/A"] = R"(
+-- Roughly taken from react-shallow-renderer
+function createUpdater(renderer)
+    local updater = {
+        _renderer = renderer,
+    }
+
+    function updater.enqueueForceUpdate(publicInstance, callback, _callerName)
+        updater._renderer.render(
+            updater._renderer,
+            updater._renderer._element, 
+            updater._renderer._context
+        )
+    end
+
+    function updater.enqueueReplaceState(
+        publicInstance,
+        completeState,
+        callback,
+        _callerName
+    )
+        updater._renderer.render(
+            updater._renderer,
+            updater._renderer._element, 
+            updater._renderer._context
+        )
+    end
+
+    function updater.enqueueSetState(publicInstance, partialState, callback, _callerName)
+        local currentState = updater._renderer._newState or publicInstance.state
+        updater._renderer.render(
+            updater._renderer,
+            updater._renderer._element, 
+            updater._renderer._context
+        )
+    end
+
+    return updater
+end
+
+local ReactShallowRenderer = {}
+
+function ReactShallowRenderer:_reset()
+    self._updater = createUpdater(self)
+end
+
+return ReactShallowRenderer
+    )";
+
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+local ReactShallowRenderer = require(game.A);
+    )"));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "untitled_segfault_number_13")
+{
+    ScopedFastFlag _{FFlag::LuauSolverV2, true};
+
+    fileResolver.source["game/A"] = R"(
+        -- minimized from roblox-requests/http/src/response.lua
+        local Response = {}
+        Response.__index = Response
+        function Response.new(content_type)
+            -- creates response object from original request and roblox http response
+            local self = setmetatable({}, Response)
+            self.content_type = content_type
+            return self
+        end
+
+        function Response:xml(ignore_content_type)
+            if ignore_content_type or self.content_type:find("+xml") or self.content_type:find("/xml") then
+            else
+            end
+        end
+
+        ---------------
+
+        return Response
+    )";
+
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+        local _ = require(game.A);
+    )"));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "spooky_blocked_type_laundered_by_bound_type")
+{
+    ScopedFastFlag _{FFlag::LuauSolverV2, true};
+
+    fileResolver.source["game/A"] = R"(
+        local Cache = {}
+
+        Cache.settings = {}
+
+        Cache.data = {}
+
+        function Cache.should_cache(url)
+            url = url:split("?")[1]
+
+            for key, _ in pairs(Cache.settings) do
+                if url:match('') then
+                    return key
+                end
+            end
+
+            return ""
+        end
+
+        function Cache.is_cached(url, req_id)
+            -- check local server cache first
+
+            local setting_key = Cache.should_cache(url)
+            local settings = Cache.settings[setting_key]
+
+            if not setting_key then
+                return false
+            end
+
+            if Cache.data[req_id] ~= nil then
+                return true
+            end
+
+            if Cache.settings[setting_key].cache_globally then
+                return false
+            else
+                return true
+            end
+        end
+
+        function Cache.get_expire(url)
+            local setting_key = Cache.should_cache(url)
+            return Cache.settings[setting_key].expires or math.huge
+        end
+
+        return Cache
+    )";
+
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+        local _ = require(game.A);
+    )"));
+}
+
 TEST_SUITE_END();

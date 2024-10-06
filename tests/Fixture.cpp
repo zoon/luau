@@ -3,6 +3,7 @@
 
 #include "Luau/AstQuery.h"
 #include "Luau/BuiltinDefinitions.h"
+#include "Luau/Common.h"
 #include "Luau/Constraint.h"
 #include "Luau/ModuleResolver.h"
 #include "Luau/NotNull.h"
@@ -15,6 +16,7 @@
 #include "doctest.h"
 
 #include <algorithm>
+#include <limits>
 #include <sstream>
 #include <string_view>
 #include <iostream>
@@ -25,6 +27,8 @@ static const char* mainModuleName = "MainModule";
 LUAU_FASTFLAG(LuauSolverV2);
 LUAU_FASTFLAG(DebugLuauFreezeArena);
 LUAU_FASTFLAG(DebugLuauLogSolverToJsonFile)
+LUAU_FASTFLAG(LuauDCRMagicFunctionTypeChecker);
+LUAU_DYNAMIC_FASTINT(LuauTypeSolverRelease)
 
 extern std::optional<unsigned> randomSeed; // tests/main.cpp
 
@@ -150,6 +154,12 @@ const Config& TestConfigResolver::getConfig(const ModuleName& name) const
 
 Fixture::Fixture(bool freeze, bool prepareAutocomplete)
     : sff_DebugLuauFreezeArena(FFlag::DebugLuauFreezeArena, freeze)
+    , sff_LuauDCRMagicFunctionTypeChecker(FFlag::LuauDCRMagicFunctionTypeChecker, true)
+    // The first value of LuauTypeSolverRelease was 643, so as long as this is
+    // some number greater than 900 (5 years worth of releases), all tests that
+    // run under the new solver will run against all of the changes guarded by
+    // this flag.
+    , sff_LuauTypeSolverRelease(DFInt::LuauTypeSolverRelease, std::numeric_limits<int>::max())
     , frontend(
           &fileResolver,
           &configResolver,
@@ -586,6 +596,72 @@ BuiltinsFixture::BuiltinsFixture(bool freeze, bool prepareAutocomplete)
 
     Luau::freeze(frontend.globals.globalTypes);
     Luau::freeze(frontend.globalsForAutocomplete.globalTypes);
+}
+
+static std::vector<std::string_view> parsePathExpr(const AstExpr& pathExpr)
+{
+    const AstExprIndexName* indexName = pathExpr.as<AstExprIndexName>();
+    if (!indexName)
+        return {};
+
+    std::vector<std::string_view> segments{indexName->index.value};
+
+    while (true)
+    {
+        if (AstExprIndexName* in = indexName->expr->as<AstExprIndexName>())
+        {
+            segments.push_back(in->index.value);
+            indexName = in;
+            continue;
+        }
+        else if (AstExprGlobal* indexNameAsGlobal = indexName->expr->as<AstExprGlobal>())
+        {
+            segments.push_back(indexNameAsGlobal->name.value);
+            break;
+        }
+        else if (AstExprLocal* indexNameAsLocal = indexName->expr->as<AstExprLocal>())
+        {
+            segments.push_back(indexNameAsLocal->local->name.value);
+            break;
+        }
+        else
+            return {};
+    }
+
+    std::reverse(segments.begin(), segments.end());
+    return segments;
+}
+
+std::optional<std::string> pathExprToModuleName(const ModuleName& currentModuleName, const std::vector<std::string_view>& segments)
+{
+    if (segments.empty())
+        return std::nullopt;
+
+    std::vector<std::string_view> result;
+
+    auto it = segments.begin();
+
+    if (*it == "script" && !currentModuleName.empty())
+    {
+        result = split(currentModuleName, '/');
+        ++it;
+    }
+
+    for (; it != segments.end(); ++it)
+    {
+        if (result.size() > 1 && *it == "Parent")
+            result.pop_back();
+        else
+            result.push_back(*it);
+    }
+
+    return join(result, "/");
+}
+
+std::optional<std::string> pathExprToModuleName(const ModuleName& currentModuleName, const AstExpr& pathExpr)
+{
+    std::vector<std::string_view> segments = parsePathExpr(pathExpr);
+    return pathExprToModuleName(currentModuleName, segments);
 }
 
 ModuleName fromString(std::string_view name)

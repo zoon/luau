@@ -34,8 +34,6 @@ void luaC_validate(lua_State* L);
 LUAU_FASTFLAG(DebugLuauAbortingChecks)
 LUAU_FASTINT(CodegenHeuristicsInstructionLimit)
 LUAU_FASTFLAG(LuauNativeAttribute)
-LUAU_FASTFLAG(LuauPreserveLudataRenaming)
-LUAU_FASTFLAG(LuauCodegenArmNumToVecFix)
 
 static lua_CompileOptions defaultOptions()
 {
@@ -133,7 +131,12 @@ static int lua_vector_cross(lua_State* L)
     const float* a = luaL_checkvector(L, 1);
     const float* b = luaL_checkvector(L, 2);
 
+#if LUA_VECTOR_SIZE == 4
+    lua_pushvector(L, a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0], 0.0f);
+#else
     lua_pushvector(L, a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]);
+#endif
+
     return 1;
 }
 
@@ -144,15 +147,25 @@ static int lua_vector_index(lua_State* L)
 
     if (strcmp(name, "Magnitude") == 0)
     {
+#if LUA_VECTOR_SIZE == 4
+        lua_pushnumber(L, sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3]));
+#else
         lua_pushnumber(L, sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]));
+#endif
         return 1;
     }
 
     if (strcmp(name, "Unit") == 0)
     {
+#if LUA_VECTOR_SIZE == 4
+        float invSqrt = 1.0f / sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3]);
+
+        lua_pushvector(L, v[0] * invSqrt, v[1] * invSqrt, v[2] * invSqrt, v[3] * invSqrt);
+#else
         float invSqrt = 1.0f / sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 
         lua_pushvector(L, v[0] * invSqrt, v[1] * invSqrt, v[2] * invSqrt);
+#endif
         return 1;
     }
 
@@ -810,8 +823,6 @@ TEST_CASE("Pack")
 
 TEST_CASE("Vector")
 {
-    ScopedFastFlag luauCodegenArmNumToVecFix{FFlag::LuauCodegenArmNumToVecFix, true};
-
     lua_CompileOptions copts = defaultOptions();
     Luau::CodeGen::CompilationOptions nativeOpts = defaultCodegenOptions();
 
@@ -2236,20 +2247,17 @@ TEST_CASE("LightuserdataApi")
 
     lua_pop(L, 1);
 
-    if (FFlag::LuauPreserveLudataRenaming)
-    {
-        // Still possible to rename the global lightuserdata name using a metatable
-        lua_pushlightuserdata(L, value);
-        CHECK(strcmp(luaL_typename(L, -1), "userdata") == 0);
+    // Still possible to rename the global lightuserdata name using a metatable
+    lua_pushlightuserdata(L, value);
+    CHECK(strcmp(luaL_typename(L, -1), "userdata") == 0);
 
-        lua_createtable(L, 0, 1);
-        lua_pushstring(L, "luserdata");
-        lua_setfield(L, -2, "__type");
-        lua_setmetatable(L, -2);
+    lua_createtable(L, 0, 1);
+    lua_pushstring(L, "luserdata");
+    lua_setfield(L, -2, "__type");
+    lua_setmetatable(L, -2);
 
-        CHECK(strcmp(luaL_typename(L, -1), "luserdata") == 0);
-        lua_pop(L, 1);
-    }
+    CHECK(strcmp(luaL_typename(L, -1), "luserdata") == 0);
+    lua_pop(L, 1);
 
     globalState.reset();
 }

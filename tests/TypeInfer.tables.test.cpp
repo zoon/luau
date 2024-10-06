@@ -20,7 +20,7 @@ LUAU_FASTFLAG(LuauInstantiateInSubtyping)
 LUAU_FASTFLAG(LuauFixIndexerSubtypingOrdering)
 LUAU_FASTFLAG(LuauAcceptIndexingTableUnionsIntersections)
 
-LUAU_DYNAMIC_FASTFLAG(LuauImproveNonFunctionCallError)
+LUAU_DYNAMIC_FASTINT(LuauTypeSolverRelease)
 
 TEST_SUITE_BEGIN("TableTests");
 
@@ -2406,7 +2406,7 @@ could not be converted into
         //
         // Second, nil <: unknown, so we consider that parameter to be optional.
         LUAU_REQUIRE_ERROR_COUNT(1, result);
-        CHECK("Type 'b1' could not be converted into 'a1'; at [read \"y\"], string is not exactly number" == toString(result.errors[0]));
+        CHECK("Type 'b1' could not be converted into 'a1'; at table()[read \"y\"], string is not exactly number" == toString(result.errors[0]));
     }
     else if (FFlag::LuauInstantiateInSubtyping)
     {
@@ -2582,10 +2582,7 @@ b()
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
 
-    if (DFFlag::LuauImproveNonFunctionCallError)
-        CHECK_EQ(toString(result.errors[0]), R"(Cannot call a value of type t1 where t1 = { @metatable { __call: t1 }, {  } })");
-    else
-        CHECK_EQ(toString(result.errors[0]), R"(Cannot call non-function t1 where t1 = { @metatable { __call: t1 }, {  } })");
+    CHECK_EQ(toString(result.errors[0]), R"(Cannot call a value of type t1 where t1 = { @metatable { __call: t1 }, {  } })");
 }
 
 TEST_CASE_FIXTURE(Fixture, "table_subtyping_shouldn't_add_optional_properties_to_sealed_tables")
@@ -2653,12 +2650,15 @@ local y = #x
 
 TEST_CASE_FIXTURE(Fixture, "length_operator_union_errors")
 {
+    ScopedFastFlag _{FFlag::LuauSolverV2, true};
+
     CheckResult result = check(R"(
 local x: {number} | number | string
 local y = #x
     )");
 
-    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    // CLI-119936: This shouldn't double error but does under the new solver.
+    LUAU_REQUIRE_ERROR_COUNT(2, result);
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "dont_hang_when_trying_to_look_up_in_cyclic_metatable_index")
@@ -3263,10 +3263,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "table_call_metamethod_must_be_callable")
 
     if (FFlag::LuauSolverV2)
     {
-        if (DFFlag::LuauImproveNonFunctionCallError)
-            CHECK("Cannot call a value of type a" == toString(result.errors[0]));
-        else
-            CHECK("Cannot call non-function { @metatable { __call: number }, {  } }" == toString(result.errors[0]));
+        CHECK("Cannot call a value of type a" == toString(result.errors[0]));
     }
     else
     {
@@ -3274,7 +3271,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "table_call_metamethod_must_be_callable")
             Location{{5, 20}, {5, 21}},
             CannotCallNonFunction{builtinTypes->numberType},
         };
-
         CHECK(result.errors[0] == e);
     }
 }
@@ -4830,6 +4826,44 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "indexing_branching_table2")
         CHECK("unknown | unknown" == toString(requireType("test2")));
     else
         CHECK("any" == toString(requireType("test2")));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "length_of_array_is_number")
+{
+    CheckResult result = check(R"(
+        local function TestFunc(ranges: {number}): number
+            if true then
+                ranges = {} :: {number}
+            end
+            local numRanges: number = #ranges
+            return numRanges
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "subtyping_with_a_metatable_table_path")
+{
+    // Builtin functions have to be setup for the new solver
+    if (!FFlag::LuauSolverV2)
+        return;
+
+    CheckResult result = check(R"(
+        type self = {} & {}
+        type Class = typeof(setmetatable())
+        local function _(): Class
+            return setmetatable({}::self, {})
+        end
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    CHECK_EQ(
+        "Type pack '{ @metatable {  }, {  } & {  } }' could not be converted into 'Class'; at [0].metatable(), {  } is not a subtype of nil\n"
+        "\ttype { @metatable {  }, {  } & {  } }[0].table()[0] ({  }) is not a subtype of Class[0].table() (nil)\n"
+        "\ttype { @metatable {  }, {  } & {  } }[0].table()[1] ({  }) is not a subtype of Class[0].table() (nil)",
+        toString(result.errors[0])
+    );
 }
 
 TEST_SUITE_END();

@@ -7,6 +7,7 @@
 
 #include "Fixture.h"
 
+#include "ScopedFlags.h"
 #include "doctest.h"
 
 LUAU_FASTFLAG(LuauInstantiateInSubtyping);
@@ -1124,7 +1125,11 @@ TEST_CASE_FIXTURE(Fixture, "instantiate_generic_function_in_assignments")
     TypeMismatch* tm = get<TypeMismatch>(result.errors[0]);
     REQUIRE(tm);
     CHECK_EQ("((number) -> number, string) -> number", toString(tm->wantedType));
-    if (FFlag::LuauInstantiateInSubtyping)
+    // The new solver does not attempt to instantiate generics here, so if
+    // either the instantiate in subtyping flag _or_ the new solver flags
+    // are set, assert that we're getting back the original generic
+    // function definition.
+    if (FFlag::LuauInstantiateInSubtyping || FFlag::LuauSolverV2)
         CHECK_EQ("<a, b...>((a) -> (b...), a) -> (b...)", toString(tm->givenType));
     else
         CHECK_EQ("((number) -> number, number) -> number", toString(tm->givenType));
@@ -1147,7 +1152,11 @@ TEST_CASE_FIXTURE(Fixture, "instantiate_generic_function_in_assignments2")
     TypeMismatch* tm = get<TypeMismatch>(result.errors[0]);
     REQUIRE(tm);
     CHECK_EQ("(string, string) -> number", toString(tm->wantedType));
-    if (FFlag::LuauInstantiateInSubtyping)
+    // The new solver does not attempt to instantiate generics here, so if
+    // either the instantiate in subtyping flag _or_ the new solver flags
+    // are set, assert that we're getting back the original generic
+    // function definition.
+    if (FFlag::LuauInstantiateInSubtyping || FFlag::LuauSolverV2)
         CHECK_EQ("<a, b...>((a) -> (b...), a) -> (b...)", toString(tm->givenType));
     else
         CHECK_EQ("((string) -> number, string) -> number", toString(*tm->givenType));
@@ -1419,10 +1428,19 @@ TEST_CASE_FIXTURE(Fixture, "apply_type_function_nested_generics3")
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
+TEST_CASE_FIXTURE(Fixture, "quantify_functions_with_no_generics")
+{
+    CheckResult result = check(R"(
+        function foo(f, x)
+            return f(x)
+        end
+    )");
+
+    CHECK("<a, b...>((a) -> (b...), a) -> (b...)" == toString(requireType("foo")));
+}
+
 TEST_CASE_FIXTURE(Fixture, "quantify_functions_even_if_they_have_an_explicit_generic")
 {
-    ScopedFastFlag sff{FFlag::LuauSolverV2, false};
-
     CheckResult result = check(R"(
         function foo<X>(f, x: X)
             return f(x)
@@ -1430,6 +1448,17 @@ TEST_CASE_FIXTURE(Fixture, "quantify_functions_even_if_they_have_an_explicit_gen
     )");
 
     CHECK("<X, a...>((X) -> (a...), X) -> (a...)" == toString(requireType("foo")));
+}
+
+TEST_CASE_FIXTURE(Fixture, "no_extra_quantification_for_generic_functions")
+{
+    CheckResult result = check(R"(
+        function foo<X, Y>(f : (X) -> Y, x: X)
+            return f(x)
+        end
+    )");
+
+    CHECK("<X, Y>((X) -> Y, X) -> Y" == toString(requireType("foo")));
 }
 
 TEST_CASE_FIXTURE(Fixture, "do_not_always_instantiate_generic_intersection_types")
@@ -1535,6 +1564,19 @@ TEST_CASE_FIXTURE(Fixture, "missing_generic_type_parameter")
     REQUIRE(get<UnknownSymbol>(result.errors[1]));
 }
 
+TEST_CASE_FIXTURE(Fixture, "generic_implicit_explicit_name_clash")
+{
+    ScopedFastFlag _{FFlag::LuauSolverV2, true};
+
+    auto result = check(R"(
+        function apply<a>(func, argument: a)
+            return func(argument)
+        end
+    )");
+
+    CHECK("<a, b...>((a) -> (b...), a) -> (b...)" == toString(requireType("apply")));
+}
+
 TEST_CASE_FIXTURE(BuiltinsFixture, "generic_type_functions_work_in_subtyping")
 {
     ScopedFastFlag sff{FFlag::LuauSolverV2, false};
@@ -1548,6 +1590,33 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "generic_type_functions_work_in_subtyping")
         local function six(): number
             return addOne(5)
         end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "generic_type_subtyping_nested_bounds_with_new_mappings")
+{
+    // Test shows how going over mapped generics in a subtyping check can generate more mapped generics when making a subtyping check between bounds.
+    // It has previously caused iterator invalidation in the new solver, but this specific test doesn't trigger a UAF, only shows an example.
+    if (!FFlag::LuauSolverV2)
+        return;
+
+    CheckResult result = check(R"(
+type Dispatch<A> = (A) -> ()
+type BasicStateAction<S> = ((S) -> S) | S
+
+function updateReducer<S, I, A>(reducer: (S, A) -> S, initialArg: I, init: ((I) -> S)?): (S, Dispatch<A>)
+    return 1 :: any
+end
+
+function basicStateReducer<S>(state: S, action: BasicStateAction<S>): S
+    return action
+end
+
+function updateState<S>(initialState: (() -> S) | S): (S, Dispatch<BasicStateAction<S>>)
+    return updateReducer(basicStateReducer, initialState)
+end
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);

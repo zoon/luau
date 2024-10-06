@@ -85,6 +85,7 @@ target_link_libraries(Luau.Config PUBLIC Luau.Ast)
 target_compile_features(Luau.Analysis PUBLIC cxx_std_17)
 target_include_directories(Luau.Analysis PUBLIC Analysis/include)
 target_link_libraries(Luau.Analysis PUBLIC Luau.Ast Luau.EqSat Luau.Config)
+target_link_libraries(Luau.Analysis PRIVATE Luau.Compiler Luau.VM)
 
 target_compile_features(Luau.EqSat PUBLIC cxx_std_17)
 target_include_directories(Luau.EqSat PUBLIC EqSat/include)
@@ -111,6 +112,7 @@ if(MSVC)
     list(APPEND LUAU_OPTIONS "/we4388") # Also signed/unsigned mismatch
 else()
     list(APPEND LUAU_OPTIONS -Wall) # All warnings
+    list(APPEND LUAU_OPTIONS -Wimplicit-fallthrough)
     list(APPEND LUAU_OPTIONS -Wsign-compare) # This looks to be included in -Wall for GCC but not clang
 endif()
 
@@ -275,7 +277,7 @@ foreach(LIB Luau.Ast Luau.Compiler Luau.Config Luau.Analysis Luau.EqSat Luau.Cod
         if(LIB MATCHES "CodeGen|VM" AND DEPENDS MATCHES "Ast|Analysis|Config|Compiler")
             message(FATAL_ERROR ${LIB} " is a runtime component but it depends on one of the offline components")
         endif()
-        if(LIB MATCHES "Ast|Analysis|EqSat|Compiler" AND DEPENDS MATCHES "CodeGen|VM")
+        if(LIB MATCHES "Ast|EqSat|Compiler" AND DEPENDS MATCHES "CodeGen|VM")
             message(FATAL_ERROR ${LIB} " is an offline component but it depends on one of the runtime components")
         endif()
         if(LIB MATCHES "Ast|Compiler" AND DEPENDS MATCHES "Analysis|Config")

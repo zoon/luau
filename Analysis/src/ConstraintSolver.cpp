@@ -27,10 +27,14 @@
 #include <algorithm>
 #include <utility>
 
-LUAU_FASTFLAGVARIABLE(DebugLuauLogSolver, false);
+LUAU_FASTFLAGVARIABLE(DebugLuauLogSolver, false)
 LUAU_FASTFLAGVARIABLE(DebugLuauLogSolverIncludeDependencies, false)
-LUAU_FASTFLAGVARIABLE(DebugLuauLogBindings, false);
-LUAU_FASTINTVARIABLE(LuauSolverRecursionLimit, 500);
+LUAU_FASTFLAGVARIABLE(DebugLuauLogBindings, false)
+LUAU_FASTINTVARIABLE(LuauSolverRecursionLimit, 500)
+
+// The default value here is 643 because the first release in which this was implemented is 644,
+// and actively we want new changes to be off by default until they're enabled consciously.
+LUAU_DYNAMIC_FASTINTVARIABLE(LuauTypeSolverRelease, 643)
 
 namespace Luau
 {
@@ -317,6 +321,7 @@ struct InstantiationQueuer : TypeOnceVisitor
 
 ConstraintSolver::ConstraintSolver(
     NotNull<Normalizer> normalizer,
+    NotNull<TypeFunctionRuntime> typeFunctionRuntime,
     NotNull<Scope> rootScope,
     std::vector<NotNull<Constraint>> constraints,
     ModuleName moduleName,
@@ -328,11 +333,12 @@ ConstraintSolver::ConstraintSolver(
     : arena(normalizer->arena)
     , builtinTypes(normalizer->builtinTypes)
     , normalizer(normalizer)
+    , typeFunctionRuntime(typeFunctionRuntime)
     , constraints(std::move(constraints))
     , rootScope(rootScope)
     , currentModuleName(std::move(moduleName))
     , moduleResolver(moduleResolver)
-    , requireCycles(requireCycles)
+    , requireCycles(std::move(requireCycles))
     , logger(logger)
     , limits(std::move(limits))
 {
@@ -340,7 +346,7 @@ ConstraintSolver::ConstraintSolver(
 
     for (NotNull<Constraint> c : this->constraints)
     {
-        unsolvedConstraints.push_back(c);
+        unsolvedConstraints.emplace_back(c);
 
         // initialize the reference counts for the free types in this constraint.
         for (auto ty : c->getMaybeMutatedFreeTypes())
@@ -909,9 +915,19 @@ bool ConstraintSolver::tryDispatch(const TypeAliasExpansionConstraint& c, NotNul
 
     auto bindResult = [this, &c, constraint](TypeId result)
     {
-        LUAU_ASSERT(get<PendingExpansionType>(c.target));
-        shiftReferences(c.target, result);
-        bind(constraint, c.target, result);
+        if (DFInt::LuauTypeSolverRelease >= 646)
+        {
+            auto cTarget = follow(c.target);
+            LUAU_ASSERT(get<PendingExpansionType>(cTarget));
+            shiftReferences(cTarget, result);
+            bind(constraint, cTarget, result);
+        }
+        else
+        {
+            LUAU_ASSERT(get<PendingExpansionType>(c.target));
+            shiftReferences(c.target, result);
+            bind(constraint, c.target, result);
+        }
     };
 
     std::optional<TypeFun> tf = (petv->prefix) ? constraint->scope->lookupImportedType(petv->prefix->value, petv->name.value)
@@ -939,7 +955,7 @@ bool ConstraintSolver::tryDispatch(const TypeAliasExpansionConstraint& c, NotNul
     // Due to how pending expansion types and TypeFun's are created
     // If this check passes, we have created a cyclic / corecursive type alias
     // of size 0
-    TypeId lhs = c.target;
+    TypeId lhs = DFInt::LuauTypeSolverRelease >= 646 ? follow(c.target) : c.target;
     TypeId rhs = tf->type;
     if (occursCheck(lhs, rhs))
     {
@@ -1236,7 +1252,14 @@ bool ConstraintSolver::tryDispatch(const FunctionCallConstraint& c, NotNull<cons
     }
 
     OverloadResolver resolver{
-        builtinTypes, NotNull{arena}, normalizer, constraint->scope, NotNull{&iceReporter}, NotNull{&limits}, constraint->location
+        builtinTypes,
+        NotNull{arena},
+        normalizer,
+        typeFunctionRuntime,
+        constraint->scope,
+        NotNull{&iceReporter},
+        NotNull{&limits},
+        constraint->location
     };
     auto [status, overload] = resolver.selectOverload(fn, argsPack);
     TypeId overloadToUse = fn;
@@ -1266,7 +1289,7 @@ bool ConstraintSolver::tryDispatch(const FunctionCallConstraint& c, NotNull<cons
     for (const auto& [expanded, additions] : u2.expandedFreeTypes)
     {
         for (TypeId addition : additions)
-            upperBoundContributors[expanded].push_back(std::make_pair(constraint->location, addition));
+            upperBoundContributors[expanded].emplace_back(constraint->location, addition);
     }
 
     if (occursCheckPassed && c.callSite)
@@ -1433,8 +1456,17 @@ bool ConstraintSolver::tryDispatch(const PrimitiveTypeConstraint& c, NotNull<con
     else if (expectedType && maybeSingleton(*expectedType))
         bindTo = freeType->lowerBound;
 
-    shiftReferences(c.freeType, bindTo);
-    bind(constraint, c.freeType, bindTo);
+    if (DFInt::LuauTypeSolverRelease >= 645)
+    {
+        auto ty = follow(c.freeType);
+        shiftReferences(ty, bindTo);
+        bind(constraint, ty, bindTo);
+    }
+    else
+    {
+        shiftReferences(c.freeType, bindTo);
+        bind(constraint, c.freeType, bindTo);
+    }
 
     return true;
 }
@@ -2599,7 +2631,7 @@ bool ConstraintSolver::unify(NotNull<const Constraint> constraint, TID subTy, TI
         for (const auto& [expanded, additions] : u2.expandedFreeTypes)
         {
             for (TypeId addition : additions)
-                upperBoundContributors[expanded].push_back(std::make_pair(constraint->location, addition));
+                upperBoundContributors[expanded].emplace_back(constraint->location, addition);
         }
     }
     else
@@ -2816,7 +2848,7 @@ void ConstraintSolver::reproduceConstraints(NotNull<Scope> scope, const Location
     }
 }
 
-bool ConstraintSolver::isBlocked(TypeId ty)
+bool ConstraintSolver::isBlocked(TypeId ty) const
 {
     ty = follow(ty);
 
@@ -2826,7 +2858,7 @@ bool ConstraintSolver::isBlocked(TypeId ty)
     return nullptr != get<BlockedType>(ty) || nullptr != get<PendingExpansionType>(ty);
 }
 
-bool ConstraintSolver::isBlocked(TypePackId tp)
+bool ConstraintSolver::isBlocked(TypePackId tp) const
 {
     tp = follow(tp);
 
@@ -2836,7 +2868,7 @@ bool ConstraintSolver::isBlocked(TypePackId tp)
     return nullptr != get<BlockedTypePack>(tp);
 }
 
-bool ConstraintSolver::isBlocked(NotNull<const Constraint> constraint)
+bool ConstraintSolver::isBlocked(NotNull<const Constraint> constraint) const
 {
     auto blockedIt = blockedConstraints.find(constraint);
     return blockedIt != blockedConstraints.end() && blockedIt->second > 0;
@@ -2847,7 +2879,7 @@ NotNull<Constraint> ConstraintSolver::pushConstraint(NotNull<Scope> scope, const
     std::unique_ptr<Constraint> c = std::make_unique<Constraint>(scope, location, std::move(cv));
     NotNull<Constraint> borrow = NotNull(c.get());
     solverConstraints.push_back(std::move(c));
-    unsolvedConstraints.push_back(borrow);
+    unsolvedConstraints.emplace_back(borrow);
 
     return borrow;
 }
@@ -2993,12 +3025,12 @@ TypePackId ConstraintSolver::anyifyModuleReturnTypePackGenerics(TypePackId tp)
     return arena->addTypePack(resultTypes, resultTail);
 }
 
-LUAU_NOINLINE void ConstraintSolver::throwTimeLimitError()
+LUAU_NOINLINE void ConstraintSolver::throwTimeLimitError() const
 {
     throw TimeLimitError(currentModuleName);
 }
 
-LUAU_NOINLINE void ConstraintSolver::throwUserCancelError()
+LUAU_NOINLINE void ConstraintSolver::throwUserCancelError() const
 {
     throw UserCancelError(currentModuleName);
 }
