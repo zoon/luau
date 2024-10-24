@@ -24,8 +24,9 @@ RequireResolver::RequireResolver(lua_State* L, std::string path)
 
     std::replace(pathToResolve.begin(), pathToResolve.end(), '\\', '/');
 
-    if (!isPrefixValid())
-        luaL_argerrorL(L, 1, "require path must start with a valid prefix: ./, ../, or @");
+    // NOTE: zoon: This is a hack to make the require work with the CLI.
+    // if (!isPrefixValid())
+    //     luaL_argerrorL(L, 1, "require path must start with a valid prefix: ./, ../, or @");
 
     substituteAliasIfPresent(pathToResolve);
 }
